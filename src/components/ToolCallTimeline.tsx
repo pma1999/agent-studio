@@ -34,7 +34,7 @@ function tryParseJson(value: string): unknown | null {
 function prettifyToolName(name: string): string {
   if (!name) return 'tool';
   const cleaned = name.startsWith('mcp_')
-    ? name.split('_').slice(3).join('_') || name
+    ? name.split('_').slice(2).join('_') || name
     : name;
   return cleaned.replace(/_/g, ' ');
 }
