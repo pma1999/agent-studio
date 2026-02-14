@@ -76,27 +76,25 @@ Si **no** añades volumen ni `DATABASE_PATH`, la BD se crea en disco efímero y 
 
 Si ya tienes un `agent-studio.db` en tu máquina (con tus agentes, conversaciones, etc.) y quieres que Railway use **esa misma base de datos**:
 
-1. **Railway CLI**: instala y vincula el proyecto.
-   - Instalar: `npm i -g @railway/cli` (o `brew install railway` en macOS).
-   - En la raíz del repo: `railway link` y elige tu proyecto y el service del backend.
+1. **Migrar la BD en local** (asigna todos los datos al usuario admin para que al subir veas tus agentes):
+   - En la raíz del proyecto:
+     ```bash
+     npm run build:server
+     npm run db:migrate-local
+     ```
+   - Esto ejecuta las migraciones sobre tu `agent-studio.db` local: crea o actualiza el usuario `pablomiguelargudo@gmail.com` y le asigna todos los agentes, conversaciones y ajustes que estaban en el usuario por defecto. El archivo `agent-studio.db` queda listo para subir.
 
-2. **Volume y variable**: asegúrate de tener el Volume en `/data` y `DATABASE_PATH=/data/agent-studio.db` (pasos de la sección anterior).
+2. **Volume y variable en Railway**: asegúrate de tener el Volume en `/data` y `DATABASE_PATH=/data/agent-studio.db` (pasos de la sección anterior).
 
-3. **Subir tu archivo** desde tu máquina (el archivo está en `.gitignore`, no se sube con Git). En la raíz del proyecto, donde tengas tu `agent-studio.db` (o indica la ruta):
+3. **Railway CLI** (si no lo tienes): `npm i -g @railway/cli`, luego en la raíz del repo: `npx @railway/cli link` y elige proyecto y service del backend.
 
-   ```bash
-   cat agent-studio.db | railway run npm run db:restore
+4. **Subir la BD** desde tu máquina (PowerShell, con el proyecto enlazado):
+   ```powershell
+   cmd /c "type agent-studio.db | npx @railway/cli run npm run db:restore"
    ```
+   Si la BD está en otra ruta (p. ej. `dist\server\agent-studio.db`), ajusta la ruta en `type ...`.
 
-   Si la BD está en otra ruta, por ejemplo `dist/server/agent-studio.db`:
-
-   ```bash
-   cat dist/server/agent-studio.db | railway run npm run db:restore
-   ```
-
-   El script escribe en el volumen de Railway; al hacer el siguiente deploy o al arrancar el backend, usará esa BD.
-
-4. **Redeploy** el service en Railway (o espera al siguiente deploy). A partir de ahí, tu backend en producción usará la misma base de datos que subiste.
+5. **Redeploy** del service en Railway. A partir de ahí, el backend usará la BD que subiste y verás tus agentes al iniciar sesión.
 
 ---
 
