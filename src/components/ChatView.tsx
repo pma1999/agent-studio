@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Send, ArrowDown, StopCircle, MessageSquare, Bot, Brain, Globe, Zap, FileUp, Link, X } from 'lucide-react';
+import { Send, ArrowDown, StopCircle, MessageSquare, Bot, Brain, FileUp, Link, X } from 'lucide-react';
 import { useStore } from '../stores/store';
 import { useIsMobile } from '../utils/breakpoints';
 import { useChat } from '../hooks/useChat';
@@ -9,7 +9,7 @@ import { MessageBubble } from './MessageBubble';
 import { EmptyState } from './EmptyState';
 import { Button } from './ui/Button';
 import { ConversationTokenSummary, StreamingTokenCounter } from './TokenCounter';
-import type { ReasoningEffort, ReasoningConfig, PDFEngine, ChatAttachmentInput } from '../types';
+import type { ReasoningEffort, ReasoningConfig, PDFEngine, ChatAttachmentInput, ToolExecution, ToolSource } from '../types';
 
 const MAX_PDF_ATTACHMENTS = 5;
 const MAX_PDF_MB = 20;
@@ -37,6 +37,31 @@ const EFFORT_OPTIONS: { value: ReasoningEffort; label: string; short: string }[]
   { value: 'xhigh', label: 'Maximum', short: 'Max' },
 ];
 
+const BUILTIN_TOOL_NAMES = new Set(['web_search', 'get_current_time']);
+
+function inferToolSource(name: string): ToolSource {
+  if (name.startsWith('mcp_')) return 'mcp';
+  if (BUILTIN_TOOL_NAMES.has(name)) return 'builtin';
+  return 'http';
+}
+
+function inferToolResultOk(result?: string): boolean | undefined {
+  if (result === undefined) return undefined;
+  const trimmed = result.trim();
+  if (!trimmed) return true;
+  if (trimmed.startsWith('[Tool execution error]')) return false;
+  try {
+    const parsed = JSON.parse(trimmed) as { error?: unknown };
+    if (parsed && typeof parsed === 'object' && 'error' in parsed) {
+      const err = parsed.error;
+      return !(err !== undefined && err !== null && String(err).trim().length > 0);
+    }
+  } catch {
+    // Non-JSON outputs are valid results.
+  }
+  return true;
+}
+
 export function ChatView() {
   const {
     messages,
@@ -52,7 +77,7 @@ export function ChatView() {
     reasoningOverride,
     setReasoningOverride,
     streamStartTime,
-    streamingToolCall,
+    streamingToolEvents,
   } = useStore();
   const { sendMessage, cancelStream, startNewChat } = useChat();
   const [inputValue, setInputValue] = useState('');
@@ -66,7 +91,9 @@ export function ChatView() {
   const reasoningPopoverRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { containerRef, scrollToBottom, showScrollButton, handleScroll } = useAutoScroll(
-    isStreaming ? streamingContent : messages.length
+    isStreaming
+      ? `${streamingContent.length}:${reasoningContent.length}:${streamingToolEvents.length}`
+      : messages.length
   );
 
   const activeConversation = conversations.find((c) => c.id === activeConversationId);
@@ -259,6 +286,38 @@ export function ChatView() {
   const displayMessages = messages.filter((m) => m.role !== 'tool');
   const lastMsg = displayMessages[displayMessages.length - 1];
   const isLastMsgStreamingPlaceholder = lastMsg && lastMsg.role === 'assistant' && lastMsg.id.startsWith('temp-');
+  const toolResultsByCallId = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const msg of messages) {
+      if (msg.role === 'tool' && msg.tool_call_id) {
+        map.set(msg.tool_call_id, msg.content || '');
+      }
+    }
+    return map;
+  }, [messages]);
+
+  const toolExecutionsByMessageId = useMemo(() => {
+    const map = new Map<string, ToolExecution[]>();
+    for (const msg of messages) {
+      if (msg.role !== 'assistant' || !msg.tool_calls || msg.tool_calls.length === 0) continue;
+      const executions: ToolExecution[] = msg.tool_calls.map((tc) => {
+        const toolName = tc.function?.name || tc.id;
+        const result = toolResultsByCallId.get(tc.id);
+        const ok = inferToolResultOk(result);
+        return {
+          id: tc.id,
+          name: toolName,
+          arguments: tc.function?.arguments || '{}',
+          status: result === undefined ? 'running' : ok === false ? 'error' : 'done',
+          result,
+          ok,
+          source: inferToolSource(toolName),
+        };
+      });
+      map.set(msg.id, executions);
+    }
+    return map;
+  }, [messages, toolResultsByCallId]);
 
   return (
     <div style={{
@@ -386,6 +445,9 @@ export function ChatView() {
           ) : (
             displayMessages.map((msg, i) => {
               const isStreamingMsg = isLastMsgStreamingPlaceholder && i === displayMessages.length - 1;
+              const timelineCalls = isStreamingMsg
+                ? streamingToolEvents
+                : toolExecutionsByMessageId.get(msg.id);
               return (
                 <MessageBubble
                   key={msg.id}
@@ -394,6 +456,8 @@ export function ChatView() {
                   streamingContent={isStreamingMsg ? streamingContent : undefined}
                   streamingReasoning={isStreamingMsg ? reasoningContent : undefined}
                   agentEmoji={agent?.emoji}
+                  toolExecutions={timelineCalls}
+                  toolActivityLive={isStreamingMsg && timelineCalls !== undefined && timelineCalls.length > 0}
                 />
               );
             })
@@ -432,30 +496,6 @@ export function ChatView() {
           </motion.button>
         )}
       </AnimatePresence>
-
-      {/* Tool call indicator (during streaming) */}
-      {isStreaming && streamingToolCall && (
-        <div style={{
-          padding: '8px var(--content-padding-x)',
-          borderTop: '1px solid var(--border)',
-          background: 'rgba(139, 92, 246, 0.04)',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '8px',
-          fontSize: '0.8125rem',
-          color: 'var(--accent)',
-          fontFamily: 'var(--font-body)',
-        }}>
-          {streamingToolCall.name === 'web_search' ? (
-            <Globe size={14} />
-          ) : (
-            <Zap size={14} />
-          )}
-          <span>
-            {streamingToolCall.name === 'web_search' ? 'Searching the web…' : `Using ${streamingToolCall.name.replace(/_/g, ' ')}…`}
-          </span>
-        </div>
-      )}
 
       {/* Input Area */}
       <div style={{

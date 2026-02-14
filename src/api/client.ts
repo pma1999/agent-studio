@@ -1,4 +1,21 @@
-import type { Agent, AgentFormData, Conversation, Message, OpenRouterModel, UsageStats, OpenRouterCredits, Annotation, ReasoningConfig, Tool, McpServer, McpTransport, McpServerConfig, ChatAttachmentInput, PDFEngine } from '../types';
+import type {
+  Agent,
+  AgentFormData,
+  Conversation,
+  Message,
+  OpenRouterModel,
+  UsageStats,
+  OpenRouterCredits,
+  Annotation,
+  ReasoningConfig,
+  Tool,
+  McpServer,
+  McpTransport,
+  McpServerConfig,
+  ChatAttachmentInput,
+  PDFEngine,
+  ToolSource,
+} from '../types';
 
 /** In production (Vercel), set VITE_API_URL to your Railway API URL (e.g. https://your-app.railway.app). No trailing slash. */
 const API_BASE = (import.meta.env.VITE_API_URL ?? '').replace(/\/$/, '') + '/api';
@@ -183,11 +200,15 @@ export interface StreamToolCallData {
   id: string;
   name: string;
   arguments: string;
+  source?: ToolSource;
 }
 export interface StreamToolResultData {
   id: string;
   name: string;
   ok: boolean;
+  result?: string;
+  duration_ms?: number;
+  source?: ToolSource;
 }
 
 // Chat (streaming) with AbortSignal support, reasoning callback, tool callbacks, PDF attachments, and rich done data

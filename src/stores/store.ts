@@ -1,5 +1,15 @@
 import { create } from 'zustand';
-import type { Agent, Conversation, Message, View, OpenRouterCredits, UsageStats, ReasoningConfig } from '../types';
+import type {
+  Agent,
+  Conversation,
+  Message,
+  View,
+  OpenRouterCredits,
+  UsageStats,
+  ReasoningConfig,
+  ToolExecution,
+  ToolSource,
+} from '../types';
 import type { AuthUser } from '../api/client';
 import { agentsApi, conversationsApi, messagesApi, settingsApi, creditsApi, usageApi, authApi } from '../api/client';
 
@@ -61,9 +71,12 @@ interface AppState {
   reasoningOverride: ReasoningConfig | null;
   setReasoningOverride: (config: ReasoningConfig | null) => void;
 
-  // Current tool call during streaming (e.g. { name: 'web_search' })
-  streamingToolCall: { name: string } | null;
-  setStreamingToolCall: (v: { name: string } | null) => void;
+  // Live tool execution timeline for the currently streaming assistant message
+  streamingToolEvents: ToolExecution[];
+  setStreamingToolEvents: (events: ToolExecution[]) => void;
+  upsertStreamingToolCall: (data: { id: string; name: string; arguments: string; source?: ToolSource }) => void;
+  completeStreamingToolCall: (data: { id: string; name: string; ok: boolean; result?: string; duration_ms?: number; source?: ToolSource }) => void;
+  resetStreamingToolEvents: () => void;
 
   // Settings
   openRouterApiKey: string;
@@ -213,9 +226,71 @@ export const useStore = create<AppState>((set, get) => ({
   reasoningOverride: null,
   setReasoningOverride: (config) => set({ reasoningOverride: config }),
 
-  // Streaming tool call indicator
-  streamingToolCall: null,
-  setStreamingToolCall: (v) => set({ streamingToolCall: v }),
+  // Live streaming tool timeline
+  streamingToolEvents: [],
+  setStreamingToolEvents: (events) => set({ streamingToolEvents: events }),
+  upsertStreamingToolCall: (data) => set((state) => {
+    const idx = state.streamingToolEvents.findIndex((ev) => ev.id === data.id);
+    if (idx === -1) {
+      return {
+        streamingToolEvents: [
+          ...state.streamingToolEvents,
+          {
+            id: data.id,
+            name: data.name,
+            arguments: data.arguments || '{}',
+            status: 'running',
+            source: data.source || 'unknown',
+          },
+        ],
+      };
+    }
+
+    const next = [...state.streamingToolEvents];
+    const prev = next[idx];
+    next[idx] = {
+      ...prev,
+      name: data.name || prev.name,
+      arguments: data.arguments || prev.arguments,
+      status: 'running',
+      source: data.source || prev.source,
+    };
+    return { streamingToolEvents: next };
+  }),
+  completeStreamingToolCall: (data) => set((state) => {
+    const idx = state.streamingToolEvents.findIndex((ev) => ev.id === data.id);
+    if (idx === -1) {
+      return {
+        streamingToolEvents: [
+          ...state.streamingToolEvents,
+          {
+            id: data.id,
+            name: data.name,
+            arguments: '{}',
+            status: data.ok ? 'done' : 'error',
+            ok: data.ok,
+            result: data.result,
+            duration_ms: data.duration_ms,
+            source: data.source || 'unknown',
+          },
+        ],
+      };
+    }
+
+    const next = [...state.streamingToolEvents];
+    const prev = next[idx];
+    next[idx] = {
+      ...prev,
+      name: data.name || prev.name,
+      status: data.ok ? 'done' : 'error',
+      ok: data.ok,
+      result: data.result,
+      duration_ms: data.duration_ms,
+      source: data.source || prev.source,
+    };
+    return { streamingToolEvents: next };
+  }),
+  resetStreamingToolEvents: () => set({ streamingToolEvents: [] }),
 
   // Settings
   openRouterApiKey: '',

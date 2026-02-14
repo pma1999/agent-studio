@@ -672,6 +672,8 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
           const id = tc.id;
           const name = tc.function.name;
           const argsStr = tc.function.arguments || '{}';
+          const resolvedTool = resolvedTools.find((t) => t.name === name);
+          const source = resolvedTool?.type || 'unknown';
           let args: Record<string, unknown> = {};
           try {
             args = JSON.parse(argsStr);
@@ -679,18 +681,29 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
             args = {};
           }
 
-          res.write(`data: ${JSON.stringify({ tool_call: { id, name, arguments: argsStr } })}\n\n`);
+          res.write(`data: ${JSON.stringify({ tool_call: { id, name, arguments: argsStr, source } })}\n\n`);
 
+          const startedAt = Date.now();
           const result = await runTool(resolvedTools, name, args, mcpClients, userId);
-          res.write(`data: ${JSON.stringify({ tool_result: { id, name, ok: !result.startsWith('{"error"') } })}\n\n`);
+          const durationMs = Date.now() - startedAt;
+          res.write(`data: ${JSON.stringify({
+            tool_result: {
+              id,
+              name,
+              ok: !result.isError,
+              result: result.output,
+              duration_ms: durationMs,
+              source: result.source,
+            },
+          })}\n\n`);
 
-          messages.push({ role: 'tool', tool_call_id: id, content: result });
+          messages.push({ role: 'tool', tool_call_id: id, content: result.output });
 
           const toolMsgId = nanoid();
           db.prepare(`
             INSERT INTO messages (id, conversation_id, role, content, tool_call_id)
             VALUES (?, ?, 'tool', ?, ?)
-          `).run(toolMsgId, conversation_id, result, id);
+          `).run(toolMsgId, conversation_id, result.output, id);
         }
 
         iteration++;
