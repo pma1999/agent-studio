@@ -33,13 +33,13 @@ const toolExportSchema = z.object({
   id: z.string(),
   name: z.string(),
   description: z.string(),
-  parameters_schema: z.record(z.unknown()).or(z.object({
+  parameters_schema: z.record(z.string(), z.unknown()).or(z.object({
     type: z.literal('object'),
-    properties: z.record(z.unknown()).optional(),
+    properties: z.record(z.string(), z.unknown()).optional(),
     required: z.array(z.string()).optional(),
   })),
   type: z.enum(['builtin', 'http']),
-  config: z.record(z.unknown()).nullable().optional(),
+  config: z.record(z.string(), z.unknown()).nullable().optional(),
 });
 
 const mcpServerExportSchema = z.object({
