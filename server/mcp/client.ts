@@ -258,7 +258,7 @@ export async function listMcpTools(
     const parameters = inputSchemaToOpenAIParameters(schema as Record<string, unknown>);
 
     const desc = typeof tool.description === 'string' ? tool.description : (tool.description ?? '');
-    const title = typeof (tool as { title?: string }).title === 'string' ? (tool as { title: string }).title : '';
+    const title = typeof (tool as unknown as { title?: string }).title === 'string' ? (tool as unknown as { title: string }).title : '';
     const baseDescription =
       title && desc ? `${title}. ${desc}` : title ? title : desc || 'MCP tool';
 

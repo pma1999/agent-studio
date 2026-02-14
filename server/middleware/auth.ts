@@ -26,7 +26,7 @@ export function authMiddleware(req: AuthRequest, res: Response, next: NextFuncti
       const localId = ensureLocalUser();
       if (localId) row = { id: localId };
     }
-    req.userId = row?.id;
+    req.userId = row?.id ?? undefined;
     next();
     return;
   }
@@ -57,7 +57,7 @@ export function optionalAuth(req: AuthRequest, res: Response, next: NextFunction
       const localId = ensureLocalUser();
       if (localId) row = { id: localId };
     }
-    req.userId = row?.id;
+    req.userId = row?.id ?? undefined;
     next();
     return;
   }
