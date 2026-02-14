@@ -73,12 +73,21 @@ router.post('/', (req: AuthRequest, res: Response) => {
       if (!cfg.url || typeof cfg.url !== 'string' || !cfg.url.trim()) {
         return res.status(400).json({ error: 'config.url is required for URL transport' });
       }
+      if (cfg.headers !== undefined && (typeof cfg.headers !== 'object' || Array.isArray(cfg.headers) || cfg.headers === null)) {
+        return res.status(400).json({ error: 'config.headers must be an object of string key-value pairs' });
+      }
     } else {
       if (!cfg.command || typeof cfg.command !== 'string' || !cfg.command.trim()) {
         return res.status(400).json({ error: 'config.command is required for stdio transport' });
       }
       if (cfg.args !== undefined && !Array.isArray(cfg.args)) {
         return res.status(400).json({ error: 'config.args must be an array of strings' });
+      }
+      if (cfg.env !== undefined && (typeof cfg.env !== 'object' || Array.isArray(cfg.env) || cfg.env === null)) {
+        return res.status(400).json({ error: 'config.env must be an object of string key-value pairs' });
+      }
+      if (cfg.cwd !== undefined && typeof cfg.cwd !== 'string') {
+        return res.status(400).json({ error: 'config.cwd must be a string' });
       }
     }
 
@@ -129,12 +138,21 @@ router.put('/:id', (req: AuthRequest, res: Response) => {
         if (!cfg?.url || typeof cfg.url !== 'string' || !cfg.url.trim()) {
           return res.status(400).json({ error: 'config.url is required for URL transport' });
         }
+        if (cfg.headers !== undefined && (typeof cfg.headers !== 'object' || Array.isArray(cfg.headers) || cfg.headers === null)) {
+          return res.status(400).json({ error: 'config.headers must be an object of string key-value pairs' });
+        }
       } else {
         if (!cfg?.command || typeof cfg.command !== 'string' || !cfg.command.trim()) {
           return res.status(400).json({ error: 'config.command is required for stdio transport' });
         }
         if (cfg.args !== undefined && !Array.isArray(cfg.args)) {
           return res.status(400).json({ error: 'config.args must be an array of strings' });
+        }
+        if (cfg.env !== undefined && (typeof cfg.env !== 'object' || Array.isArray(cfg.env) || cfg.env === null)) {
+          return res.status(400).json({ error: 'config.env must be an object of string key-value pairs' });
+        }
+        if (cfg.cwd !== undefined && typeof cfg.cwd !== 'string') {
+          return res.status(400).json({ error: 'config.cwd must be a string' });
         }
       }
       configStr = JSON.stringify(cfg);
@@ -215,10 +233,29 @@ router.post('/:id/test', async (req: AuthRequest, res: Response) => {
     const connection = await createAndConnectMcpClient({ transport, config });
     try {
       const tools = await listMcpTools(connection.client, '');
+
+      // Gather server capabilities if available
+      let capabilities: { resources?: boolean; prompts?: boolean; tools?: boolean } | undefined;
+      try {
+        const caps = connection.client.getServerCapabilities();
+        if (caps) {
+          capabilities = {
+            resources: !!caps.resources,
+            prompts: !!caps.prompts,
+            tools: !!caps.tools,
+          };
+        }
+      } catch { /* capabilities not critical */ }
+
       await connection.close();
       res.json({
         ok: true,
-        tools: tools.map((t) => ({ name: t.name, description: t.openAIDef.function.description })),
+        tools: tools.map((t) => ({
+          name: t.name,
+          description: t.openAIDef.function.description,
+          parameters: t.openAIDef.function.parameters,
+        })),
+        capabilities,
       });
     } catch (err) {
       await connection.close();

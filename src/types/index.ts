@@ -41,11 +41,14 @@ export type McpTransport = 'url' | 'stdio';
 
 export interface McpConfigUrl {
   url: string;
+  headers?: Record<string, string>;
 }
 
 export interface McpConfigStdio {
   command: string;
   args?: string[];
+  env?: Record<string, string>;
+  cwd?: string;
 }
 
 export type McpServerConfig = McpConfigUrl | McpConfigStdio;

@@ -158,8 +158,24 @@ export async function resolveToolsForAgent(agentId: string, userId: string): Pro
       continue;
     }
 
+    // Connect with one retry on transient failures
+    let connection: McpConnection | null = null;
+    for (let attempt = 0; attempt <= 1; attempt++) {
+      try {
+        connection = await createAndConnectMcpClient({ transport, config });
+        break;
+      } catch (err) {
+        if (attempt < 1) {
+          console.warn(`[resolve] MCP connect attempt ${attempt + 1} failed for ${serverRow.name}, retrying in 2s...`);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        } else {
+          console.error(`[resolve] Failed to connect to MCP server ${serverRow.name} (${mcp_server_id}) after 2 attempts:`, err);
+        }
+      }
+    }
+    if (!connection) continue;
+
     try {
-      const connection = await createAndConnectMcpClient({ transport, config });
       mcpClients.set(mcp_server_id, connection);
 
       const namePrefix = `mcp_${mcp_server_id.slice(0, 8)}`;
@@ -175,7 +191,7 @@ export async function resolveToolsForAgent(agentId: string, userId: string): Pro
         });
       }
     } catch (err) {
-      console.error(`[resolve] Failed to connect to MCP server ${serverRow.name} (${mcp_server_id}):`, err);
+      console.error(`[resolve] Failed to list tools from MCP server ${serverRow.name} (${mcp_server_id}):`, err);
       // Do not fail the whole request; skip this MCP server
     }
   }
