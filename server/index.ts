@@ -19,6 +19,13 @@ import mcpServersRouter from './routes/mcpServers.js';
 const app = express();
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3001;
 
+// #region agent log
+const DEBUG_LOG = (payload: { location: string; message: string; data?: Record<string, unknown>; hypothesisId?: string; runId?: string }) => {
+  const body = { ...payload, timestamp: Date.now() };
+  fetch('http://127.0.0.1:7242/ingest/9c157064-d6b8-432a-a01b-6edcc79b3bd4', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).catch(() => {});
+};
+// #endregion
+
 // Trust proxy (Railway, Vercel, etc.) so rate limit and X-Forwarded-* work
 app.set('trust proxy', 1);
 
@@ -28,9 +35,18 @@ const allowedOrigins = corsOriginRaw
   .split(',')
   .map((o) => o.trim().replace(/\/$/, ''))
   .filter(Boolean);
+// #region agent log
+DEBUG_LOG({ location: 'server/index.ts:startup', message: 'CORS config', data: { corsOriginSet: corsOriginRaw.length > 0, allowedOrigins, allowedCount: allowedOrigins.length }, hypothesisId: 'H1' });
+console.log('[CORS-DEBUG] startup', JSON.stringify({ corsOriginSet: corsOriginRaw.length > 0, allowedOrigins, allowedCount: allowedOrigins.length }));
+// #endregion
 const corsOptions: cors.CorsOptions = {
   origin: allowedOrigins.length > 0
     ? (origin, cb) => {
+        // #region agent log
+        const allowed = !!(origin && allowedOrigins.includes(origin));
+        DEBUG_LOG({ location: 'server/index.ts:cors-callback', message: 'CORS origin check', data: { origin: origin ?? '(undefined)', allowed, allowedOrigins }, hypothesisId: 'H1,H4,H5' });
+        console.log('[CORS-DEBUG] origin check', JSON.stringify({ origin: origin ?? '(undefined)', allowed, allowedOrigins }));
+        // #endregion
         if (origin && allowedOrigins.includes(origin)) {
           cb(null, true);
         } else {
@@ -44,6 +60,13 @@ const corsOptions: cors.CorsOptions = {
   allowedHeaders: ['Content-Type', 'Authorization'],
 };
 app.use(cors(corsOptions));
+// #region agent log
+app.use((req, _res, next) => {
+  DEBUG_LOG({ location: 'server/index.ts:request', message: 'incoming request', data: { method: req.method, path: req.path, origin: req.headers.origin ?? '(none)' }, hypothesisId: 'H2,H3,H4' });
+  console.log('[CORS-DEBUG] request', JSON.stringify({ method: req.method, path: req.path, origin: req.headers.origin ?? '(none)' }));
+  next();
+});
+// #endregion
 
 // Rate limits
 const apiLimiter = rateLimit({
