@@ -111,8 +111,8 @@ app.get('/api/health', (_req, res) => {
 });
 
 migrate();
-const server = app.listen(PORT, () => {
-  console.log(`[server] Agent Studio server running on http://localhost:${PORT}`);
+const server = app.listen(PORT, '0.0.0.0', () => {
+  console.log(`[server] Agent Studio server running on http://0.0.0.0:${PORT}`);
 });
 server.on('error', (err: NodeJS.ErrnoException) => {
   if (err.code === 'EADDRINUSE') {
