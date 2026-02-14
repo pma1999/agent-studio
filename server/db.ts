@@ -243,12 +243,11 @@ export function migrate() {
     db.exec("ALTER TABLE messages ADD COLUMN attachments TEXT DEFAULT NULL");
   }
 
-  // Seed builtin tools if none exist
+  // Seed builtin tools if none exist (each call to await_nanoid() returns a new id)
   const toolsCount = db.prepare('SELECT COUNT(*) as cnt FROM tools').get() as { cnt: number };
   if (toolsCount.cnt === 0) {
-    const { nanoid } = await_nanoid();
-    const webSearchId = nanoid();
-    const getTimeId = nanoid();
+    const webSearchId = await_nanoid().nanoid();
+    const getTimeId = await_nanoid().nanoid();
     db.prepare(`
       INSERT INTO tools (id, name, description, parameters_schema, type, config)
       VALUES (?, 'web_search', ?, ?, 'builtin', ?)
