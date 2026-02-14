@@ -141,7 +141,8 @@ export interface McpServerCreatePayload {
 
 export interface McpServerTestResult {
   ok: boolean;
-  tools?: { name: string; description: string }[];
+  tools?: { name: string; description: string; parameters?: Record<string, unknown> }[];
+  capabilities?: { resources?: boolean; prompts?: boolean; tools?: boolean };
   error?: string;
 }
 

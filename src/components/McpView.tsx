@@ -8,16 +8,51 @@ import { Input } from './ui/Input';
 import { ExportImportButtons } from './ExportImportButtons';
 import { useIsMobile } from '../utils/breakpoints';
 
+const labelStyle: React.CSSProperties = {
+  display: 'block',
+  fontSize: '0.75rem',
+  fontWeight: 600,
+  color: 'var(--text-secondary)',
+  marginBottom: '4px',
+};
+
+const textareaStyle: React.CSSProperties = {
+  width: '100%',
+  padding: '10px 12px',
+  borderRadius: 'var(--radius-sm)',
+  border: '1px solid var(--border)',
+  background: 'var(--bg-elevated)',
+  color: 'var(--text-primary)',
+  fontSize: '0.8rem',
+  fontFamily: 'var(--font-mono, monospace)',
+  resize: 'vertical',
+  boxSizing: 'border-box',
+};
+
 function configSummary(server: McpServer): string {
   const c = server.config;
   if (!c) return '—';
-  if ('url' in c && c.url) return c.url;
+  if ('url' in c && c.url) {
+    const headerCount = (c as McpConfigUrl).headers
+      ? Object.keys((c as McpConfigUrl).headers!).length
+      : 0;
+    return c.url + (headerCount ? ` (+${headerCount} header${headerCount > 1 ? 's' : ''})` : '');
+  }
   if ('command' in c && c.command) {
-    const args = (c as McpConfigStdio).args;
-    const argStr = Array.isArray(args) && args.length ? ` ${args.join(' ')}` : '';
-    return `${c.command}${argStr}`;
+    const cfg = c as McpConfigStdio;
+    const argStr = Array.isArray(cfg.args) && cfg.args.length ? ` ${cfg.args.join(' ')}` : '';
+    const envCount = cfg.env ? Object.keys(cfg.env).length : 0;
+    const cwdStr = cfg.cwd ? ` [cwd: ${cfg.cwd}]` : '';
+    return `${c.command}${argStr}${cwdStr}${envCount ? ` (+${envCount} env var${envCount > 1 ? 's' : ''})` : ''}`;
   }
   return '—';
+}
+
+interface TestResultState {
+  id: string;
+  ok: boolean;
+  message: string;
+  toolNames?: string[];
 }
 
 export function McpView() {
@@ -31,10 +66,13 @@ export function McpView() {
     url: '',
     command: '',
     argsStr: '',
+    headersStr: '',
+    envStr: '',
+    cwd: '',
   });
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [testingId, setTestingId] = useState<string | null>(null);
-  const [testResult, setTestResult] = useState<{ id: string; ok: boolean; message: string } | null>(null);
+  const [testResult, setTestResult] = useState<TestResultState | null>(null);
   const isMobile = useIsMobile();
 
   const loadServers = async () => {
@@ -55,7 +93,7 @@ export function McpView() {
 
   const openCreate = () => {
     setEditingServer(null);
-    setForm({ name: '', transport: 'url', url: '', command: '', argsStr: '' });
+    setForm({ name: '', transport: 'url', url: '', command: '', argsStr: '', headersStr: '', envStr: '', cwd: '' });
     setSubmitError(null);
     setTestResult(null);
     setEditorOpen(true);
@@ -67,12 +105,28 @@ export function McpView() {
     let url = '';
     let command = '';
     let argsStr = '';
+    let headersStr = '';
+    let envStr = '';
+    let cwd = '';
     if (c) {
-      if ('url' in c) url = c.url || '';
+      if ('url' in c) {
+        url = c.url || '';
+        if ((c as McpConfigUrl).headers) {
+          headersStr = Object.entries((c as McpConfigUrl).headers!)
+            .map(([k, v]) => `${k}: ${v}`)
+            .join('\n');
+        }
+      }
       if ('command' in c) {
         command = (c as McpConfigStdio).command || '';
         const args = (c as McpConfigStdio).args;
         argsStr = Array.isArray(args) ? args.join(' ') : '';
+        if ((c as McpConfigStdio).env) {
+          envStr = Object.entries((c as McpConfigStdio).env!)
+            .map(([k, v]) => `${k}=${v}`)
+            .join('\n');
+        }
+        cwd = (c as McpConfigStdio).cwd || '';
       }
     }
     setForm({
@@ -81,6 +135,9 @@ export function McpView() {
       url,
       command,
       argsStr,
+      headersStr,
+      envStr,
+      cwd,
     });
     setSubmitError(null);
     setTestResult(null);
@@ -102,7 +159,19 @@ export function McpView() {
         setSubmitError('URL is required for URL transport');
         return;
       }
-      config = { url };
+      const headers: Record<string, string> = {};
+      if (form.headersStr.trim()) {
+        for (const line of form.headersStr.trim().split('\n')) {
+          const colonIdx = line.indexOf(':');
+          if (colonIdx > 0) {
+            headers[line.slice(0, colonIdx).trim()] = line.slice(colonIdx + 1).trim();
+          }
+        }
+      }
+      config = {
+        url,
+        ...(Object.keys(headers).length > 0 && { headers }),
+      };
     } else {
       const command = form.command.trim();
       if (!command) {
@@ -110,7 +179,21 @@ export function McpView() {
         return;
       }
       const args = form.argsStr.trim() ? form.argsStr.trim().split(/\s+/).filter(Boolean) : undefined;
-      config = { command, args };
+      const env: Record<string, string> = {};
+      if (form.envStr.trim()) {
+        for (const line of form.envStr.trim().split('\n')) {
+          const eqIdx = line.indexOf('=');
+          if (eqIdx > 0) {
+            env[line.slice(0, eqIdx).trim()] = line.slice(eqIdx + 1).trim();
+          }
+        }
+      }
+      config = {
+        command,
+        args,
+        ...(Object.keys(env).length > 0 && { env }),
+        ...(form.cwd.trim() && { cwd: form.cwd.trim() }),
+      };
     }
 
     try {
@@ -132,7 +215,13 @@ export function McpView() {
     try {
       const result = await mcpServersApi.test(id);
       if (result.ok && result.tools) {
-        setTestResult({ id, ok: true, message: `Connected. ${result.tools.length} tool(s) available.` });
+        const toolNames = result.tools.map(t => t.name);
+        setTestResult({
+          id,
+          ok: true,
+          message: `Connected. ${result.tools.length} tool(s) available.`,
+          toolNames,
+        });
       } else {
         setTestResult({ id, ok: false, message: result.error || 'Connection failed' });
       }
@@ -245,12 +334,19 @@ export function McpView() {
                 {server.transport}
               </div>
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
               {testResult?.id === server.id && (
-                <span style={{ fontSize: '0.75rem', color: testResult.ok ? 'var(--success)' : 'var(--error)', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                  {testResult.ok ? <CheckCircle size={14} /> : <XCircle size={14} />}
-                  {testResult.message}
-                </span>
+                <div style={{ fontSize: '0.75rem', color: testResult.ok ? 'var(--success)' : 'var(--error)', maxWidth: '260px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                    {testResult.ok ? <CheckCircle size={14} style={{ flexShrink: 0 }} /> : <XCircle size={14} style={{ flexShrink: 0 }} />}
+                    {testResult.message}
+                  </div>
+                  {testResult.toolNames && testResult.toolNames.length > 0 && (
+                    <div style={{ marginTop: '4px', fontSize: '0.7rem', color: 'var(--text-muted)', lineHeight: '1.4' }}>
+                      {testResult.toolNames.join(', ')}
+                    </div>
+                  )}
+                </div>
               )}
               <button
                 type="button"
@@ -341,7 +437,7 @@ export function McpView() {
               border: '1px solid var(--border)',
               borderRadius: 'var(--radius-lg)',
               padding: '24px',
-              maxWidth: '480px',
+              maxWidth: '520px',
               width: '100%',
               maxHeight: '90vh',
               overflowY: 'auto',
@@ -352,7 +448,7 @@ export function McpView() {
             </h2>
             <form onSubmit={handleSubmit}>
               <div style={{ marginBottom: '14px' }}>
-                <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '4px' }}>Name</label>
+                <label style={labelStyle}>Name</label>
                 <Input
                   value={form.name}
                   onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
@@ -360,7 +456,7 @@ export function McpView() {
                 />
               </div>
               <div style={{ marginBottom: '14px' }}>
-                <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '4px' }}>Type</label>
+                <label style={labelStyle}>Type</label>
                 <select
                   value={form.transport}
                   onChange={(e) => setForm((f) => ({ ...f, transport: e.target.value as McpTransport }))}
@@ -374,23 +470,35 @@ export function McpView() {
                     fontSize: '0.875rem',
                   }}
                 >
-                  <option value="url">URL</option>
+                  <option value="url">URL (remote)</option>
                   <option value="stdio">Local (stdio)</option>
                 </select>
               </div>
               {form.transport === 'url' ? (
-                <div style={{ marginBottom: '14px' }}>
-                  <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '4px' }}>URL</label>
-                  <Input
-                    value={form.url}
-                    onChange={(e) => setForm((f) => ({ ...f, url: e.target.value }))}
-                    placeholder="https://example.com/mcp"
-                  />
-                </div>
+                <>
+                  <div style={{ marginBottom: '14px' }}>
+                    <label style={labelStyle}>URL</label>
+                    <Input
+                      value={form.url}
+                      onChange={(e) => setForm((f) => ({ ...f, url: e.target.value }))}
+                      placeholder="https://example.com/mcp"
+                    />
+                  </div>
+                  <div style={{ marginBottom: '14px' }}>
+                    <label style={labelStyle}>Headers <span style={{ fontWeight: 400, color: 'var(--text-muted)' }}>(optional, one per line: Key: Value)</span></label>
+                    <textarea
+                      value={form.headersStr}
+                      onChange={(e) => setForm((f) => ({ ...f, headersStr: e.target.value }))}
+                      placeholder={'Authorization: Bearer your-token\nX-Custom-Header: value'}
+                      rows={3}
+                      style={textareaStyle}
+                    />
+                  </div>
+                </>
               ) : (
                 <>
                   <div style={{ marginBottom: '14px' }}>
-                    <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '4px' }}>Command</label>
+                    <label style={labelStyle}>Command</label>
                     <Input
                       value={form.command}
                       onChange={(e) => setForm((f) => ({ ...f, command: e.target.value }))}
@@ -398,11 +506,29 @@ export function McpView() {
                     />
                   </div>
                   <div style={{ marginBottom: '14px' }}>
-                    <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '4px' }}>Arguments (space-separated)</label>
+                    <label style={labelStyle}>Arguments <span style={{ fontWeight: 400, color: 'var(--text-muted)' }}>(space-separated)</span></label>
                     <Input
                       value={form.argsStr}
                       onChange={(e) => setForm((f) => ({ ...f, argsStr: e.target.value }))}
                       placeholder="-y @modelcontextprotocol/server-filesystem /path"
+                    />
+                  </div>
+                  <div style={{ marginBottom: '14px' }}>
+                    <label style={labelStyle}>Environment Variables <span style={{ fontWeight: 400, color: 'var(--text-muted)' }}>(optional, one per line: KEY=value)</span></label>
+                    <textarea
+                      value={form.envStr}
+                      onChange={(e) => setForm((f) => ({ ...f, envStr: e.target.value }))}
+                      placeholder={'GITHUB_TOKEN=ghp_xxxxxxxxxxxx\nAPI_KEY=sk-xxxxxxxxxxxx'}
+                      rows={3}
+                      style={textareaStyle}
+                    />
+                  </div>
+                  <div style={{ marginBottom: '14px' }}>
+                    <label style={labelStyle}>Working Directory <span style={{ fontWeight: 400, color: 'var(--text-muted)' }}>(optional)</span></label>
+                    <Input
+                      value={form.cwd}
+                      onChange={(e) => setForm((f) => ({ ...f, cwd: e.target.value }))}
+                      placeholder="/home/user/project"
                     />
                   </div>
                 </>
