@@ -1,4 +1,4 @@
-import { Router, Response } from 'express';
+import { Router, Request, Response } from 'express';
 import { nanoid } from 'nanoid';
 import db from '../db.js';
 import { getSettingValue } from './settings.js';
@@ -106,7 +106,7 @@ function validateAttachments(attachments: unknown): { valid: ChatAttachmentInput
 }
 
 // POST /api/chat - Send message and stream response
-router.post('/', async (req: Request, res: Response): Promise<void> => {
+router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
   let clientDisconnected = false;
   let upstreamReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   let abortController: AbortController | null = null;
@@ -131,12 +131,13 @@ router.post('/', async (req: Request, res: Response): Promise<void> => {
   });
 
   try {
-    const userId = (req as AuthRequest).userId;
+    const userId = req.userId;
     if (!userId) {
       res.status(401).json({ error: 'Unauthorized' });
       return;
     }
-    const { conversation_id, content, reasoning, attachments: attachmentsRaw, pdf_engine: pdfEngineRaw } = req.body;
+    const body = req.body as { conversation_id?: string; content?: string; reasoning?: unknown; attachments?: unknown; pdf_engine?: string };
+    const { conversation_id, content, reasoning, attachments: attachmentsRaw, pdf_engine: pdfEngineRaw } = body;
 
     if (!conversation_id || !content) {
       res.status(400).json({ error: 'conversation_id and content are required' });

@@ -6,7 +6,7 @@ const JWT_SECRET = process.env.JWT_SECRET;
 const DISABLE_AUTH = process.env.DISABLE_AUTH === 'true' || process.env.DISABLE_AUTH === '1';
 
 export interface AuthRequest extends Request {
-  userId?: string;
+  userId?: string | null;
 }
 
 const COOKIE_NAME = 'agent_studio_token';
@@ -22,7 +22,7 @@ export function getTokenFromRequest(req: Request): string | null {
 export function authMiddleware(req: AuthRequest, res: Response, next: NextFunction): void {
   if (DISABLE_AUTH || !JWT_SECRET) {
     const row = db.prepare("SELECT id FROM users WHERE email = 'local@localhost' LIMIT 1").get() as { id: string } | undefined;
-    req.userId = row?.id ?? null;
+    req.userId = row?.id ?? undefined;
     next();
     return;
   }
@@ -49,23 +49,23 @@ export function authMiddleware(req: AuthRequest, res: Response, next: NextFuncti
 export function optionalAuth(req: AuthRequest, res: Response, next: NextFunction): void {
   if (DISABLE_AUTH || !JWT_SECRET) {
     const row = db.prepare("SELECT id FROM users WHERE email = 'local@localhost' LIMIT 1").get() as { id: string } | undefined;
-    req.userId = row?.id ?? null;
+    req.userId = row?.id ?? undefined;
     next();
     return;
   }
 
   const token = getTokenFromRequest(req);
   if (!token) {
-    req.userId = null;
+    req.userId = undefined;
     next();
     return;
   }
 
   try {
     const payload = jwt.verify(token, JWT_SECRET) as { sub: string };
-    req.userId = payload.sub ?? null;
+    req.userId = payload.sub ?? undefined;
   } catch {
-    req.userId = null;
+    req.userId = undefined;
   }
   next();
 }

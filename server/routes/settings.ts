@@ -5,6 +5,11 @@ import { encrypt, isSensitive, maskValue, decryptSetting } from '../crypto.js';
 
 const router = Router();
 
+function paramKey(params: { key?: string | string[] }): string {
+  const k = params.key;
+  return Array.isArray(k) ? (k[0] ?? '') : (k ?? '');
+}
+
 // GET /api/settings/:key
 router.get('/:key', (req: AuthRequest, res: Response) => {
   try {
@@ -12,11 +17,11 @@ router.get('/:key', (req: AuthRequest, res: Response) => {
     if (!userId) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
-    const row = db.prepare('SELECT value FROM settings WHERE user_id = ? AND key = ?').get(userId, req.params.key) as
+    const key = paramKey(req.params);
+    const row = db.prepare('SELECT value FROM settings WHERE user_id = ? AND key = ?').get(userId, key) as
       | { value: string }
       | undefined;
     const raw = row?.value ?? null;
-    const key = req.params.key;
     if (raw != null && isSensitive(key)) {
       return res.json({ key, value: maskValue(raw), masked: true });
     }
@@ -34,8 +39,8 @@ router.put('/:key', (req: AuthRequest, res: Response) => {
     if (!userId) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
-    const { value } = req.body;
-    const key = req.params.key;
+    const { value } = req.body as { value?: string };
+    const key = paramKey(req.params);
     const toStore = typeof value === 'string' && isSensitive(key) ? encrypt(value) : (value ?? '');
     db.prepare(`
       INSERT INTO settings (user_id, key, value) VALUES (?, ?, ?)
