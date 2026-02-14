@@ -110,8 +110,8 @@ app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-migrate();
 const server = app.listen(PORT, '0.0.0.0', () => {
+  migrate();
   console.log(`[server] Agent Studio server running on http://0.0.0.0:${PORT}`);
 });
 server.on('error', (err: NodeJS.ErrnoException) => {
