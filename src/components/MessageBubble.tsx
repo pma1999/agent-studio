@@ -3,7 +3,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { User, Sparkles, Copy, Check, Brain, ChevronDown, ChevronRight, ExternalLink, Globe, FileUp, Braces } from 'lucide-react';
 import { MarkdownContent } from './MarkdownContent';
 import { MessageTokenPills } from './TokenCounter';
-import type { Message, Annotation } from '../types';
+import { ToolCallTimeline } from './ToolCallTimeline';
+import type { Message, Annotation, ToolExecution } from '../types';
 
 function tryParseJson(str: string): unknown | null {
   const trimmed = str.trim();
@@ -140,6 +141,8 @@ interface MessageBubbleProps {
   streamingContent?: string;
   streamingReasoning?: string;
   agentEmoji?: string;
+  toolExecutions?: ToolExecution[];
+  toolActivityLive?: boolean;
 }
 
 function formatCost(cost: number): string {
@@ -360,7 +363,15 @@ function CitationLinks({ annotations }: { annotations: Annotation[] }) {
   );
 }
 
-export function MessageBubble({ message, isStreaming, streamingContent, streamingReasoning, agentEmoji }: MessageBubbleProps) {
+export function MessageBubble({
+  message,
+  isStreaming,
+  streamingContent,
+  streamingReasoning,
+  agentEmoji,
+  toolExecutions,
+  toolActivityLive,
+}: MessageBubbleProps) {
   const [copied, setCopied] = React.useState(false);
   const isUser = message.role === 'user';
   const displayContent = isStreaming ? (streamingContent || '') : message.content;
@@ -505,6 +516,13 @@ export function MessageBubble({ message, isStreaming, streamingContent, streamin
               />
             )}
 
+            {toolExecutions && toolExecutions.length > 0 && (
+              <ToolCallTimeline
+                calls={toolExecutions}
+                isStreaming={!!toolActivityLive}
+              />
+            )}
+
             {displayContent ? (
               !isStreaming && getJsonFromContent(displayContent) !== null ? (
                 <JsonContentView content={displayContent} />
@@ -559,44 +577,6 @@ export function MessageBubble({ message, isStreaming, streamingContent, streamin
                 <span>
                   Document(s) used: {annotations.filter((a) => a.type === 'file' && a.file?.name).map((a) => a.file!.name).join(', ')}
                 </span>
-              </div>
-            )}
-
-            {/* Tools used (assistant messages with tool_calls) */}
-            {!isStreaming && message.tool_calls && message.tool_calls.length > 0 && (
-              <div style={{
-                marginTop: '10px',
-                display: 'flex',
-                flexWrap: 'wrap',
-                gap: '6px',
-                alignItems: 'center',
-              }}>
-                <span style={{
-                  fontSize: '0.6875rem',
-                  fontWeight: 600,
-                  color: 'var(--text-muted)',
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.05em',
-                  marginRight: '4px',
-                }}>
-                  Used
-                </span>
-                {message.tool_calls.map((tc) => (
-                  <span
-                    key={tc.id}
-                    style={{
-                      fontSize: '0.75rem',
-                      fontFamily: 'var(--font-mono)',
-                      color: 'var(--accent)',
-                      background: 'rgba(139, 92, 246, 0.08)',
-                      border: '1px solid rgba(139, 92, 246, 0.2)',
-                      borderRadius: '4px',
-                      padding: '3px 8px',
-                    }}
-                  >
-                    {tc.function?.name?.replace(/_/g, ' ') ?? tc.id}
-                  </span>
-                ))}
               </div>
             )}
 

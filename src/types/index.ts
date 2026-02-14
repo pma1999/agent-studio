@@ -133,6 +133,21 @@ export interface ToolCallSpec {
   function: { name: string; arguments: string };
 }
 
+export type ToolSource = 'builtin' | 'http' | 'mcp' | 'unknown';
+
+export type ToolExecutionStatus = 'running' | 'done' | 'error';
+
+export interface ToolExecution {
+  id: string;
+  name: string;
+  arguments: string;
+  status: ToolExecutionStatus;
+  result?: string;
+  ok?: boolean;
+  duration_ms?: number;
+  source?: ToolSource;
+}
+
 export interface AgentFormData {
   name: string;
   description: string;
