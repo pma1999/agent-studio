@@ -107,6 +107,7 @@ app.get('/api/debug/db-check', (_req, res) => {
       : [];
     res.json({
       hint: 'Server DB state (remove /api/debug/db-check after debugging)',
+      env_DATABASE_PATH: process.env.DATABASE_PATH ?? '(not set – server uses default path, not /data)',
       users: users.map((u) => ({ email: u.email, id: u.id })),
       agents_per_user: agentCounts,
       admin_user_id: admin?.id ?? null,
