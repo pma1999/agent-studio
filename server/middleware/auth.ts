@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
-import db from '../db.js';
+import db, { ensureLocalUser } from '../db.js';
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const DISABLE_AUTH = process.env.DISABLE_AUTH === 'true' || process.env.DISABLE_AUTH === '1';
@@ -21,7 +21,11 @@ export function getTokenFromRequest(req: Request): string | null {
 
 export function authMiddleware(req: AuthRequest, res: Response, next: NextFunction): void {
   if (DISABLE_AUTH || !JWT_SECRET) {
-    const row = db.prepare("SELECT id FROM users WHERE email = 'local@localhost' LIMIT 1").get() as { id: string } | undefined;
+    let row = db.prepare("SELECT id FROM users WHERE email = 'local@localhost' LIMIT 1").get() as { id: string } | undefined;
+    if (!row?.id) {
+      const localId = ensureLocalUser();
+      if (localId) row = { id: localId };
+    }
     req.userId = row?.id;
     next();
     return;
@@ -48,7 +52,11 @@ export function authMiddleware(req: AuthRequest, res: Response, next: NextFuncti
 
 export function optionalAuth(req: AuthRequest, res: Response, next: NextFunction): void {
   if (DISABLE_AUTH || !JWT_SECRET) {
-    const row = db.prepare("SELECT id FROM users WHERE email = 'local@localhost' LIMIT 1").get() as { id: string } | undefined;
+    let row = db.prepare("SELECT id FROM users WHERE email = 'local@localhost' LIMIT 1").get() as { id: string } | undefined;
+    if (!row?.id) {
+      const localId = ensureLocalUser();
+      if (localId) row = { id: localId };
+    }
     req.userId = row?.id;
     next();
     return;

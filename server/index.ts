@@ -15,6 +15,7 @@ import creditsRouter from './routes/credits.js';
 import usageRouter from './routes/usage.js';
 import toolsRouter from './routes/tools.js';
 import mcpServersRouter from './routes/mcpServers.js';
+import { exportRouter, importRouter } from './routes/exportImport.js';
 
 const app = express();
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3001;
@@ -81,6 +82,8 @@ app.use('/api/credits', authMiddleware, creditsRouter);
 app.use('/api/usage', authMiddleware, usageRouter);
 app.use('/api/tools', authMiddleware, toolsRouter);
 app.use('/api/mcp-servers', authMiddleware, mcpServersRouter);
+app.use('/api/export', authMiddleware, exportRouter);
+app.use('/api/import', authMiddleware, importRouter);
 
 // Root: for load balancer / health probes that hit /
 app.get('/', (_req, res) => {
@@ -119,14 +122,13 @@ app.get('/api/debug/db-check', (_req, res) => {
   }
 });
 
+try {
+  migrate();
+} catch (err) {
+  console.error('[server] Migration failed:', err);
+  process.exit(1);
+}
 const server = app.listen(PORT, '0.0.0.0', () => {
-  setImmediate(() => {
-    try {
-      migrate();
-    } catch (err) {
-      console.error('[server] Migration failed:', err);
-    }
-  });
   console.log(`[server] Agent Studio server running on http://0.0.0.0:${PORT}`);
 });
 server.on('error', (err: NodeJS.ErrnoException) => {

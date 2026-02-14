@@ -19,6 +19,7 @@ function App() {
   const {
     user,
     userLoading,
+    authRequired,
     setUser,
     checkAuth,
     currentView,
@@ -129,8 +130,32 @@ function App() {
     );
   }
 
-  if (!user) {
+  if (authRequired && !user) {
     return <AuthView />;
+  }
+
+  if (!authRequired && !user) {
+    return (
+      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg-base)', flexDirection: 'column', gap: 'var(--space-md)' }}>
+        <div style={{ color: 'var(--text-muted)', fontFamily: 'var(--font-body)' }}>Could not load session.</div>
+        <button
+          type="button"
+          onClick={() => checkAuth()}
+          style={{
+            padding: 'var(--space-sm) var(--space-md)',
+            fontFamily: 'var(--font-body)',
+            fontSize: '0.875rem',
+            color: 'var(--accent)',
+            background: 'var(--bg-surface)',
+            border: '1px solid var(--border)',
+            borderRadius: 'var(--radius)',
+            cursor: 'pointer',
+          }}
+        >
+          Retry
+        </button>
+      </div>
+    );
   }
 
   return (

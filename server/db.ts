@@ -444,4 +444,29 @@ function await_nanoid() {
   return { nanoid: () => id };
 }
 
+/**
+ * Ensures the local@localhost user exists (for local / no-auth mode).
+ * Call this when auth is disabled and the local user is missing.
+ * Returns the user id or null if creation failed.
+ */
+export function ensureLocalUser(): string | null {
+  try {
+    const row = db.prepare("SELECT id FROM users WHERE email = 'local@localhost' LIMIT 1").get() as { id: string } | undefined;
+    if (row?.id) return row.id;
+    const { nanoid } = await_nanoid();
+    const id = nanoid();
+    const placeholderHash = '$2b$10$placeholder.hash.for.migration.only';
+    try {
+      const bcrypt = require('bcrypt');
+      const hash = bcrypt.hashSync('changeme', 10);
+      db.prepare('INSERT INTO users (id, email, password_hash) VALUES (?, ?, ?)').run(id, 'local@localhost', hash);
+    } catch {
+      db.prepare('INSERT INTO users (id, email, password_hash) VALUES (?, ?, ?)').run(id, 'local@localhost', placeholderHash);
+    }
+    return id;
+  } catch {
+    return null;
+  }
+}
+
 export default db;

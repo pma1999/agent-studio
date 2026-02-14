@@ -5,6 +5,7 @@ import { mcpServersApi } from '../api/client';
 import type { McpServer, McpTransport, McpConfigUrl, McpConfigStdio } from '../types';
 import { Button } from './ui/Button';
 import { Input } from './ui/Input';
+import { ExportImportButtons } from './ExportImportButtons';
 import { useIsMobile } from '../utils/breakpoints';
 
 function configSummary(server: McpServer): string {
@@ -192,9 +193,12 @@ export function McpView() {
             Connect Model Context Protocol servers by URL or local command. Assign them to agents in the agent editor.
           </p>
         </div>
-        <Button onClick={openCreate} icon={<Plus size={16} />}>
-          Add MCP server
-        </Button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+          <ExportImportButtons kind="mcp_servers" label="MCP servers" onAfterImport={loadServers} variant="inline" />
+          <Button onClick={openCreate} icon={<Plus size={16} />}>
+            Add MCP server
+          </Button>
+        </div>
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>

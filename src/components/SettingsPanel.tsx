@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { CheckCircle, AlertCircle, ExternalLink, Zap, Coins, BarChart3, Loader2, Globe, KeyRound } from 'lucide-react';
+import { CheckCircle, AlertCircle, ExternalLink, Zap, Coins, BarChart3, Loader2, Globe, KeyRound, Database } from 'lucide-react';
 import { useStore } from '../stores/store';
 import { settingsApi } from '../api/client';
 import { Modal } from './ui/Modal';
 import { Input } from './ui/Input';
 import { Button } from './ui/Button';
+import { ExportImportButtons } from './ExportImportButtons';
 import {
   generateCodeVerifier,
   generateState,
@@ -790,7 +791,7 @@ function UsageStatsSection() {
 }
 
 export function SettingsPanel() {
-  const { settingsOpen, setSettingsOpen, openRouterApiKey, openRouterOAuthSuccess, openRouterOAuthError, setOpenRouterOAuthSuccess, setOpenRouterOAuthError } = useStore();
+  const { settingsOpen, setSettingsOpen, openRouterApiKey, openRouterOAuthSuccess, openRouterOAuthError, setOpenRouterOAuthSuccess, setOpenRouterOAuthError, loadAgents } = useStore();
   const [searchApiKey, setSearchApiKey] = useState('');
   const [searchProvider, setSearchProvider] = useState('exa');
   const [searchSaving, setSearchSaving] = useState(false);
@@ -890,6 +891,34 @@ export function SettingsPanel() {
 
         {/* Usage Statistics */}
         <UsageStatsSection />
+
+        {/* Divider */}
+        <div style={{ height: '1px', background: 'var(--border)' }} />
+
+        {/* Data backup — Export / Import all */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <div style={{
+              width: '28px', height: '28px', borderRadius: 'var(--radius-sm)',
+              background: 'var(--accent-glow)', border: '1px solid var(--border-accent)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--accent)',
+            }}>
+              <Database size={15} />
+            </div>
+            <h4 style={{ fontFamily: 'var(--font-display)', fontSize: '1rem', fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>
+              Data backup
+            </h4>
+          </div>
+          <p style={{ fontSize: '0.8125rem', color: 'var(--text-muted)', margin: 0 }}>
+            Export or import all your agents, tools, and MCP servers in one JSON file. Use this to back up your workspace or move data between instances.
+          </p>
+          <ExportImportButtons
+            kind="all"
+            label="All data"
+            onAfterImport={loadAgents}
+            variant="stacked"
+          />
+        </div>
 
         {/* Footer note */}
         <p style={{

@@ -9,6 +9,12 @@ const router = Router();
 const JWT_SECRET = process.env.JWT_SECRET;
 const DISABLE_AUTH = process.env.DISABLE_AUTH === 'true' || process.env.DISABLE_AUTH === '1';
 
+// GET /api/auth/config - public; tells client whether login is required
+router.get('/config', (_req: Request, res: Response) => {
+  const authRequired = !!JWT_SECRET && !DISABLE_AUTH;
+  res.json({ authRequired });
+});
+
 // POST /api/auth/register
 router.post('/register', (req: Request, res: Response) => {
   if (DISABLE_AUTH || !JWT_SECRET) {

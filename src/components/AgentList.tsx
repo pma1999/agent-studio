@@ -7,6 +7,7 @@ import { agentsApi } from '../api/client';
 import { useChat } from '../hooks/useChat';
 import { Button } from './ui/Button';
 import { EmptyState } from './EmptyState';
+import { ExportImportButtons } from './ExportImportButtons';
 
 export function AgentList() {
   const {
@@ -110,14 +111,22 @@ export function AgentList() {
             Create and manage AI agents with custom personalities and instructions
           </motion.p>
         </div>
-        <Button
-          variant="primary"
-          icon={<Plus size={16} />}
-          onClick={handleCreateAgent}
-          style={isMobile ? { alignSelf: 'flex-start' } : undefined}
-        >
-          New Agent
-        </Button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+          <ExportImportButtons
+            kind="agents"
+            label="Agents"
+            onAfterImport={loadAgents}
+            variant="inline"
+          />
+          <Button
+            variant="primary"
+            icon={<Plus size={16} />}
+            onClick={handleCreateAgent}
+            style={isMobile ? { alignSelf: 'flex-start' } : undefined}
+          >
+            New Agent
+          </Button>
+        </div>
       </div>
 
       {/* Agent Grid */}

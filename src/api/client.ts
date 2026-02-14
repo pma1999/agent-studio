@@ -32,6 +32,7 @@ export interface AuthUser {
 }
 
 export const authApi = {
+  config: () => request<{ authRequired: boolean }>('/auth/config'),
   register: (email: string, password: string) =>
     request<{ token: string; user: AuthUser }>('/auth/register', {
       method: 'POST',
@@ -311,3 +312,50 @@ export const creditsApi = {
 export const usageApi = {
   stats: () => request<UsageStats>('/usage/stats'),
 };
+
+// Export / Import (agents, tools, mcp_servers, or all)
+export type ExportKind = 'agents' | 'tools' | 'mcp_servers' | 'all';
+
+export interface ExportPayload {
+  version: number;
+  kind: ExportKind;
+  exported_at: string;
+  agents?: Record<string, unknown>[];
+  tools?: Record<string, unknown>[];
+  mcp_servers?: Record<string, unknown>[];
+}
+
+export interface ImportResult {
+  success: boolean;
+  created: { agents: number; tools: number; mcp_servers: number };
+}
+
+export const exportApi = {
+  agents: (agentIds?: string[]) => {
+    const q = agentIds?.length ? `?ids=${agentIds.join(',')}` : '';
+    return request<ExportPayload>(`/export/agents${q}`);
+  },
+  tools: () => request<ExportPayload>('/export/tools'),
+  mcpServers: () => request<ExportPayload>('/export/mcp-servers'),
+  all: () => request<ExportPayload>('/export/all'),
+};
+
+export const importApi = {
+  import: (payload: ExportPayload) =>
+    request<ImportResult>('/import', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+};
+
+/** Trigger download of JSON as a file (e.g. export data). */
+export function downloadExport(data: ExportPayload, kind: ExportKind): void {
+  const filename = `agent-studio-export-${kind}-${new Date().toISOString().slice(0, 10)}.json`;
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}

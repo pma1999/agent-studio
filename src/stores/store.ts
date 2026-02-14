@@ -7,6 +7,7 @@ interface AppState {
   // Auth / session
   user: AuthUser | null;
   userLoading: boolean;
+  authRequired: boolean;
   setUser: (user: AuthUser | null) => void;
   checkAuth: () => Promise<void>;
   logout: () => Promise<void>;
@@ -102,14 +103,17 @@ export const useStore = create<AppState>((set, get) => ({
   // Auth
   user: null,
   userLoading: true,
+  authRequired: true,
   setUser: (user) => set({ user }),
   checkAuth: async () => {
     set({ userLoading: true });
     try {
+      const { authRequired } = await authApi.config();
+      set({ authRequired });
       const user = await authApi.me();
       set({ user, userLoading: false });
     } catch {
-      set({ user: null, userLoading: false });
+      set((state) => ({ user: null, userLoading: false, authRequired: state.authRequired }));
     }
   },
   logout: async () => {

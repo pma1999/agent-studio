@@ -4,6 +4,7 @@ import { Plus, Wrench, Pencil, Trash2, Globe, Zap, Code } from 'lucide-react';
 import { toolsApi, type ToolCreatePayload } from '../api/client';
 import type { Tool } from '../types';
 import { Button } from './ui/Button';
+import { ExportImportButtons } from './ExportImportButtons';
 import { useIsMobile } from '../utils/breakpoints';
 
 const BUILTIN_OPTIONS = [
@@ -274,9 +275,12 @@ export function ToolsView() {
             Define tools that agents can use. Assign them in the agent editor.
           </p>
         </div>
-        <Button onClick={openCreate} icon={<Plus size={16} />}>
-          New tool
-        </Button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+          <ExportImportButtons kind="tools" label="Tools" onAfterImport={loadTools} variant="inline" />
+          <Button onClick={openCreate} icon={<Plus size={16} />}>
+            New tool
+          </Button>
+        </div>
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
