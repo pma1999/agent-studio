@@ -14,17 +14,30 @@ Este proyecto está preparado para desplegar el **frontend** en **Vercel** y el 
    - **Build command**: `npm run build:server` (o deja que Nixpacks use `nixpacks.toml`).
    - **Start command**: `npm run start`.
 4. Si usas **Variables**: en el dashboard del service, añade:
-   - `CORS_ORIGIN`: URL del frontend en Vercel, por ejemplo:
-     - Producción: `https://tu-app.vercel.app`
-     - Para permitir también previews: `https://tu-app.vercel.app,https://*.vercel.app`
-     - (Si no pones nada, CORS permite cualquier origen; solo recomendable en desarrollo.)
-   - `PORT`: lo asigna Railway; no hace falta que lo definas tú.
+   - `CORS_ORIGIN`: URL del frontend en Vercel (ej. `https://tu-app.vercel.app`). Si no pones nada, CORS permite cualquier origen (solo desarrollo).
+   - **`JWT_SECRET`** (recomendado en producción): secreto para firmar sesiones (mín. 32 caracteres). **Si no lo defines, la app corre en "modo local"**: no pide login y todo el mundo entra como usuario local; en producción debes definirlo para que se exija inicio de sesión.
+   - `PORT`: lo asigna Railway; no hace falta definirlo.
+   - Opcionales: `ENCRYPTION_KEY` (cifrar API keys en BD), `INITIAL_ADMIN_PASSWORD` (contraseña del admin inicial).
 
-### 1.2 Obtener la URL del backend
+### 1.2 Si ves 502 "Application failed to respond"
+
+Si el backend hace deploy pero las peticiones devuelven **502** y en los logs aparece "Agent Studio server running", el proxy de Railway no está llegando al proceso. Comprueba:
+
+1. **Puerto de destino (target port)**  
+   En Railway → tu **service** → **Settings** → **Networking** (o **Domains**). Busca **Port** / **Target port**.  
+   La app escucha en la variable `PORT` que Railway inyecta (suele ser **8080**). El valor configurado aquí **debe coincidir** con ese puerto (o dejar la opción por defecto para que Railway use `PORT`). Si pone por ejemplo 3000 y la app escucha en 8080, cambia a **8080** o borra el valor para usar el automático.
+
+2. **Health check**  
+   En **Settings** del service, en **Health Check** (si existe), pon la ruta: **`/api/health`**. Así Railway comprueba que la app responde antes de enviar tráfico. La app devuelve **200** en `GET /` y `GET /api/health`.
+
+3. **Redeploy**  
+   Después de cambiar el puerto o el health check, haz **Redeploy** del service.
+
+### 1.3 Obtener la URL del backend
 
 Tras el deploy, Railway te da una URL pública (ej. `https://tu-proyecto.railway.app`). Cópiala; la usarás en Vercel.
 
-### 1.3 Preparar y vincular la base de datos (SQLite)
+### 1.4 Preparar y vincular la base de datos (SQLite)
 
 El backend usa **SQLite** en un solo archivo. No tienes que instalar nada aparte: al arrancar el servidor se ejecutan las migraciones y se crea la BD si no existe.
 
@@ -123,6 +136,7 @@ Haz push a la rama que tengas conectada (p. ej. `main`). Vercel hará build y de
 |--------|------------------|-------------|
 | Vercel | `VITE_API_URL`   | URL base del backend (Railway), sin `/api` ni barra final. |
 | Railway| `CORS_ORIGIN`    | Origen(es) permitidos para CORS (tu dominio Vercel). |
+| Railway| `JWT_SECRET`     | **Producción:** obligatorio para exigir login. Sin él, todos entran como "local". Mín. 32 caracteres. |
 | Railway| `PORT`           | Lo define Railway; no suele hacer falta configurarlo. |
 
 Opcional en ambos: `.env.example` documenta variables opcionales (p. ej. seed de API keys).

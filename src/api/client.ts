@@ -206,6 +206,7 @@ export async function streamChat(
 
     const res = await fetch(`${API_BASE}/chat`, {
       method: 'POST',
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
       signal,

@@ -49,10 +49,11 @@ router.post('/register', (req: Request, res: Response) => {
     }
 
     const token = jwt.sign({ sub: id }, JWT_SECRET, { expiresIn: '7d' });
+    const crossOrigin = process.env.NODE_ENV === 'production' || !!process.env.CORS_ORIGIN;
     res.cookie(COOKIE_NAME, token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
+      secure: crossOrigin,
+      sameSite: crossOrigin ? 'none' : 'lax',
       maxAge: 7 * 24 * 60 * 60 * 1000,
     });
     res.status(201).json({ token, user: { id, email: emailTrimmed } });
@@ -83,10 +84,11 @@ router.post('/login', (req: Request, res: Response) => {
     }
 
     const token = jwt.sign({ sub: user.id }, JWT_SECRET, { expiresIn: '7d' });
+    const crossOrigin = process.env.NODE_ENV === 'production' || !!process.env.CORS_ORIGIN;
     res.cookie(COOKIE_NAME, token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
+      secure: crossOrigin,
+      sameSite: crossOrigin ? 'none' : 'lax',
       maxAge: 7 * 24 * 60 * 60 * 1000,
     });
     res.json({ token, user: { id: user.id, email: user.email } });
@@ -98,7 +100,13 @@ router.post('/login', (req: Request, res: Response) => {
 
 // POST /api/auth/logout
 router.post('/logout', (_req: Request, res: Response) => {
-  res.clearCookie(COOKIE_NAME);
+  const crossOrigin = process.env.NODE_ENV === 'production' || !!process.env.CORS_ORIGIN;
+  res.clearCookie(COOKIE_NAME, {
+    httpOnly: true,
+    secure: crossOrigin,
+    sameSite: crossOrigin ? 'none' : 'lax',
+    maxAge: 0,
+  });
   res.json({ success: true });
 });
 
