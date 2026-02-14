@@ -22,12 +22,28 @@ const PORT = process.env.PORT ? Number(process.env.PORT) : 3001;
 // Trust proxy (Railway, Vercel, etc.) so rate limit and X-Forwarded-* work
 app.set('trust proxy', 1);
 
-// CORS: restrict origin in production. Set CORS_ORIGIN (comma-separated) on Railway.
-const corsOrigin = process.env.CORS_ORIGIN;
-const origin = corsOrigin
-  ? corsOrigin.split(',').map((o) => o.trim()).filter(Boolean)
-  : true; // allow all in development
-app.use(cors({ origin, credentials: true }));
+// CORS: allow origin from CORS_ORIGIN (comma-separated). Required in production for Vercel frontend.
+const corsOriginRaw = process.env.CORS_ORIGIN ?? '';
+const allowedOrigins = corsOriginRaw
+  .split(',')
+  .map((o) => o.trim().replace(/\/$/, ''))
+  .filter(Boolean);
+const corsOptions: cors.CorsOptions = {
+  origin: allowedOrigins.length > 0
+    ? (origin, cb) => {
+        if (origin && allowedOrigins.includes(origin)) {
+          cb(null, true);
+        } else {
+          cb(null, false);
+        }
+      }
+    : true, // no CORS_ORIGIN = allow any (dev only)
+  credentials: true,
+  optionsSuccessStatus: 204,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+};
+app.use(cors(corsOptions));
 
 // Rate limits
 const apiLimiter = rateLimit({
