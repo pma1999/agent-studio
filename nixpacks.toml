@@ -1,0 +1,12 @@
+# Railway / Nixpacks: build and run the Node API only (frontend is on Vercel)
+[phases.setup]
+nixPkgs = ["nodejs_20"]
+
+[phases.install]
+cmds = ["npm ci"]
+
+[phases.build]
+cmds = ["npm run build:server"]
+
+[start]
+cmd = "npm run start"
