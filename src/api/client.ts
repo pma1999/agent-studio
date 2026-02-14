@@ -8,20 +8,38 @@ export function setOnUnauthorized(fn: (() => void) | null) {
   onUnauthorized = fn;
 }
 
+/** Delay helper for retry back-off. */
+const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** Maximum retries for 503 (server restarting) responses. */
+const MAX_503_RETRIES = 3;
+const RETRY_DELAYS = [2_000, 4_000, 8_000];
+
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${url}`, {
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/json' },
-    ...options,
-  });
-  if (res.status === 401 && onUnauthorized) {
-    onUnauthorized();
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt <= MAX_503_RETRIES; attempt++) {
+    const res = await fetch(`${API_BASE}${url}`, {
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      ...options,
+    });
+    if (res.status === 401 && onUnauthorized) {
+      onUnauthorized();
+    }
+    // Retry on 503 (server restarting during deploy)
+    if (res.status === 503 && attempt < MAX_503_RETRIES) {
+      await delay(RETRY_DELAYS[attempt]);
+      continue;
+    }
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({ error: 'Request failed' }));
+      throw new Error(error.error || `HTTP ${res.status}`);
+    }
+    return res.json();
   }
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({ error: 'Request failed' }));
-    throw new Error(error.error || `HTTP ${res.status}`);
-  }
-  return res.json();
+
+  throw lastError ?? new Error('Request failed after retries');
 }
 
 // Auth
@@ -204,26 +222,36 @@ export async function streamChat(
       body.pdf_engine = pdf_engine;
     }
 
-    const res = await fetch(`${API_BASE}/chat`, {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal,
-    });
+    // Retry loop for 503 (server restarting during deploy)
+    let res: Response | null = null;
+    for (let attempt = 0; attempt <= MAX_503_RETRIES; attempt++) {
+      res = await fetch(`${API_BASE}/chat`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal,
+      });
 
-    if (!res.ok) {
-      const error = await res.json().catch(() => ({ error: 'Chat request failed' }));
-      onError(error.error || `HTTP ${res.status}`);
+      if (res.status === 503 && attempt < MAX_503_RETRIES) {
+        await delay(RETRY_DELAYS[attempt]);
+        continue;
+      }
+      break;
+    }
+
+    if (!res!.ok) {
+      const error = await res!.json().catch(() => ({ error: 'Chat request failed' }));
+      onError(error.error || `HTTP ${res!.status}`);
       return;
     }
 
-    if (!res.body) {
+    if (!res!.body) {
       onError('No response body');
       return;
     }
 
-    const reader = res.body.getReader();
+    const reader = res!.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
 

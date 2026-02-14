@@ -4,6 +4,7 @@ import cookieParser from 'cookie-parser';
 import { rateLimit } from 'express-rate-limit';
 import db, { migrate } from './db.js';
 import { authMiddleware } from './middleware/auth.js';
+import { setupGracefulShutdown, isShuttingDown } from './shutdown.js';
 import authRouter from './routes/auth.js';
 import agentsRouter from './routes/agents.js';
 import conversationsRouter from './routes/conversations.js';
@@ -64,6 +65,16 @@ const chatLimiter = rateLimit({
 app.use('/api', apiLimiter);
 app.use('/api/chat', chatLimiter);
 
+// Reject new requests during shutdown so Railway routes them to the new instance.
+app.use((req, res, next) => {
+  if (isShuttingDown()) {
+    res.setHeader('Connection', 'close');
+    res.status(503).json({ error: 'Server is restarting. Please retry in a moment.' });
+    return;
+  }
+  next();
+});
+
 app.use(express.json({ limit: '30mb' })); // allow PDF base64 in chat (backend validates max 20MB per file)
 app.use(cookieParser());
 
@@ -87,8 +98,13 @@ app.get('/', (_req, res) => {
   res.status(200).json({ status: 'ok', service: 'agent-studio-api' });
 });
 
-// Health check (Railway and others)
+// Health check (Railway and others) — returns 503 during shutdown so the
+// load balancer stops routing traffic to this instance.
 app.get('/api/health', (_req, res) => {
+  if (isShuttingDown()) {
+    res.status(503).json({ status: 'shutting_down', timestamp: new Date().toISOString() });
+    return;
+  }
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
@@ -129,6 +145,10 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   });
   console.log(`[server] Agent Studio server running on http://0.0.0.0:${PORT}`);
 });
+
+// Graceful shutdown: handles SIGTERM/SIGINT, drains SSE streams, closes DB.
+setupGracefulShutdown(server, db);
+
 server.on('error', (err: NodeJS.ErrnoException) => {
   if (err.code === 'EADDRINUSE') {
     process.stderr.write(`[server] Port ${PORT} is in use. Close the other process and try again.\n`);

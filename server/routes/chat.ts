@@ -6,6 +6,7 @@ import { resolveToolsForAgent, toOpenRouterTools, runTool } from '../tools/index
 import { annotationsFromWebSearchResults } from '../tools/registry.js';
 import type { McpConnection } from '../mcp/index.js';
 import { AuthRequest } from '../middleware/auth.js';
+import { trackStream, untrackStream, isShuttingDown } from '../shutdown.js';
 
 const router = Router();
 const MAX_TOOL_ITERATIONS = 10;
@@ -242,6 +243,13 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     mcpClients = resolved.mcpClients;
     const openRouterTools = toOpenRouterTools(resolvedTools);
 
+    // Early exit if server is shutting down (shouldn't reach here due to
+    // middleware, but defend in depth for requests already past middleware).
+    if (isShuttingDown()) {
+      res.status(503).json({ error: 'Server is restarting. Please retry in a moment.' });
+      return;
+    }
+
     // Set up SSE headers and flush them immediately
     // This is critical when behind a proxy (like Vite dev server) to
     // establish the streaming connection before the upstream fetch begins
@@ -250,6 +258,9 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders();
+
+    // Register this SSE connection for graceful shutdown draining.
+    trackStream(res);
 
     const apiUrl = 'https://openrouter.ai/api/v1/chat/completions';
 
@@ -734,6 +745,8 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       res.end();
     }
   } finally {
+    // Unregister this SSE connection from the shutdown tracker.
+    untrackStream(res);
     // Close MCP connections so stdio processes and HTTP sessions are released
     for (const conn of mcpClients.values()) {
       conn.close().catch((e) => console.error('[chat] MCP close error:', e));
