@@ -11,7 +11,8 @@
     "build:server": "tsc -p tsconfig.server.json",
     "build:client": "vite build",
     "start": "node dist/server/index.js",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "db:restore": "node scripts/restore-db-from-stdin.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",

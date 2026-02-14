@@ -385,15 +385,26 @@ export function migrate() {
     db.exec('ALTER TABLE settings_new RENAME TO settings');
   }
 
-  // Initial admin user for deployment: transfer all existing data to this user
+  // Initial admin user for deployment: create or update from INITIAL_ADMIN_PASSWORD
   const INITIAL_ADMIN_EMAIL = 'pablomiguelargudo@gmail.com';
+  const adminPasswordEnv = process.env.INITIAL_ADMIN_PASSWORD;
+  const adminPasswordSet = typeof adminPasswordEnv === 'string' && adminPasswordEnv.length >= 8;
+
   const existingAdmin = db.prepare('SELECT id FROM users WHERE email = ?').get(INITIAL_ADMIN_EMAIL) as { id: string } | undefined;
-  if (!existingAdmin && defaultUserId) {
+
+  if (existingAdmin && adminPasswordSet) {
+    try {
+      const bcrypt = require('bcrypt');
+      const password_hash = bcrypt.hashSync(adminPasswordEnv, 12);
+      db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(password_hash, existingAdmin.id);
+      console.log('[Agent Studio] Initial admin password updated from INITIAL_ADMIN_PASSWORD.');
+    } catch (e) {
+      console.error('[Agent Studio] Failed to update initial admin password:', e);
+    }
+  } else if (!existingAdmin && defaultUserId) {
     const { nanoid } = await_nanoid();
     const newAdminId = nanoid();
-    const rawPassword = (process.env.INITIAL_ADMIN_PASSWORD && process.env.INITIAL_ADMIN_PASSWORD.length >= 8)
-      ? process.env.INITIAL_ADMIN_PASSWORD
-      : crypto.randomBytes(16).toString('base64url');
+    const rawPassword = adminPasswordSet ? adminPasswordEnv! : crypto.randomBytes(16).toString('base64url');
     try {
       const bcrypt = require('bcrypt');
       const password_hash = bcrypt.hashSync(rawPassword, 12);
@@ -404,7 +415,7 @@ export function migrate() {
       db.prepare('UPDATE tools SET user_id = ? WHERE user_id = ?').run(newAdminId, defaultUserId);
       db.prepare('UPDATE mcp_servers SET user_id = ? WHERE user_id = ?').run(newAdminId, defaultUserId);
       console.log('[Agent Studio] Initial admin created: ' + INITIAL_ADMIN_EMAIL);
-      if (!process.env.INITIAL_ADMIN_PASSWORD) {
+      if (!adminPasswordSet) {
         console.log('[Agent Studio] One-time password (save it, then change after first login): ' + rawPassword);
       }
     } catch (e) {
