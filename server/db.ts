@@ -400,7 +400,18 @@ export function migrate() {
     } catch (e) {
       console.error('[Agent Studio] Failed to update initial admin password:', e);
     }
-  } else if (!existingAdmin && defaultUserId) {
+  }
+
+  // Reassign any data still under default user (local@localhost) to the admin (e.g. after restoring a local DB)
+  if (existingAdmin && defaultUserId && existingAdmin.id !== defaultUserId) {
+    db.prepare('UPDATE agents SET user_id = ? WHERE user_id = ?').run(existingAdmin.id, defaultUserId);
+    db.prepare('UPDATE conversations SET user_id = ? WHERE user_id = ?').run(existingAdmin.id, defaultUserId);
+    db.prepare('UPDATE settings SET user_id = ? WHERE user_id = ?').run(existingAdmin.id, defaultUserId);
+    db.prepare('UPDATE tools SET user_id = ? WHERE user_id = ?').run(existingAdmin.id, defaultUserId);
+    db.prepare('UPDATE mcp_servers SET user_id = ? WHERE user_id = ?').run(existingAdmin.id, defaultUserId);
+  }
+
+  if (!existingAdmin && defaultUserId) {
     const { nanoid } = await_nanoid();
     const newAdminId = nanoid();
     const rawPassword = adminPasswordSet ? adminPasswordEnv! : crypto.randomBytes(16).toString('base64url');
