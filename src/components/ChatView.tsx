@@ -97,6 +97,7 @@ export function ChatView() {
     generalChatSettings,
     councilEnabled,
     councilConfig,
+    selectedCouncilId,
     councilMemberProgress,
     councilSynthesisPhase,
   } = useStore();
@@ -364,7 +365,10 @@ export function ChatView() {
       ...(pdfEngine && { pdf_engine: pdfEngine }),
       ...(messageModelOverride && { model: messageModelOverride }),
       ...(invokeAgentId && { invokeAgentId }),
-      ...(councilEnabled && councilConfig && { councilConfig }),
+      ...(councilEnabled && councilConfig && {
+      councilConfig,
+      ...(selectedCouncilId && { councilMemberId: selectedCouncilId }),
+    }),
     });
     setInputValue('');
     setPendingAttachments([]);

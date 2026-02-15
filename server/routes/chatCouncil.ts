@@ -292,28 +292,25 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       return { role: row.role as 'user' | 'assistant', content: row.content };
     });
 
-    // Resolve tools for council
-    let resolvedTools: Awaited<ReturnType<typeof resolveToolsForAgent>>['resolvedTools'] = [];
-    if (agent.id !== 'general' && conversation.agent_id) {
-      const resolved = await resolveToolsForAgent(agent.id, userId);
-      resolvedTools = resolved.resolvedTools;
-      mcpClients = resolved.mcpClients;
-    } else if (generalSettings) {
-      const resolved = await resolveToolsFromIds(
-        generalSettings.tool_ids || [],
-        generalSettings.mcp_server_ids || [],
-        userId
-      );
-      resolvedTools = resolved.resolvedTools;
-      mcpClients = resolved.mcpClients;
-    }
+    // Resolve tools for council (same logic as chat: general → settings tool_ids, else agent tools)
+    const resolved =
+      agent.id === 'general' && generalSettings
+        ? await resolveToolsFromIds(
+            generalSettings.tool_ids || [],
+            generalSettings.mcp_server_ids || [],
+            userId
+          )
+        : await resolveToolsForAgent(agent.id, userId);
+    let resolvedTools = resolved.resolvedTools;
+    mcpClients = resolved.mcpClients;
 
-    // Add council-specific tools if configured
+    // Add council-specific tools if configured (resolve by id only: council belongs to user, tool_ids are from their config)
     if (councilConfig.tool_ids?.length || councilConfig.mcp_server_ids?.length) {
       const councilResolved = await resolveToolsFromIds(
         councilConfig.tool_ids || [],
         councilConfig.mcp_server_ids || [],
-        userId
+        userId,
+        { byIdOnly: true }
       );
       // Merge tools avoiding duplicates
       const existingNames = new Set(resolvedTools.map((t) => t.name));

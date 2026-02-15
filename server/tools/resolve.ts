@@ -215,27 +215,40 @@ export async function resolveToolsForAgent(agentId: string, userId: string): Pro
   return { resolvedTools: resolved, mcpClients };
 }
 
+export interface ResolveToolsFromIdsOptions {
+  /** When true, resolve tools by id only (no user_id filter). Use for council merge when council belongs to current user. */
+  byIdOnly?: boolean;
+}
+
 /**
- * Resolve tools and MCP servers by explicit IDs (for general chat).
- * Only resolves tools and MCP servers that belong to the user (user_id filter).
+ * Resolve tools and MCP servers by explicit IDs (for general chat or council merge).
+ * By default only resolves tools that belong to the user (user_id filter).
  * MCP clients are connected and must be closed by the caller when done.
  */
 export async function resolveToolsFromIds(
   toolIds: string[],
   mcpServerIds: string[],
-  userId: string
+  userId: string,
+  options?: ResolveToolsFromIdsOptions
 ): Promise<ResolveToolsResult> {
   const resolved: ResolvedTool[] = [];
   const mcpClients = new Map<string, McpConnection>();
+  const byIdOnly = options?.byIdOnly === true;
 
-  // 1. Tools from tools table by id, scoped to user
+  // 1. Tools from tools table by id; optionally scoped to user
   if (toolIds.length > 0) {
     const placeholders = toolIds.map(() => '?').join(',');
-    const rows = db.prepare(`
-      SELECT id, name, description, parameters_schema, type, config
-      FROM tools
-      WHERE id IN (${placeholders}) AND user_id = ?
-    `).all(...toolIds, userId) as ToolRow[];
+    const rows = byIdOnly
+      ? (db.prepare(`
+          SELECT id, name, description, parameters_schema, type, config
+          FROM tools
+          WHERE id IN (${placeholders})
+        `).all(...toolIds) as ToolRow[])
+      : (db.prepare(`
+          SELECT id, name, description, parameters_schema, type, config
+          FROM tools
+          WHERE id IN (${placeholders}) AND user_id = ?
+        `).all(...toolIds, userId) as ToolRow[]);
 
     for (const row of rows) {
       if (!isUsable(row, userId)) continue;
@@ -283,9 +296,11 @@ export async function resolveToolsFromIds(
     }
   }
 
-  // 2. MCP servers by id, scoped to user
+  // 2. MCP servers by id; optionally scoped to user
   for (const mcp_server_id of mcpServerIds) {
-    const serverRow = db.prepare('SELECT id, name, transport, config FROM mcp_servers WHERE id = ? AND user_id = ?').get(mcp_server_id, userId) as
+    const serverRow = (byIdOnly
+      ? db.prepare('SELECT id, name, transport, config FROM mcp_servers WHERE id = ?').get(mcp_server_id)
+      : db.prepare('SELECT id, name, transport, config FROM mcp_servers WHERE id = ? AND user_id = ?').get(mcp_server_id, userId)) as
       | { id: string; name: string; transport: string; config: string }
       | undefined;
     if (!serverRow) continue;

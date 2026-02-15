@@ -11,6 +11,8 @@ export interface SendMessageOptions {
   model?: string;
   invokeAgentId?: string;
   councilConfig?: CouncilConfig;
+  /** When set, server loads full council config (including tool_ids) from DB instead of using councilConfig inline */
+  councilMemberId?: string;
 }
 
 export function useChat() {
@@ -64,9 +66,10 @@ export function useChat() {
     const pdf_engine = options?.pdf_engine;
     const invokeAgentId = options?.invokeAgentId;
     const councilConfig = options?.councilConfig;
+    const councilMemberId = options?.councilMemberId;
 
-    if (!councilConfig) {
-      console.error('Council config required for council mode');
+    if (!councilMemberId && !councilConfig) {
+      console.error('Council config or councilMemberId required for council mode');
       return;
     }
 
@@ -108,7 +111,9 @@ export function useChat() {
         {
           conversation_id: activeConversationId,
           content: content.trim(),
-          council_config: councilConfig,
+          ...(councilMemberId
+            ? { council_member_id: councilMemberId }
+            : { council_config: councilConfig }),
           attachments,
           pdf_engine,
           invoke_agent_id: invokeAgentId,
