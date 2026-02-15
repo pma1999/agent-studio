@@ -3,8 +3,8 @@ import { Cpu, Sparkles, Zap, Brain, Bot } from 'lucide-react';
 
 interface ModelAvatarProps {
   modelId: string;
-  size?: 'sm' | 'md' | 'lg';
-  status?: 'pending' | 'running' | 'success' | 'error' | 'timeout';
+  size?: 'xs' | 'sm' | 'md' | 'lg';
+  status?: 'pending' | 'running' | 'success' | 'error' | 'timeout' | 'cancelled';
   showGlow?: boolean;
 }
 
@@ -46,6 +46,7 @@ export function ModelAvatar({ modelId, size = 'md', status, showGlow }: ModelAva
   const config = PROVIDER_CONFIG[provider] || PROVIDER_CONFIG.default;
 
   const sizeStyles = {
+    xs: { width: 20, height: 20, fontSize: 10 },
     sm: { width: 28, height: 28, fontSize: 12 },
     md: { width: 36, height: 36, fontSize: 14 },
     lg: { width: 48, height: 48, fontSize: 18 },
@@ -72,6 +73,7 @@ export function ModelAvatar({ modelId, size = 'md', status, showGlow }: ModelAva
           boxShadow: '0 0 0 2px rgba(201, 107, 107, 0.3)',
         };
       case 'timeout':
+      case 'cancelled':
         return {
           borderColor: '#d4a557',
           boxShadow: '0 0 0 2px rgba(212, 165, 87, 0.3)',
