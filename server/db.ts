@@ -364,7 +364,8 @@ export function migrate() {
 
   // Migration: make agent_id nullable in conversations for general chat support
   // SQLite doesn't support ALTER COLUMN, so we need to recreate the table
-  const agentIdCol = convCols.find((c) => c.name === 'agent_id');
+  type PragmaCol = { name: string; notnull?: number };
+  const agentIdCol = convCols.find((c) => c.name === 'agent_id') as PragmaCol | undefined;
   if (agentIdCol && agentIdCol.notnull === 1) {
     db.exec(`
       CREATE TABLE conversations_new (

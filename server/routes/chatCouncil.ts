@@ -227,11 +227,12 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         res.status(404).json({ error: 'Council configuration not found' });
         return;
       }
+      const rawShow = (member as unknown as { show_member_responses?: number }).show_member_responses;
       councilConfig = {
         member_models: JSON.parse(member.member_models as unknown as string),
         synthesizer_model: member.synthesizer_model,
         synthesis_prompt_template: member.synthesis_prompt_template || undefined,
-        show_member_responses: (member as { show_member_responses?: number }).show_member_responses !== 0,
+        show_member_responses: rawShow !== 0,
         tool_ids: JSON.parse((member.tool_ids || '[]') as unknown as string),
         mcp_server_ids: JSON.parse((member.mcp_server_ids || '[]') as unknown as string),
       };

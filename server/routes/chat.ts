@@ -36,6 +36,7 @@ interface Conversation {
   user_id: string;
   agent_id: string | null;
   title: string;
+  /** Per-conversation model override (from conversations.model column). */
   model?: string | null;
 }
 
