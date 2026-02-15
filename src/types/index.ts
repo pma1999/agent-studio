@@ -306,8 +306,29 @@ export interface CouncilResponse {
   created_at: string;
 }
 
+/** Structured comparison data: agreements, disagreements, unique findings per model. */
+export interface CouncilComparison {
+  question_type?: 'yes_no' | 'open' | 'comparison';
+  agreements?: Array<{
+    finding: string;
+    model_ids: string[];
+    evidence?: string;
+  }>;
+  disagreements?: Array<{
+    topic: string;
+    stances: Array<{ model_id: string; stance: string }>;
+    why_they_differ: string;
+  }>;
+  unique_findings?: Array<{
+    model_id: string;
+    finding: string;
+    why_it_matters?: string;
+  }>;
+}
+
 export interface CouncilRunDetail extends CouncilRun {
   responses: CouncilResponse[];
+  comparison?: CouncilComparison;
   synthesis_message?: Message;
 }
 

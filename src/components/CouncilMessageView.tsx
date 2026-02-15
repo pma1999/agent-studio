@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Building2, Sparkles, ChevronDown, Brain, CheckCircle2 } from 'lucide-react';
 import { MarkdownContent } from './MarkdownContent';
 import { CouncilHeader } from './council/CouncilHeader';
+import { CouncilComparisonSection } from './council/CouncilComparisonSection';
 import { MemberPerspectiveCard } from './council/MemberPerspectiveCard';
 import { TotalCostBadge } from './council/CostBadge';
 import type { CouncilRunDetail } from '../types';
@@ -196,6 +197,14 @@ export function CouncilMessageView({
           </div>
         </div>
       </motion.div>
+
+      {/* Compare perspectives: agreements, disagreements, unique findings */}
+      {councilRun.comparison && (
+        <CouncilComparisonSection
+          comparison={councilRun.comparison}
+          modelIds={successfulResponses.map((r) => r.model_id)}
+        />
+      )}
 
       {/* Expert Perspectives Section - only when show_member_responses is not false */}
       {councilRun.show_member_responses !== false && (

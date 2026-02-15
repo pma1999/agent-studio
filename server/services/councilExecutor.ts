@@ -11,7 +11,87 @@ import { runTool, toOpenRouterTools } from '../tools/index.js';
 
 const MEMBER_TIMEOUT_MS = 240000; // 4 minutes per member
 const SYNTHESIS_TIMEOUT_MS = 240000; // 4 minutes for synthesis
+const COMPARISON_EXTRACTION_TIMEOUT_MS = 60000; // 1 minute
 const MAX_RETRIES = 1;
+const MAX_MEMBER_CONTENT_FOR_COMPARISON = 2800; // chars per member to stay within context
+
+/** OpenRouter JSON Schema for council comparison (structured output). */
+const COUNCIL_COMPARISON_JSON_SCHEMA = {
+  name: 'council_comparison',
+  strict: true,
+  schema: {
+    type: 'object',
+    properties: {
+      question_type: {
+        type: 'string',
+        enum: ['yes_no', 'open', 'comparison'],
+        description: 'Whether the user question is binary (yes/no), open-ended, or a comparison.',
+      },
+      agreements: {
+        type: 'array',
+        maxItems: 7,
+        description: 'Points on which multiple models agree.',
+        items: {
+          type: 'object',
+          properties: {
+            finding: { type: 'string', description: 'One-sentence statement all listed models agree on.' },
+            model_ids: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Exact model IDs that agree (e.g. anthropic/claude-3.5-sonnet).',
+            },
+            evidence: { type: 'string', description: 'Optional short evidence or source.' },
+          },
+          required: ['finding', 'model_ids'],
+          additionalProperties: false,
+        },
+      },
+      disagreements: {
+        type: 'array',
+        maxItems: 7,
+        description: 'Topics where models differ.',
+        items: {
+          type: 'object',
+          properties: {
+            topic: { type: 'string', description: 'Short topic label.' },
+            stances: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  model_id: { type: 'string', description: 'Exact model ID.' },
+                  stance: { type: 'string', description: 'That model\'s position in one sentence.' },
+                },
+                required: ['model_id', 'stance'],
+                additionalProperties: false,
+              },
+            },
+            why_they_differ: { type: 'string', description: 'Brief explanation of the root cause of disagreement.' },
+          },
+          required: ['topic', 'stances', 'why_they_differ'],
+          additionalProperties: false,
+        },
+      },
+      unique_findings: {
+        type: 'array',
+        maxItems: 7,
+        description: 'Insights mentioned by only one model.',
+        items: {
+          type: 'object',
+          properties: {
+            model_id: { type: 'string', description: 'Exact model ID.' },
+            finding: { type: 'string', description: 'The unique insight in one sentence.' },
+            why_it_matters: { type: 'string', description: 'Optional one-sentence significance.' },
+          },
+          required: ['model_id', 'finding'],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: [],
+    additionalProperties: false,
+  },
+} as const;
 
 interface StreamChunk {
   content?: string;
@@ -573,6 +653,17 @@ export class CouncilExecutor {
 
     console.log(`   ✅ Synthesis Complete: ${totalTokens.toLocaleString()} tokens | $${(cost || 0).toFixed(4)} | ${(responseTimeMs / 1000).toFixed(1)}s`);
 
+    // Extract structured comparison (agreements, disagreements, unique findings) via structured output
+    let comparisonJson: string | null = null;
+    try {
+      comparisonJson = await this.extractComparison(successfulResults, fullContent, options.content, synthesizerModel, options.signal);
+      if (comparisonJson) {
+        console.log(`   📊 Comparison extraction OK (${comparisonJson.length} chars)`);
+      }
+    } catch (err) {
+      console.log(`   ⚠️ Comparison extraction skipped: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
     return {
       content: fullContent,
       reasoningContent: fullReasoning || undefined,
@@ -581,7 +672,102 @@ export class CouncilExecutor {
       completionTokens,
       cost,
       responseTimeMs,
+      comparisonJson: comparisonJson ?? undefined,
     };
+  }
+
+  /**
+   * Call OpenRouter with response_format json_schema to get structured comparison.
+   * Returns raw JSON string or null on failure (graceful degradation).
+   */
+  private async extractComparison(
+    memberResults: MemberResult[],
+    synthesisContent: string,
+    userQuery: string,
+    synthesizerModel: string,
+    signal?: AbortSignal
+  ): Promise<string | null> {
+    const truncatedResponses = memberResults.map((r) => ({
+      model_id: r.modelId,
+      content: r.content.length > MAX_MEMBER_CONTENT_FOR_COMPARISON
+        ? r.content.slice(0, MAX_MEMBER_CONTENT_FOR_COMPARISON) + '…'
+        : r.content,
+    }));
+
+    const prompt = `You are an analyst. Given the user's question, the individual AI model responses below, and the synthesized answer, output a structured comparison.
+
+## User question
+${userQuery}
+
+## Individual model responses (excerpts)
+${truncatedResponses.map((r, i) => `### Model ${i + 1}: ${r.model_id}\n${r.content}`).join('\n\n')}
+
+## Synthesized answer
+${synthesisContent.slice(0, 4000)}${synthesisContent.length > 4000 ? '…' : ''}
+
+## Your task
+1. Set question_type to "yes_no" if the question is binary (e.g. "Is X good?"), "open" for open-ended, or "comparison" for A vs B.
+2. List up to 7 agreements: findings where at least two models agree. Use exact model_id strings as given above.
+3. List up to 7 disagreements: topic, each model's stance (model_id + stance), and why_they_differ in one sentence.
+4. List up to 7 unique_findings: insights from only one model (model_id, finding, optional why_it_matters).
+
+Output only the JSON object that matches the schema. Use the exact model_id values from the responses (e.g. anthropic/claude-3.5-sonnet, openai/gpt-4o).`;
+
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error('Comparison extraction timeout')), COMPARISON_EXTRACTION_TIMEOUT_MS);
+    });
+
+    const fetchPromise = fetch(this.apiUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${this.apiKey}`,
+        'HTTP-Referer': 'http://localhost:5173',
+        'X-Title': 'Agent Studio',
+      },
+      body: JSON.stringify({
+        model: synthesizerModel,
+        messages: [
+          { role: 'user', content: prompt },
+        ],
+        temperature: 0.3,
+        max_tokens: 2048,
+        stream: false,
+        response_format: {
+          type: 'json_schema',
+          json_schema: COUNCIL_COMPARISON_JSON_SCHEMA,
+        },
+      }),
+      signal,
+    });
+
+    const response = await Promise.race([fetchPromise, timeoutPromise]);
+
+    try {
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`Comparison API ${response.status}: ${text.slice(0, 200)}`);
+      }
+
+      const data = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
+      const raw = data.choices?.[0]?.message?.content;
+      if (typeof raw !== 'string' || !raw.trim()) {
+        return null;
+      }
+
+      // Validate that it parses and has expected shape (optional but safer)
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      if (typeof parsed !== 'object' || parsed === null) {
+        return null;
+      }
+
+      return raw;
+    } catch (e) {
+      if (e instanceof Error && e.name === 'AbortError') {
+        throw new Error('Comparison extraction timeout');
+      }
+      throw e;
+    }
   }
 
   private buildSynthesisPrompt(memberResults: MemberResult[], userQuery: string): string {

@@ -591,6 +591,12 @@ function migrateCouncilTables() {
   if (!runCols.some((c) => c.name === 'show_member_responses')) {
     db.exec("ALTER TABLE council_runs ADD COLUMN show_member_responses INTEGER DEFAULT 1");
   }
+
+  // Add comparison_json for structured agreement/disagreement/unique findings
+  const runCols2 = db.prepare("PRAGMA table_info(council_runs)").all() as { name: string }[];
+  if (!runCols2.some((c) => c.name === 'comparison_json')) {
+    db.exec("ALTER TABLE council_runs ADD COLUMN comparison_json TEXT DEFAULT NULL");
+  }
 }
 
 // Synchronous nanoid workaround for seeding

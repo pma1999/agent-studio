@@ -471,7 +471,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       councilRunId
     );
 
-    // Update council run
+    // Update council run (including structured comparison if extracted)
     const successfulCount = result.memberResults.filter((r) => r.status === 'success').length;
     const failedCount = result.memberResults.length - successfulCount;
     db.prepare(`
@@ -483,7 +483,8 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         total_tokens = ?,
         total_prompt_tokens = ?,
         total_completion_tokens = ?,
-        failed_members = ?
+        failed_members = ?,
+        comparison_json = ?
       WHERE id = ?
     `).run(
       assistantMsgId,
@@ -493,6 +494,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       result.memberResults.reduce((sum, r) => sum + r.promptTokens, 0),
       result.memberResults.reduce((sum, r) => sum + r.completionTokens, 0),
       failedCount,
+      result.synthesis.comparisonJson ?? null,
       councilRunId
     );
 

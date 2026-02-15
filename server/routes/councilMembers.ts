@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { nanoid } from 'nanoid';
 import db from '../db.js';
 import { AuthRequest } from '../middleware/auth.js';
-import type { CouncilMember, CouncilRun, CouncilResponse, CouncilRunDetail, ToolResultRecord, ToolCallSpec } from '../types.js';
+import type { CouncilMember, CouncilRun, CouncilResponse, CouncilRunDetail, CouncilComparison, ToolResultRecord, ToolCallSpec } from '../types.js';
 
 const router = Router();
 
@@ -96,6 +96,7 @@ router.get('/runs/:id', (req: AuthRequest, res: Response) => {
       synthesis_reasoning?: string;
       synthesis_tokens?: number;
       synthesis_cost?: number;
+      comparison_json?: string | null;
     }) | undefined;
 
     if (!run) {
@@ -138,11 +139,20 @@ router.get('/runs/:id', (req: AuthRequest, res: Response) => {
       return { ...rest, tool_calls, tool_results };
     });
 
-    const { show_member_responses: rawShow } = run as { show_member_responses?: number };
+    const { show_member_responses: rawShow, comparison_json: comparisonJsonRaw } = run;
+    let comparison: CouncilComparison | undefined;
+    if (comparisonJsonRaw && comparisonJsonRaw.trim()) {
+      try {
+        comparison = JSON.parse(comparisonJsonRaw) as CouncilComparison;
+      } catch {
+        comparison = undefined;
+      }
+    }
     const result: CouncilRunDetail = {
       ...run,
       show_member_responses: rawShow !== 0,
       responses,
+      comparison,
       synthesis_message: run.synthesis_content
         ? {
             id: run.message_id || '',

@@ -50,6 +50,26 @@ export interface MemberResult {
   toolResults?: ToolResultRecord[];
 }
 
+/** Structured comparison data extracted after synthesis (agreements, disagreements, unique findings). */
+export interface CouncilComparison {
+  question_type?: 'yes_no' | 'open' | 'comparison';
+  agreements?: Array<{
+    finding: string;
+    model_ids: string[];
+    evidence?: string;
+  }>;
+  disagreements?: Array<{
+    topic: string;
+    stances: Array<{ model_id: string; stance: string }>;
+    why_they_differ: string;
+  }>;
+  unique_findings?: Array<{
+    model_id: string;
+    finding: string;
+    why_it_matters?: string;
+  }>;
+}
+
 export interface SynthesisResult {
   content: string;
   reasoningContent?: string;
@@ -58,6 +78,8 @@ export interface SynthesisResult {
   completionTokens: number;
   cost: number;
   responseTimeMs: number;
+  /** JSON string from comparison extraction; null if extraction failed or was skipped. */
+  comparisonJson?: string | null;
 }
 
 export interface CouncilResult {
@@ -141,6 +163,7 @@ export interface CouncilRun {
 
 export interface CouncilRunDetail extends CouncilRun {
   responses: CouncilResponse[];
+  comparison?: CouncilComparison;
   synthesis_message?: {
     id: string;
     conversation_id: string;
