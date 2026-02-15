@@ -154,13 +154,22 @@ export interface StreamingReasoningEvent {
   content: string;
 }
 
+export interface StreamingContentEvent {
+  id: string;
+  type: 'content';
+  content: string;
+}
+
 export interface StreamingToolEvent {
   id: string;
   type: 'tool';
   tool: ToolExecution;
 }
 
-export type StreamingActivityEvent = StreamingReasoningEvent | StreamingToolEvent;
+export type StreamingActivityEvent =
+  | StreamingReasoningEvent
+  | StreamingContentEvent
+  | StreamingToolEvent;
 
 export interface AgentFormData {
   name: string;

@@ -92,7 +92,9 @@ export function ChatView() {
       .map((ev) => (
         ev.type === 'reasoning'
           ? `r:${ev.id}:${ev.content.length}`
-          : `t:${ev.tool.id}:${ev.tool.status}:${(ev.tool.result || '').length}`
+          : ev.type === 'content'
+            ? `c:${ev.id}:${ev.content.length}`
+            : `t:${ev.tool.id}:${ev.tool.status}:${(ev.tool.result || '').length}`
       ))
       .join('|')
   ), [streamingActivityEvents]);

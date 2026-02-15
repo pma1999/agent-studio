@@ -286,6 +286,15 @@ function ReasoningBlock({
   );
 }
 
+function StreamingContentBlock({ content }: { content: string }) {
+  if (!content.trim()) return null;
+  return (
+    <div style={{ marginTop: '2px' }}>
+      <MarkdownContent content={content} />
+    </div>
+  );
+}
+
 // Citation links from web search (only annotations with url)
 function CitationLinks({ annotations }: { annotations: Annotation[] }) {
   const withUrl = annotations.filter((a): a is Annotation & { url: string } => !!a.url);
@@ -386,6 +395,7 @@ export function MessageBubble({
   const annotations = message.annotations || [];
   const orderedStreamingEvents = streamingActivityEvents || [];
   const hasOrderedStreamingEvents = !!isStreaming && orderedStreamingEvents.length > 0;
+  const shouldRenderStandaloneContent = !hasOrderedStreamingEvents;
 
   const handleCopy = () => {
     navigator.clipboard.writeText(displayContent);
@@ -522,6 +532,11 @@ export function MessageBubble({
                       isStreaming={true}
                       tokenCount={undefined}
                     />
+                  ) : ev.type === 'content' ? (
+                    <StreamingContentBlock
+                      key={ev.id}
+                      content={ev.content}
+                    />
                   ) : (
                     <ToolCallTimeline
                       key={ev.id}
@@ -552,37 +567,39 @@ export function MessageBubble({
               </>
             )}
 
-            {displayContent ? (
-              !isStreaming && getJsonFromContent(displayContent) !== null ? (
-                <JsonContentView content={displayContent} />
+            {shouldRenderStandaloneContent && (
+              displayContent ? (
+                !isStreaming && getJsonFromContent(displayContent) !== null ? (
+                  <JsonContentView content={displayContent} />
+                ) : (
+                  <MarkdownContent content={displayContent} />
+                )
               ) : (
-                <MarkdownContent content={displayContent} />
-              )
-            ) : (
-              isStreaming && !reasoningText && (
-                <div style={{
-                  display: 'flex',
-                  gap: '4px',
-                  padding: '8px 0',
-                }}>
-                  {[0, 1, 2].map((i) => (
-                    <motion.div
-                      key={i}
-                      animate={{ opacity: [0.3, 1, 0.3] }}
-                      transition={{
-                        duration: 1.2,
-                        repeat: Infinity,
-                        delay: i * 0.2,
-                      }}
-                      style={{
-                        width: '6px',
-                        height: '6px',
-                        borderRadius: '50%',
-                        background: 'var(--accent)',
-                      }}
-                    />
-                  ))}
-                </div>
+                isStreaming && !reasoningText && (
+                  <div style={{
+                    display: 'flex',
+                    gap: '4px',
+                    padding: '8px 0',
+                  }}>
+                    {[0, 1, 2].map((i) => (
+                      <motion.div
+                        key={i}
+                        animate={{ opacity: [0.3, 1, 0.3] }}
+                        transition={{
+                          duration: 1.2,
+                          repeat: Infinity,
+                          delay: i * 0.2,
+                        }}
+                        style={{
+                          width: '6px',
+                          height: '6px',
+                          borderRadius: '50%',
+                          background: 'var(--accent)',
+                        }}
+                      />
+                    ))}
+                  </div>
+                )
               )
             )}
 
