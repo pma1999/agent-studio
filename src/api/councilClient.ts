@@ -7,7 +7,8 @@ import type {
   CouncilConfig,
 } from '../types';
 
-const API_BASE = '/api';
+/** Same as main API client: use VITE_API_URL in production so requests hit the backend, not the SPA. */
+const API_BASE = (import.meta.env.VITE_API_URL ?? '').replace(/\/$/, '') + '/api';
 
 export interface CouncilStreamHandlers {
   onMemberStart?: (event: { member_index: number; model_id: string; total_members: number }) => void;
