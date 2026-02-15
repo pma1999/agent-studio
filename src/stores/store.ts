@@ -72,8 +72,9 @@ interface AppState {
   reasoningOverride: ReasoningConfig | null;
   setReasoningOverride: (config: ReasoningConfig | null) => void;
 
-  // Ordered live activity timeline (thinking/tool) for current streaming message
+  // Ordered live activity timeline (text/thinking/tool) for current streaming message
   streamingActivityEvents: StreamingActivityEvent[];
+  appendStreamingContentEvent: (chunk: string) => void;
   appendStreamingReasoningEvent: (chunk: string) => void;
   upsertStreamingToolCall: (data: { id: string; name: string; arguments: string; source?: ToolSource }) => void;
   completeStreamingToolCall: (data: { id: string; name: string; ok: boolean; result?: string; duration_ms?: number; source?: ToolSource }) => void;
@@ -229,6 +230,29 @@ export const useStore = create<AppState>((set, get) => ({
 
   // Ordered streaming activity timeline (append by arrival order)
   streamingActivityEvents: [],
+  appendStreamingContentEvent: (chunk) => set((state) => {
+    if (!chunk) return {};
+    const events = state.streamingActivityEvents;
+    const last = events[events.length - 1];
+    if (last && last.type === 'content') {
+      const next = [...events];
+      next[next.length - 1] = {
+        ...last,
+        content: last.content + chunk,
+      };
+      return { streamingActivityEvents: next };
+    }
+    return {
+      streamingActivityEvents: [
+        ...events,
+        {
+          id: `content-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          type: 'content',
+          content: chunk,
+        },
+      ],
+    };
+  }),
   appendStreamingReasoningEvent: (chunk) => set((state) => {
     if (!chunk) return {};
     const events = state.streamingActivityEvents;

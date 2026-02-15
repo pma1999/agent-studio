@@ -17,6 +17,7 @@ export function useChat() {
     streamingContent,
     setStreamingContent,
     appendStreamingContent,
+    appendStreamingContentEvent,
     setAbortController,
     setStreamStartTime,
     reasoningContent,
@@ -73,7 +74,10 @@ export function useChat() {
     await streamChat(
       activeConversationId,
       content.trim(),
-      (chunk) => appendStreamingContent(chunk),
+      (chunk) => {
+        appendStreamingContent(chunk);
+        appendStreamingContentEvent(chunk);
+      },
       async () => {
         setIsStreaming(false);
         setStreamStartTime(null);
@@ -112,7 +116,7 @@ export function useChat() {
       attachments,
       pdf_engine,
     );
-  }, [activeConversationId, isStreaming, addMessage, setIsStreaming, setStreamingContent, appendStreamingContent, setAbortController, setStreamStartTime, setReasoningContent, appendReasoningContent, appendStreamingReasoningEvent, reasoningOverride, upsertStreamingToolCall, completeStreamingToolCall, resetStreamingActivityEvents, loadMessages, loadConversations, selectedAgentId]);
+  }, [activeConversationId, isStreaming, addMessage, setIsStreaming, setStreamingContent, appendStreamingContent, appendStreamingContentEvent, setAbortController, setStreamStartTime, setReasoningContent, appendReasoningContent, appendStreamingReasoningEvent, reasoningOverride, upsertStreamingToolCall, completeStreamingToolCall, resetStreamingActivityEvents, loadMessages, loadConversations, selectedAgentId]);
 
   const cancelStream = useCallback(() => {
     const controller = useStore.getState().abortController;
