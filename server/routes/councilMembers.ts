@@ -371,7 +371,7 @@ router.delete('/members/:id', (req: AuthRequest, res: Response) => {
       return;
     }
 
-    res.status(204).send();
+    res.status(200).json({ success: true });
   } catch (err) {
     console.error('Error deleting council member:', err);
     res.status(500).json({ error: 'Internal server error' });
