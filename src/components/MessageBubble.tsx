@@ -447,16 +447,45 @@ export function MessageBubble({
           justifyContent: 'space-between',
           marginBottom: '6px',
         }}>
-          <span style={{
-            fontSize: '0.75rem',
-            fontWeight: 600,
-            color: isUser ? 'var(--text-secondary)' : 'var(--accent)',
-            textTransform: 'uppercase',
-            letterSpacing: '0.06em',
-            fontFamily: 'var(--font-body)',
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
           }}>
-            {isUser ? 'You' : 'Assistant'}
-          </span>
+            <span style={{
+              fontSize: '0.75rem',
+              fontWeight: 600,
+              color: isUser ? 'var(--text-secondary)' : 'var(--accent)',
+              textTransform: 'uppercase',
+              letterSpacing: '0.06em',
+              fontFamily: 'var(--font-body)',
+            }}>
+              {isUser ? 'You' : 'Assistant'}
+            </span>
+            {!isUser && message.processed_by_agent_id && message.processed_by_agent_name && (
+              <motion.span
+                initial={{ opacity: 0, scale: 0.9, x: -10 }}
+                animate={{ opacity: 1, scale: 1, x: 0 }}
+                transition={{ duration: 0.2, delay: 0.1 }}
+                title={`Processed by ${message.processed_by_agent_name}`}
+                style={{
+                  fontSize: '0.6875rem',
+                  fontWeight: 500,
+                  color: 'var(--accent)',
+                  background: 'var(--accent-glow)',
+                  padding: '3px 10px',
+                  borderRadius: 'var(--radius-md)',
+                  border: '1px solid var(--border-accent)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                }}
+              >
+                <Sparkles size={10} />
+                via {message.processed_by_agent_name}
+              </motion.span>
+            )}
+          </div>
           {!isUser && displayContent && !isStreaming && (
             <button
               onClick={handleCopy}

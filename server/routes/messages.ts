@@ -15,9 +15,11 @@ router.get('/:id/messages', (req: AuthRequest, res: Response) => {
     }
 
     const messages = db.prepare(`
-      SELECT * FROM messages
-      WHERE conversation_id = ?
-      ORDER BY created_at ASC
+      SELECT m.*, a.name as processed_by_agent_name
+      FROM messages m
+      LEFT JOIN agents a ON m.processed_by_agent_id = a.id
+      WHERE m.conversation_id = ?
+      ORDER BY m.created_at ASC
     `).all(req.params.id) as Record<string, unknown>[];
 
     // Parse JSON columns (annotations, tool_calls, attachments)

@@ -8,6 +8,9 @@ import { useAutoScroll } from '../hooks/useAutoScroll';
 import { MessageBubble } from './MessageBubble';
 import { EmptyState } from './EmptyState';
 import { Button } from './ui/Button';
+import { ModelSelector } from './ModelSelector';
+import { MessageModelSelector } from './MessageModelSelector';
+import { PremiumMentionInput } from './ui/PremiumMentionInput';
 import { ConversationTokenSummary, StreamingTokenCounter } from './TokenCounter';
 import type {
   ReasoningEffort,
@@ -98,13 +101,15 @@ export function ChatView() {
       ))
       .join('|')
   ), [streamingActivityEvents]);
-  const { sendMessage, cancelStream, startNewChat } = useChat();
+  const { sendMessage, cancelStream, startNewChat, startGeneralChat } = useChat();
   const [inputValue, setInputValue] = useState('');
   const [showReasoningPopover, setShowReasoningPopover] = useState(false);
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [pdfEngine, setPdfEngine] = useState<'' | PDFEngine>('');
   const [pdfUrlInput, setPdfUrlInput] = useState('');
   const [pdfUrlError, setPdfUrlError] = useState('');
+  const [messageModelOverride, setMessageModelOverride] = useState<string | null>(null);
+  const [invokeAgentId, setInvokeAgentId] = useState<string | undefined>(undefined);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const reasoningBtnRef = useRef<HTMLButtonElement>(null);
   const reasoningPopoverRef = useRef<HTMLDivElement>(null);
@@ -170,8 +175,42 @@ export function ChatView() {
   useEffect(() => {
     setReasoningOverride(null);
     setShowReasoningPopover(false);
+    setMessageModelOverride(null);
   }, [activeConversationId, setReasoningOverride]);
 
+  // Tool results memo (must be before early return)
+  const toolResultsByCallId = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const msg of messages) {
+      if (msg.role === 'tool' && msg.tool_call_id) {
+        map.set(msg.tool_call_id, msg.content || '');
+      }
+    }
+    return map;
+  }, [messages]);
+
+  const toolExecutionsByMessageId = useMemo(() => {
+    const map = new Map<string, ToolExecution[]>();
+    for (const msg of messages) {
+      if (msg.role !== 'assistant' || !msg.tool_calls || msg.tool_calls.length === 0) continue;
+      const executions: ToolExecution[] = msg.tool_calls.map((tc) => {
+        const toolName = tc.function?.name || tc.id;
+        const result = toolResultsByCallId.get(tc.id);
+        const ok = inferToolResultOk(result);
+        return {
+          id: tc.id,
+          name: toolName,
+          arguments: tc.function?.arguments || '{}',
+          status: result === undefined ? 'running' : ok === false ? 'error' : 'done',
+          result,
+          ok,
+          source: inferToolSource(toolName),
+        };
+      });
+      map.set(msg.id, executions);
+    }
+    return map;
+  }, [messages, toolResultsByCallId]);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -252,13 +291,17 @@ export function ChatView() {
     sendMessage(inputValue, {
       ...(attachmentsPayload?.length && { attachments: attachmentsPayload }),
       ...(pdfEngine && { pdf_engine: pdfEngine }),
+      ...(messageModelOverride && { model: messageModelOverride }),
+      ...(invokeAgentId && { invokeAgentId }),
     });
     setInputValue('');
     setPendingAttachments([]);
+    setMessageModelOverride(null);
+    setInvokeAgentId(undefined);
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
-  }, [inputValue, isStreaming, pendingAttachments, pdfEngine, sendMessage]);
+  }, [inputValue, isStreaming, pendingAttachments, pdfEngine, sendMessage, messageModelOverride, invokeAgentId]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -273,29 +316,15 @@ export function ChatView() {
       <EmptyState
         icon={<MessageSquare size={32} />}
         title="Start a Conversation"
-        description={
-          selectedAgentId
-            ? "Start a new chat with this agent, or select a conversation from the sidebar."
-            : "Select an agent first, then start chatting."
-        }
+        description="Start a new chat to begin. Use @ to mention an agent for specialized help."
         action={
-          selectedAgentId ? (
-            <Button
-              variant="primary"
-              icon={<MessageSquare size={16} />}
-              onClick={() => startNewChat(selectedAgentId)}
-            >
-              New Chat
-            </Button>
-          ) : (
-            <Button
-              variant="primary"
-              icon={<Bot size={16} />}
-              onClick={() => setCurrentView('agents')}
-            >
-              Browse Agents
-            </Button>
-          )
+          <Button
+            variant="primary"
+            icon={<MessageSquare size={16} />}
+            onClick={() => startGeneralChat()}
+          >
+            New Chat
+          </Button>
         }
       />
     );
@@ -305,38 +334,6 @@ export function ChatView() {
   const displayMessages = messages.filter((m) => m.role !== 'tool');
   const lastMsg = displayMessages[displayMessages.length - 1];
   const isLastMsgStreamingPlaceholder = lastMsg && lastMsg.role === 'assistant' && lastMsg.id.startsWith('temp-');
-  const toolResultsByCallId = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const msg of messages) {
-      if (msg.role === 'tool' && msg.tool_call_id) {
-        map.set(msg.tool_call_id, msg.content || '');
-      }
-    }
-    return map;
-  }, [messages]);
-
-  const toolExecutionsByMessageId = useMemo(() => {
-    const map = new Map<string, ToolExecution[]>();
-    for (const msg of messages) {
-      if (msg.role !== 'assistant' || !msg.tool_calls || msg.tool_calls.length === 0) continue;
-      const executions: ToolExecution[] = msg.tool_calls.map((tc) => {
-        const toolName = tc.function?.name || tc.id;
-        const result = toolResultsByCallId.get(tc.id);
-        const ok = inferToolResultOk(result);
-        return {
-          id: tc.id,
-          name: toolName,
-          arguments: tc.function?.arguments || '{}',
-          status: result === undefined ? 'running' : ok === false ? 'error' : 'done',
-          result,
-          ok,
-          source: inferToolSource(toolName),
-        };
-      });
-      map.set(msg.id, executions);
-    }
-    return map;
-  }, [messages, toolResultsByCallId]);
 
   return (
     <div style={{
@@ -356,7 +353,8 @@ export function ChatView() {
         flexShrink: 0,
         flexWrap: 'wrap',
       }}>
-        {agent && (
+        {agent ? (
+          // Agent chat
           <div style={{
             width: '32px',
             height: '32px',
@@ -370,6 +368,22 @@ export function ChatView() {
             flexShrink: 0,
           }}>
             {agent.emoji}
+          </div>
+        ) : (
+          // General chat
+          <div style={{
+            width: '32px',
+            height: '32px',
+            borderRadius: 'var(--radius-sm)',
+            background: 'rgba(59, 130, 246, 0.15)',
+            border: '1px solid rgba(59, 130, 246, 0.3)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            fontSize: '1rem',
+            flexShrink: 0,
+          }}>
+            💬
           </div>
         )}
         <div style={{ flex: 1, minWidth: 0 }}>
@@ -392,7 +406,11 @@ export function ChatView() {
             gap: '6px',
             flexWrap: 'wrap',
           }}>
-            {agent?.name || 'Agent'} · {agent?.model || 'openrouter/auto'}
+            {agent?.name || 'General Chat'} ·
+            <ModelSelector
+              agentModel={agent?.model || 'openrouter/auto'}
+              conversationId={activeConversationId}
+            />
           </div>
         </div>
         {/* Conversation token summary */}
@@ -534,207 +552,238 @@ export function ChatView() {
         }}>
           <div style={{
             display: 'flex',
+            flexDirection: 'column',
             gap: '10px',
-            alignItems: 'flex-end',
             minWidth: 0,
-          }}>
-            {/* Reasoning toggle button (OpenRouter only) */}
-            {(
-              <div style={{ position: 'relative', flexShrink: 0 }}>
-                <button
-                  ref={reasoningBtnRef}
-                  onClick={() => setShowReasoningPopover(!showReasoningPopover)}
-                  title={reasoningActive ? `Thinking: ${currentEffort}` : 'Enable thinking'}
-                  style={{
-                    width: '44px',
-                    height: '44px',
-                    borderRadius: 'var(--radius-md)',
-                    background: reasoningActive ? 'rgba(212, 160, 48, 0.12)' : 'var(--bg-surface)',
-                    border: `1px solid ${reasoningActive ? 'rgba(212, 160, 48, 0.3)' : 'var(--border)'}`,
-                    color: reasoningActive ? '#d4a030' : 'var(--text-muted)',
-                    cursor: 'pointer',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    transition: 'all 0.2s ease',
-                    position: 'relative',
-                  }}
-                  onMouseEnter={(e) => {
-                    if (!reasoningActive) {
-                      e.currentTarget.style.background = 'var(--bg-hover)';
-                      e.currentTarget.style.borderColor = 'var(--border-light)';
-                    } else {
-                      e.currentTarget.style.background = 'rgba(212, 160, 48, 0.18)';
-                      e.currentTarget.style.boxShadow = '0 0 12px rgba(212, 160, 48, 0.12)';
-                    }
-                  }}
-                  onMouseLeave={(e) => {
-                    if (!reasoningActive) {
-                      e.currentTarget.style.background = 'var(--bg-surface)';
-                      e.currentTarget.style.borderColor = 'var(--border)';
-                    } else {
-                      e.currentTarget.style.background = 'rgba(212, 160, 48, 0.12)';
-                      e.currentTarget.style.boxShadow = 'none';
-                    }
-                  }}
-                >
-                  <Brain size={18} />
-                  {/* Active glow dot */}
-                  {reasoningActive && (
-                    <div style={{
-                      position: 'absolute',
-                      top: '6px',
-                      right: '6px',
-                      width: '6px',
-                      height: '6px',
-                      borderRadius: '50%',
-                      background: '#d4a030',
-                      boxShadow: '0 0 6px rgba(212, 160, 48, 0.6)',
-                    }} />
-                  )}
-                </button>
-
-                {/* Reasoning Popover */}
-                <AnimatePresence>
-                  {showReasoningPopover && (
-                    <motion.div
-                      ref={reasoningPopoverRef}
-                      initial={{ opacity: 0, y: 8, scale: 0.96 }}
-                      animate={{ opacity: 1, y: 0, scale: 1 }}
-                      exit={{ opacity: 0, y: 8, scale: 0.96 }}
-                      transition={{ duration: 0.15 }}
-                      style={{
-                        position: 'absolute',
-                        bottom: 'calc(100% + 8px)',
-                        left: '0',
-                        width: '260px',
-                        maxWidth: 'calc(100vw - 24px)',
-                        background: 'var(--bg-elevated)',
-                        border: '1px solid var(--border-light)',
-                        borderRadius: 'var(--radius-md)',
-                        boxShadow: 'var(--shadow-lg)',
-                        overflow: 'hidden',
-                        zIndex: 100,
-                      }}
-                    >
-                      {/* Header with toggle */}
+          }} className="chat-input-container">
+            {/* Toolbar row - Model selectors and controls */}
+            <div style={{
+              display: 'flex',
+              gap: '8px',
+              alignItems: 'center',
+              justifyContent: 'flex-start',
+              flexWrap: 'wrap',
+            }} className="chat-input-toolbar">
+              {/* Reasoning toggle button */}
+              {(
+                <div style={{ position: 'relative', flexShrink: 0 }}>
+                  <button
+                    ref={reasoningBtnRef}
+                    onClick={() => setShowReasoningPopover(!showReasoningPopover)}
+                    title={reasoningActive ? `Thinking: ${currentEffort}` : 'Enable thinking'}
+                    style={{
+                      height: '32px',
+                      padding: '0 10px',
+                      borderRadius: 'var(--radius-md)',
+                      background: reasoningActive ? 'rgba(212, 160, 48, 0.12)' : 'var(--bg-surface)',
+                      border: `1px solid ${reasoningActive ? 'rgba(212, 160, 48, 0.3)' : 'var(--border)'}`,
+                      color: reasoningActive ? '#d4a030' : 'var(--text-muted)',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px',
+                      transition: 'all 0.2s ease',
+                      position: 'relative',
+                      fontSize: '0.75rem',
+                      fontWeight: 500,
+                    }}
+                    onMouseEnter={(e) => {
+                      if (!reasoningActive) {
+                        e.currentTarget.style.background = 'var(--bg-hover)';
+                        e.currentTarget.style.borderColor = 'var(--border-light)';
+                      } else {
+                        e.currentTarget.style.background = 'rgba(212, 160, 48, 0.18)';
+                        e.currentTarget.style.boxShadow = '0 0 12px rgba(212, 160, 48, 0.12)';
+                      }
+                    }}
+                    onMouseLeave={(e) => {
+                      if (!reasoningActive) {
+                        e.currentTarget.style.background = 'var(--bg-surface)';
+                        e.currentTarget.style.borderColor = 'var(--border)';
+                      } else {
+                        e.currentTarget.style.background = 'rgba(212, 160, 48, 0.12)';
+                        e.currentTarget.style.boxShadow = 'none';
+                      }
+                    }}
+                  >
+                    <Brain size={14} />
+                    <span className="toolbar-button-text">Think</span>
+                    {/* Active glow dot */}
+                    {reasoningActive && (
                       <div style={{
-                        padding: '12px 14px',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        borderBottom: '1px solid var(--border)',
-                      }}>
+                        position: 'absolute',
+                        top: '4px',
+                        right: '4px',
+                        width: '5px',
+                        height: '5px',
+                        borderRadius: '50%',
+                        background: '#d4a030',
+                        boxShadow: '0 0 6px rgba(212, 160, 48, 0.6)',
+                      }} />
+                    )}
+                  </button>
+
+                  {/* Reasoning Popover */}
+                  <AnimatePresence>
+                    {showReasoningPopover && (
+                      <motion.div
+                        ref={reasoningPopoverRef}
+                        initial={{ opacity: 0, y: 8, scale: 0.96 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={{ opacity: 0, y: 8, scale: 0.96 }}
+                        transition={{ duration: 0.15 }}
+                        style={{
+                          position: 'absolute',
+                          bottom: 'calc(100% + 8px)',
+                          left: '0',
+                          width: '260px',
+                          maxWidth: 'calc(100vw - 24px)',
+                          background: 'var(--bg-elevated)',
+                          border: '1px solid var(--border-light)',
+                          borderRadius: 'var(--radius-md)',
+                          boxShadow: 'var(--shadow-lg)',
+                          overflow: 'hidden',
+                          zIndex: 100,
+                        }}
+                      >
+                        {/* Header with toggle */}
                         <div style={{
+                          padding: '12px 14px',
                           display: 'flex',
                           alignItems: 'center',
-                          gap: '8px',
+                          justifyContent: 'space-between',
+                          borderBottom: '1px solid var(--border)',
                         }}>
-                          <Brain size={14} style={{ color: reasoningActive ? '#d4a030' : 'var(--text-muted)' }} />
-                          <span style={{
-                            fontSize: '0.8125rem',
-                            fontWeight: 600,
-                            color: 'var(--text-primary)',
-                            letterSpacing: '0.01em',
-                          }}>
-                            Thinking
-                          </span>
-                        </div>
-                        {/* Mini toggle */}
-                        <div
-                          onClick={(e) => { e.stopPropagation(); toggleReasoning(); }}
-                          style={{
-                            width: '34px',
-                            height: '18px',
-                            borderRadius: '9px',
-                            background: reasoningActive ? '#d4a030' : 'var(--bg-base)',
-                            border: `1px solid ${reasoningActive ? '#d4a030' : 'var(--border)'}`,
-                            position: 'relative',
-                            cursor: 'pointer',
-                            transition: 'all 0.2s ease',
-                            flexShrink: 0,
-                          }}
-                        >
-                          <div style={{
-                            width: '14px',
-                            height: '14px',
-                            borderRadius: '50%',
-                            background: reasoningActive ? '#ffffff' : 'var(--text-muted)',
-                            position: 'absolute',
-                            top: '1px',
-                            left: reasoningActive ? '17px' : '1px',
-                            transition: 'all 0.2s ease',
-                          }} />
-                        </div>
-                      </div>
-
-                      {/* Effort levels */}
-                      {reasoningActive && (
-                        <div style={{ padding: '10px 14px 12px' }}>
-                          <div style={{
-                            fontSize: '0.625rem',
-                            fontWeight: 600,
-                            color: 'var(--text-muted)',
-                            textTransform: 'uppercase',
-                            letterSpacing: '0.08em',
-                            marginBottom: '8px',
-                          }}>
-                            Effort
-                          </div>
                           <div style={{
                             display: 'flex',
-                            gap: '0',
-                            background: 'var(--bg-base)',
-                            borderRadius: 'var(--radius-sm)',
-                            border: '1px solid var(--border)',
-                            padding: '2px',
+                            alignItems: 'center',
+                            gap: '8px',
                           }}>
-                            {EFFORT_OPTIONS.map((opt) => {
-                              const isActive = currentEffort === opt.value;
-                              return (
-                                <button
-                                  key={opt.value}
-                                  onClick={() => setEffort(opt.value)}
-                                  style={{
-                                    flex: 1,
-                                    padding: '5px 2px',
-                                    fontSize: '0.6875rem',
-                                    fontWeight: isActive ? 600 : 400,
-                                    fontFamily: 'var(--font-body)',
-                                    border: 'none',
-                                    borderRadius: 'calc(var(--radius-sm) - 2px)',
-                                    cursor: 'pointer',
-                                    transition: 'all 0.12s ease',
-                                    background: isActive ? 'rgba(212, 160, 48, 0.18)' : 'transparent',
-                                    color: isActive ? '#d4a030' : 'var(--text-muted)',
-                                  }}
-                                >
-                                  {opt.short}
-                                </button>
-                              );
-                            })}
+                            <Brain size={14} style={{ color: reasoningActive ? '#d4a030' : 'var(--text-muted)' }} />
+                            <span style={{
+                              fontSize: '0.8125rem',
+                              fontWeight: 600,
+                              color: 'var(--text-primary)',
+                              letterSpacing: '0.01em',
+                            }}>
+                              Thinking
+                            </span>
                           </div>
-
-                          {/* Info line */}
-                          <div style={{
-                            marginTop: '8px',
-                            fontSize: '0.625rem',
-                            color: 'var(--text-muted)',
-                            lineHeight: 1.4,
-                          }}>
-                            Model will show its reasoning process before responding.
-                            {agent?.reasoning_enabled && !reasoningOverride && (
-                              <span style={{ color: 'var(--text-secondary)' }}> Using agent defaults.</span>
-                            )}
+                          {/* Mini toggle */}
+                          <div
+                            onClick={(e) => { e.stopPropagation(); toggleReasoning(); }}
+                            style={{
+                              width: '34px',
+                              height: '18px',
+                              borderRadius: '9px',
+                              background: reasoningActive ? '#d4a030' : 'var(--bg-base)',
+                              border: `1px solid ${reasoningActive ? '#d4a030' : 'var(--border)'}`,
+                              position: 'relative',
+                              cursor: 'pointer',
+                              transition: 'all 0.2s ease',
+                              flexShrink: 0,
+                            }}
+                          >
+                            <div style={{
+                              width: '14px',
+                              height: '14px',
+                              borderRadius: '50%',
+                              background: reasoningActive ? '#ffffff' : 'var(--text-muted)',
+                              position: 'absolute',
+                              top: '1px',
+                              left: reasoningActive ? '17px' : '1px',
+                              transition: 'all 0.2s ease',
+                            }} />
                           </div>
                         </div>
-                      )}
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </div>
-            )}
 
+                        {/* Effort levels */}
+                        {reasoningActive && (
+                          <div style={{ padding: '10px 14px 12px' }}>
+                            <div style={{
+                              fontSize: '0.625rem',
+                              fontWeight: 600,
+                              color: 'var(--text-muted)',
+                              textTransform: 'uppercase',
+                              letterSpacing: '0.08em',
+                              marginBottom: '8px',
+                            }}>
+                              Effort
+                            </div>
+                            <div style={{
+                              display: 'flex',
+                              gap: '0',
+                              background: 'var(--bg-base)',
+                              borderRadius: 'var(--radius-sm)',
+                              border: '1px solid var(--border)',
+                              padding: '2px',
+                            }}>
+                              {EFFORT_OPTIONS.map((opt) => {
+                                const isActive = currentEffort === opt.value;
+                                return (
+                                  <button
+                                    key={opt.value}
+                                    onClick={() => setEffort(opt.value)}
+                                    style={{
+                                      flex: 1,
+                                      padding: '5px 2px',
+                                      fontSize: '0.6875rem',
+                                      fontWeight: isActive ? 600 : 400,
+                                      fontFamily: 'var(--font-body)',
+                                      border: 'none',
+                                      borderRadius: 'calc(var(--radius-sm) - 2px)',
+                                      cursor: 'pointer',
+                                      transition: 'all 0.12s ease',
+                                      background: isActive ? 'rgba(212, 160, 48, 0.18)' : 'transparent',
+                                      color: isActive ? '#d4a030' : 'var(--text-muted)',
+                                    }}
+                                  >
+                                    {opt.short}
+                                  </button>
+                                );
+                              })}
+                            </div>
+
+                            {/* Info line */}
+                            <div style={{
+                              marginTop: '8px',
+                              fontSize: '0.625rem',
+                              color: 'var(--text-muted)',
+                              lineHeight: 1.4,
+                            }}>
+                              Model will show its reasoning process before responding.
+                              {agent?.reasoning_enabled && !reasoningOverride && (
+                                <span style={{ color: 'var(--text-secondary)' }}> Using agent defaults.</span>
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
+              )}
+
+              {/* Message Model Selector */}
+              <div style={{ position: 'relative', flexShrink: 0 }}>
+                <MessageModelSelector
+                  agentModel={agent?.model || 'openrouter/auto'}
+                  conversationModel={activeConversation?.model}
+                  value={messageModelOverride}
+                  onChange={setMessageModelOverride}
+                  disabled={isStreaming}
+                  compact
+                />
+              </div>
+            </div>
+
+            {/* Main input row - textarea and send button */}
+            <div style={{
+              display: 'flex',
+              gap: '10px',
+              alignItems: 'flex-end',
+              minWidth: 0,
+            }} className="chat-input-main-row">
             <div style={{
               flex: 1,
               minWidth: 0,
@@ -898,33 +947,19 @@ export function ChatView() {
                   )}
                 </div>
               )}
-              <textarea
-                ref={textareaRef}
+              <PremiumMentionInput
                 value={inputValue}
-                onChange={(e) => setInputValue(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder={isStreaming ? 'Waiting for response...' : 'Send a message...'}
+                onChange={(val, agentId) => {
+                  setInputValue(val);
+                  setInvokeAgentId(agentId);
+                }}
                 disabled={isStreaming}
-                rows={1}
-                style={{
-                  width: '100%',
-                  padding: '14px 18px',
-                  fontSize: '0.938rem',
-                  fontFamily: 'var(--font-body)',
-                  background: 'transparent',
-                  color: 'var(--text-primary)',
-                  border: 'none',
-                  outline: 'none',
-                  resize: 'none',
-                  lineHeight: 1.5,
-                  maxHeight: '200px',
-                }}
-                onFocus={(e) => {
-                  (e.currentTarget.parentElement as HTMLElement).style.borderColor = 'var(--accent)';
-                }}
-                onBlur={(e) => {
-                  (e.currentTarget.parentElement as HTMLElement).style.borderColor = 'var(--border)';
-                }}
+                placeholder={isStreaming ? 'Waiting for response...' : 'Send a message... Use @ to mention an agent'}
+                agents={agents}
+                onSubmit={handleSend}
+                submitDisabled={!inputValue.trim() || isStreaming}
+                minRows={1}
+                maxRows={10}
               />
             </div>
             {/* Send / Stop button */}
@@ -991,6 +1026,7 @@ export function ChatView() {
                 <Send size={18} />
               </button>
             )}
+          </div>
           </div>
           <div style={{
             display: 'flex',

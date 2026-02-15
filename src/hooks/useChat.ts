@@ -7,6 +7,8 @@ import type { Message, ChatAttachmentInput, PDFEngine } from '../types';
 export interface SendMessageOptions {
   attachments?: ChatAttachmentInput[];
   pdf_engine?: PDFEngine;
+  model?: string;
+  invokeAgentId?: string;
 }
 
 export function useChat() {
@@ -39,6 +41,8 @@ export function useChat() {
 
     const attachments = options?.attachments;
     const pdf_engine = options?.pdf_engine;
+    const model = options?.model;
+    const invokeAgentId = options?.invokeAgentId;
 
     // Add user message to local state immediately
     const userMsg: Message = {
@@ -115,6 +119,8 @@ export function useChat() {
       (data) => completeStreamingToolCall(data),
       attachments,
       pdf_engine,
+      model,
+      invokeAgentId,
     );
   }, [activeConversationId, isStreaming, addMessage, setIsStreaming, setStreamingContent, appendStreamingContent, appendStreamingContentEvent, setAbortController, setStreamStartTime, setReasoningContent, appendReasoningContent, appendStreamingReasoningEvent, reasoningOverride, upsertStreamingToolCall, completeStreamingToolCall, resetStreamingActivityEvents, loadMessages, loadConversations, selectedAgentId]);
 
@@ -148,10 +154,24 @@ export function useChat() {
     }
   }, [loadConversations, loadMessages]);
 
+  const startGeneralChat = useCallback(async () => {
+    try {
+      const conversation = await conversationsApi.createGeneral();
+      useStore.getState().setActiveConversationId(conversation.id);
+      useStore.getState().setCurrentView('chat');
+      useStore.getState().setSelectedAgentId(null);
+      await loadConversations();
+      await loadMessages(conversation.id);
+    } catch (err) {
+      console.error('Failed to create general chat:', err);
+    }
+  }, [loadConversations, loadMessages]);
+
   return {
     sendMessage,
     cancelStream,
     startNewChat,
+    startGeneralChat,
     isStreaming,
     streamingContent,
     reasoningContent,

@@ -457,6 +457,12 @@ button:hover .conv-delete-btn,
   100% { background-position: 200% 0; }
 }
 
+@keyframes shine {
+  0% { left: -100%; }
+  40% { left: 100%; }
+  100% { left: 100%; }
+}
+
 .animate-fade-in {
   animation: fadeIn var(--transition-base) ease-out;
 }
@@ -1005,5 +1011,71 @@ button:hover .conv-delete-btn,
 @media (max-width: 767px) {
   .btn-primary-action {
     min-height: 44px;
+  }
+}
+
+/* ---------- Chat Input Responsive Layout ---------- */
+
+/* Desktop: horizontal layout with toolbar inline */
+@media (min-width: 640px) {
+  .chat-input-container {
+    flex-direction: row !important;
+    align-items: flex-end !important;
+  }
+
+  .chat-input-toolbar {
+    flex-direction: column !important;
+    gap: 8px !important;
+  }
+
+  .chat-input-toolbar .toolbar-button-text {
+    display: none;
+  }
+}
+
+/* Mobile: stacked layout with toolbar on top */
+@media (max-width: 639px) {
+  .chat-input-container {
+    flex-direction: column !important;
+  }
+
+  .chat-input-toolbar {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    gap: 6px !important;
+    padding: 0 4px;
+  }
+
+  .chat-input-main-row {
+    width: 100%;
+  }
+
+  /* Ensure textarea gets enough space */
+  .chat-input-main-row > div:first-of-type {
+    min-width: 0;
+    flex: 1;
+  }
+
+  /* Make textarea padding more compact on mobile */
+  .chat-input-main-row textarea {
+    padding: 12px 14px !important;
+    font-size: 16px !important; /* Prevent iOS zoom on focus */
+  }
+
+  /* Compact button styles for mobile */
+  .chat-input-toolbar button {
+    height: 32px !important;
+    padding: 0 10px !important;
+  }
+
+  /* Hide text labels on very small screens */
+  @media (max-width: 479px) {
+    .chat-input-toolbar .toolbar-button-text {
+      display: none;
+    }
+
+    .chat-input-toolbar {
+      gap: 4px !important;
+    }
   }
 }

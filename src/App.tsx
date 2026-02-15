@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useStore } from './stores/store';
+import { useChat } from './hooks/useChat';
 import { Layout } from './components/Layout';
 import { AgentList } from './components/AgentList';
 import { AgentEditor } from './components/AgentEditor';
@@ -27,11 +28,19 @@ function App() {
     loadConversations,
     loadSettings,
     loadCredits,
+    loadGeneralChatSettings,
+    activeConversationId,
+    setCurrentView,
+    setActiveConversationId,
+    conversations,
+    setSelectedAgentId,
+    generalChatSettings,
     setOpenRouterApiKey,
     setSettingsOpen,
     setOpenRouterOAuthSuccess,
     setOpenRouterOAuthError,
   } = useStore();
+  const { startGeneralChat, startNewChat } = useChat();
 
   useEffect(() => {
     checkAuth();
@@ -47,7 +56,8 @@ function App() {
     loadAgents();
     loadConversations();
     loadSettings();
-  }, [user, loadAgents, loadConversations, loadSettings]);
+    loadGeneralChatSettings();
+  }, [user, loadAgents, loadConversations, loadSettings, loadGeneralChatSettings]);
 
   // Handle OAuth PKCE callback: ?code=...&state=... (state optional if provider doesn't echo it)
   useEffect(() => {

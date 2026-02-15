@@ -1,11 +1,16 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { CheckCircle, AlertCircle, ExternalLink, Zap, Coins, BarChart3, Loader2, Globe, KeyRound, Database } from 'lucide-react';
+import { CheckCircle, AlertCircle, ExternalLink, Zap, Coins, BarChart3, Loader2, Globe, KeyRound, Database, MessageSquare, Brain, Check, ChevronDown, Sparkles, Lightbulb, SlidersHorizontal } from 'lucide-react';
 import { useStore } from '../stores/store';
-import { settingsApi } from '../api/client';
+import { settingsApi, modelsApi } from '../api/client';
+import type { OpenRouterModel, ReasoningEffort } from '../types';
 import { Modal } from './ui/Modal';
 import { Input } from './ui/Input';
 import { Button } from './ui/Button';
+import { PremiumModelSelector } from './PremiumModelSelector';
+import { PremiumToggle } from './ui/PremiumToggle';
+import { PremiumEmojiPicker } from './ui/PremiumEmojiPicker';
+import { PremiumSelect } from './ui/PremiumSelect';
 import { ExportImportButtons } from './ExportImportButtons';
 import {
   generateCodeVerifier,
@@ -244,6 +249,370 @@ function ProviderKeySection({
 }
 
 const OPENROUTER_ACCENT = '#8b5cf6';
+
+/** General Chat Settings section - Premium UI */
+function GeneralChatSettingsSection() {
+  const {
+    generalChatSettings,
+    loadGeneralChatSettings,
+    saveGeneralChatSettings,
+    generalChatSettingsLoading,
+  } = useStore();
+
+  const [models, setModels] = useState<OpenRouterModel[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  // Local state for editing
+  const [localModel, setLocalModel] = useState('openrouter/auto');
+  const [localSystemPrompt, setLocalSystemPrompt] = useState('');
+  const [localReasoningEnabled, setLocalReasoningEnabled] = useState(false);
+  const [localReasoningEffort, setLocalReasoningEffort] = useState<ReasoningEffort>('medium');
+  const [localEmoji, setLocalEmoji] = useState('💬');
+
+  // Load settings on mount
+  useEffect(() => {
+    loadGeneralChatSettings();
+  }, [loadGeneralChatSettings]);
+
+  // Update local state when settings load
+  useEffect(() => {
+    if (generalChatSettings) {
+      setLocalModel(generalChatSettings.model);
+      setLocalSystemPrompt(generalChatSettings.system_prompt);
+      setLocalReasoningEnabled(generalChatSettings.reasoning_enabled || false);
+      setLocalReasoningEffort(generalChatSettings.reasoning_effort || 'medium');
+      setLocalEmoji(generalChatSettings.emoji || '💬');
+    }
+  }, [generalChatSettings]);
+
+  // Load available models
+  useEffect(() => {
+    setModelsLoading(true);
+    modelsApi.openrouter()
+      .then((data) => {
+        setModels(data.data || []);
+        setModelsLoading(false);
+      })
+      .catch(() => setModelsLoading(false));
+  }, []);
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      await saveGeneralChatSettings({
+        model: localModel,
+        system_prompt: localSystemPrompt,
+        reasoning_enabled: localReasoningEnabled,
+        reasoning_effort: localReasoningEffort,
+        emoji: localEmoji,
+      });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const hasChanges = generalChatSettings && (
+    localModel !== generalChatSettings.model ||
+    localSystemPrompt !== generalChatSettings.system_prompt ||
+    localReasoningEnabled !== (generalChatSettings.reasoning_enabled || false) ||
+    localReasoningEffort !== (generalChatSettings.reasoning_effort || 'medium') ||
+    localEmoji !== (generalChatSettings.emoji || '💬')
+  );
+
+  const reasoningEffortOptions = [
+    { value: 'minimal', label: 'Minimal', description: 'Fastest responses' },
+    { value: 'low', label: 'Low', description: 'Quick reasoning' },
+    { value: 'medium', label: 'Medium', description: 'Balanced' },
+    { value: 'high', label: 'High', description: 'Deep analysis' },
+    { value: 'xhigh', label: 'Maximum', description: 'Best quality' },
+  ];
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+        <motion.div
+          initial={{ scale: 0.8, opacity: 0 }}
+          animate={{ scale: 1, opacity: 1 }}
+          style={{
+            width: '40px',
+            height: '40px',
+            borderRadius: 'var(--radius-lg)',
+            background: 'linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: '#fff',
+            boxShadow: '0 4px 14px rgba(59, 130, 246, 0.4)',
+          }}
+        >
+          <MessageSquare size={20} />
+        </motion.div>
+        <div>
+          <h4 style={{
+            fontFamily: 'var(--font-display)',
+            fontSize: '1.125rem',
+            fontWeight: 600,
+            color: 'var(--text-primary)',
+            margin: 0,
+            letterSpacing: '-0.01em',
+          }}>
+            General Chat
+          </h4>
+          <p style={{ fontSize: '0.8125rem', color: 'var(--text-muted)', margin: '2px 0 0 0' }}>
+            Default settings for conversations without agents
+          </p>
+        </div>
+      </div>
+
+      {/* Model Selector - Premium */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+        <label style={{
+          fontSize: '0.6875rem',
+          fontWeight: 600,
+          color: 'var(--text-secondary)',
+          textTransform: 'uppercase',
+          letterSpacing: '0.08em',
+        }}>
+          Default Model
+        </label>
+        <PremiumModelSelector
+          models={models}
+          value={localModel}
+          onChange={setLocalModel}
+          loading={modelsLoading}
+          label=""
+        />
+      </div>
+
+      {/* Emoji and System Prompt Row */}
+      <div style={{ display: 'flex', gap: '16px', alignItems: 'flex-start' }}>
+        {/* Emoji Picker */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <label style={{
+            fontSize: '0.6875rem',
+            fontWeight: 600,
+            color: 'var(--text-secondary)',
+            textTransform: 'uppercase',
+            letterSpacing: '0.08em',
+          }}>
+            Icon
+          </label>
+          <PremiumEmojiPicker
+            value={localEmoji}
+            onChange={setLocalEmoji}
+          />
+        </div>
+
+        {/* System Prompt */}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <label style={{
+            fontSize: '0.6875rem',
+            fontWeight: 600,
+            color: 'var(--text-secondary)',
+            textTransform: 'uppercase',
+            letterSpacing: '0.08em',
+          }}>
+            System Instructions
+          </label>
+          <div style={{ position: 'relative' }}>
+            <textarea
+              value={localSystemPrompt}
+              onChange={(e) => setLocalSystemPrompt(e.target.value)}
+              placeholder="You are a helpful AI assistant..."
+              rows={3}
+              style={{
+                width: '100%',
+                padding: '12px 14px',
+                paddingLeft: '44px',
+                borderRadius: 'var(--radius-md)',
+                border: '1px solid var(--border)',
+                background: 'var(--bg-elevated)',
+                color: 'var(--text-primary)',
+                fontSize: '0.875rem',
+                fontFamily: 'var(--font-body)',
+                resize: 'vertical',
+                lineHeight: 1.6,
+                transition: 'all 0.2s ease',
+              }}
+            />
+            <Lightbulb
+              size={18}
+              style={{
+                position: 'absolute',
+                left: '14px',
+                top: '14px',
+                color: 'var(--text-muted)',
+                opacity: 0.6,
+              }}
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* Reasoning Section */}
+      <div style={{
+        padding: '16px',
+        background: 'var(--bg-surface)',
+        borderRadius: 'var(--radius-lg)',
+        border: '1px solid var(--border)',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: '16px' }}>
+          <PremiumToggle
+            checked={localReasoningEnabled}
+            onChange={setLocalReasoningEnabled}
+            label="Enable Extended Thinking"
+            description="Show the model's reasoning process before the final response"
+            size="md"
+            color="#d4a030"
+          />
+        </div>
+
+        <AnimatePresence>
+          {localReasoningEnabled && (
+            <motion.div
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: 'auto', opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.2 }}
+              style={{ overflow: 'hidden' }}
+            >
+              <div style={{
+                marginTop: '16px',
+                paddingTop: '16px',
+                borderTop: '1px solid var(--border)',
+              }}>
+                <label style={{
+                  fontSize: '0.6875rem',
+                  fontWeight: 600,
+                  color: 'var(--text-secondary)',
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.08em',
+                  marginBottom: '8px',
+                  display: 'block',
+                }}>
+                  Thinking Depth
+                </label>
+                <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                  {reasoningEffortOptions.map((option) => (
+                    <motion.button
+                      key={option.value}
+                      onClick={() => setLocalReasoningEffort(option.value as any)}
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.98 }}
+                      style={{
+                        padding: '8px 14px',
+                        borderRadius: 'var(--radius-md)',
+                        border: `1.5px solid ${localReasoningEffort === option.value ? '#d4a030' : 'var(--border)'}`,
+                        background: localReasoningEffort === option.value
+                          ? 'rgba(212, 160, 48, 0.12)'
+                          : 'var(--bg-elevated)',
+                        cursor: 'pointer',
+                        transition: 'all 0.15s ease',
+                      }}
+                    >
+                      <div style={{
+                        fontSize: '0.8125rem',
+                        fontWeight: localReasoningEffort === option.value ? 600 : 500,
+                        color: localReasoningEffort === option.value ? '#d4a030' : 'var(--text-primary)',
+                        textTransform: 'capitalize',
+                      }}>
+                        {option.label}
+                      </div>
+                      <div style={{
+                        fontSize: '0.6875rem',
+                        color: 'var(--text-muted)',
+                        marginTop: '2px',
+                      }}>
+                        {option.description}
+                      </div>
+                    </motion.button>
+                  ))}
+                </div>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+
+      {/* Save Button */}
+      <motion.div
+        initial={false}
+        animate={{ opacity: hasChanges ? 1 : 0.7 }}
+        style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px' }}
+      >
+        {hasChanges && (
+          <motion.button
+            initial={{ opacity: 0, x: 10 }}
+            animate={{ opacity: 1, x: 0 }}
+            onClick={() => {
+              if (generalChatSettings) {
+                setLocalModel(generalChatSettings.model);
+                setLocalSystemPrompt(generalChatSettings.system_prompt);
+                setLocalReasoningEnabled(generalChatSettings.reasoning_enabled || false);
+                setLocalReasoningEffort(generalChatSettings.reasoning_effort || 'medium');
+                setLocalEmoji(generalChatSettings.emoji || '💬');
+              }
+            }}
+            style={{
+              padding: '10px 18px',
+              borderRadius: 'var(--radius-md)',
+              border: '1px solid var(--border)',
+              background: 'transparent',
+              color: 'var(--text-muted)',
+              fontSize: '0.875rem',
+              fontWeight: 500,
+              cursor: 'pointer',
+            }}
+          >
+            Reset
+          </motion.button>
+        )}
+        <motion.button
+          onClick={handleSave}
+          disabled={!hasChanges || saving || generalChatSettingsLoading}
+          whileHover={hasChanges ? { scale: 1.02 } : {}}
+          whileTap={hasChanges ? { scale: 0.98 } : {}}
+          style={{
+            padding: '10px 24px',
+            borderRadius: 'var(--radius-md)',
+            border: 'none',
+            background: hasChanges
+              ? 'linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%)'
+              : 'var(--bg-elevated)',
+            color: hasChanges ? '#fff' : 'var(--text-muted)',
+            fontSize: '0.875rem',
+            fontWeight: 600,
+            cursor: hasChanges ? 'pointer' : 'not-allowed',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            boxShadow: hasChanges ? '0 4px 14px rgba(59, 130, 246, 0.4)' : 'none',
+            transition: 'all 0.2s ease',
+          }}
+        >
+          {saving ? (
+            <>
+              <Loader2 size={16} className="animate-spin" />
+              Saving...
+            </>
+          ) : hasChanges ? (
+            <>
+              <Sparkles size={16} />
+              Save Changes
+            </>
+          ) : (
+            <>
+              <CheckCircle size={16} />
+              Up to Date
+            </>
+          )}
+        </motion.button>
+      </motion.div>
+    </div>
+  );
+}
 
 /** OpenRouter section: OAuth PKCE "Connect" CTA + manual API key. */
 function OpenRouterSection() {
@@ -830,6 +1199,12 @@ export function SettingsPanel() {
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: '28px' }}>
         <OpenRouterSection />
+
+        {/* Divider */}
+        <div style={{ height: '1px', background: 'var(--border)' }} />
+
+        {/* General Chat Settings */}
+        <GeneralChatSettingsSection />
 
         {/* OpenRouter Credits Dashboard */}
         <CreditsDashboard />

@@ -40,6 +40,41 @@ router.get('/', (req: AuthRequest, res: Response) => {
   }
 });
 
+// GET /api/agents/search?q=query - Search agents by name (for @mention autocomplete)
+router.get('/search', (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.userId;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    const { q } = req.query;
+    const query = typeof q === 'string' ? q.trim() : '';
+
+    if (!query) {
+      // Return all agents with limited fields for dropdown
+      const agents = db.prepare(`
+        SELECT id, name, emoji, description
+        FROM agents
+        WHERE user_id = ?
+        ORDER BY name ASC
+      `).all(userId);
+      return res.json({ agents });
+    }
+
+    // Search by name (case-insensitive)
+    const searchPattern = `%${query}%`;
+    const agents = db.prepare(`
+      SELECT id, name, emoji, description
+      FROM agents
+      WHERE user_id = ? AND (name LIKE ? OR description LIKE ?)
+      ORDER BY name ASC
+    `).all(userId, searchPattern, searchPattern);
+
+    res.json({ agents });
+  } catch (err) {
+    console.error('Error searching agents:', err);
+    res.status(500).json({ error: 'Failed to search agents' });
+  }
+});
+
 // GET /api/agents/:id - Get single agent (with tool_ids, mcp_server_ids, full tools, and mcp_servers)
 router.get('/:id', (req: AuthRequest, res: Response) => {
   try {

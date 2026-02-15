@@ -137,8 +137,8 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       res.status(401).json({ error: 'Unauthorized' });
       return;
     }
-    const body = req.body as { conversation_id?: string; content?: string; reasoning?: unknown; attachments?: unknown; pdf_engine?: string };
-    const { conversation_id, content, reasoning, attachments: attachmentsRaw, pdf_engine: pdfEngineRaw } = body;
+    const body = req.body as { conversation_id?: string; content?: string; reasoning?: unknown; attachments?: unknown; pdf_engine?: string; model?: string; invoke_agent_id?: string };
+    const { conversation_id, content, reasoning, attachments: attachmentsRaw, pdf_engine: pdfEngineRaw, model: messageModel, invoke_agent_id } = body;
 
     if (!conversation_id || !content) {
       res.status(400).json({ error: 'conversation_id and content are required' });
@@ -161,11 +161,30 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       return;
     }
 
-    // Get agent (must belong to user)
-    const agent = db.prepare('SELECT * FROM agents WHERE id = ? AND user_id = ?').get(conversation.agent_id, userId) as Agent | undefined;
-    if (!agent) {
-      res.status(404).json({ error: 'Agent not found' });
-      return;
+    // Get agent for this request
+    // Priority: 1) invoke_agent_id (@agent mention), 2) conversation's agent_id, 3) general chat settings
+    let agent: Agent | undefined;
+    let processedByAgentId: string | null = null;
+
+    if (invoke_agent_id) {
+      // User invoked a specific agent with @agentname
+      agent = db.prepare('SELECT * FROM agents WHERE id = ? AND user_id = ?').get(invoke_agent_id, userId) as Agent | undefined;
+      if (!agent) {
+        res.status(404).json({ error: 'Invoked agent not found' });
+        return;
+      }
+      processedByAgentId = agent.id;
+    } else if (conversation.agent_id) {
+      // Conversation has an associated agent
+      agent = db.prepare('SELECT * FROM agents WHERE id = ? AND user_id = ?').get(conversation.agent_id, userId) as Agent | undefined;
+      if (!agent) {
+        res.status(404).json({ error: 'Agent not found' });
+        return;
+      }
+    } else {
+      // General chat - load settings from database or use defaults
+      const generalSettings = loadGeneralChatSettings(userId);
+      agent = createGeneralChatAgent(generalSettings);
     }
 
     // OpenRouter only: get API key from settings (decrypted server-side)
@@ -271,8 +290,11 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       'X-Title': 'Agent Studio',
     };
 
+    // Hierarchy: message override > conversation override > agent default
+    const effectiveModel = messageModel || conversation.model || agent.model;
+
     const requestBody: Record<string, unknown> = {
-      model: agent.model,
+      model: effectiveModel,
       messages,
       temperature: agent.temperature,
       max_tokens: agent.max_tokens,
@@ -374,8 +396,8 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     const saveAssistantMessage = (content: string, reasoning: string, toolCallsJson: string | null, anns: unknown[]) => {
       const assistantMsgId = nanoid();
       db.prepare(`
-        INSERT INTO messages (id, conversation_id, role, content, tokens_used, prompt_tokens, completion_tokens, cost, annotations, reasoning_content, reasoning_tokens, cached_tokens, tool_calls)
-        VALUES (?, ?, 'assistant', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO messages (id, conversation_id, role, content, tokens_used, prompt_tokens, completion_tokens, cost, annotations, reasoning_content, reasoning_tokens, cached_tokens, tool_calls, model, processed_by_agent_id)
+        VALUES (?, ?, 'assistant', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         assistantMsgId,
         conversation_id,
@@ -388,7 +410,9 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         reasoning || null,
         reasoningTokens,
         cachedTokens,
-        toolCallsJson
+        toolCallsJson,
+        effectiveModel,
+        processedByAgentId
       );
     };
 
@@ -766,5 +790,69 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     }
   }
 });
+
+// Helper: Load general chat settings from database with defaults
+function loadGeneralChatSettings(userId: string): {
+  model: string;
+  system_prompt: string;
+  reasoning_enabled: boolean;
+  reasoning_effort: string | null;
+  reasoning_max_tokens: number | null;
+  tool_choice: string;
+  parallel_tool_calls: number;
+} {
+  const defaults = {
+    model: 'openrouter/auto',
+    system_prompt: 'You are a helpful AI assistant. You provide thoughtful, well-structured responses.',
+    reasoning_enabled: false,
+    reasoning_effort: null as string | null,
+    reasoning_max_tokens: null as number | null,
+    tool_choice: 'auto',
+    parallel_tool_calls: 1,
+  };
+
+  try {
+    const model = getSettingValue(userId, 'general_chat_model');
+    const systemPrompt = getSettingValue(userId, 'general_chat_system_prompt');
+    const reasoningEnabled = getSettingValue(userId, 'general_chat_reasoning_enabled');
+    const reasoningEffort = getSettingValue(userId, 'general_chat_reasoning_effort');
+    const reasoningMaxTokens = getSettingValue(userId, 'general_chat_reasoning_max_tokens');
+
+    return {
+      model: model || defaults.model,
+      system_prompt: systemPrompt || defaults.system_prompt,
+      reasoning_enabled: reasoningEnabled === '1' || reasoningEnabled === 'true',
+      reasoning_effort: reasoningEffort || defaults.reasoning_effort,
+      reasoning_max_tokens: reasoningMaxTokens ? parseInt(reasoningMaxTokens, 10) : defaults.reasoning_max_tokens,
+      tool_choice: defaults.tool_choice,
+      parallel_tool_calls: defaults.parallel_tool_calls,
+    };
+  } catch {
+    return defaults;
+  }
+}
+
+// Helper: Create a virtual agent config for general chat
+function createGeneralChatAgent(settings: ReturnType<typeof loadGeneralChatSettings>): Agent {
+  return {
+    id: 'general',
+    name: 'General Chat',
+    system_prompt: settings.system_prompt,
+    provider: 'openrouter',
+    base_url: 'https://openrouter.ai/api/v1',
+    model: settings.model,
+    temperature: 0.7,
+    max_tokens: 4096,
+    web_search_enabled: 0,
+    reasoning_enabled: settings.reasoning_enabled ? 1 : 0,
+    reasoning_effort: settings.reasoning_effort,
+    reasoning_max_tokens: settings.reasoning_max_tokens,
+    tool_choice: settings.tool_choice,
+    parallel_tool_calls: settings.parallel_tool_calls,
+    structured_output_enabled: 0,
+    structured_output_schema: null,
+    response_healing_enabled: 0,
+  };
+}
 
 export default router;

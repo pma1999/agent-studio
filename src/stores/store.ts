@@ -10,6 +10,8 @@ import type {
   ToolExecution,
   ToolSource,
   StreamingActivityEvent,
+  GeneralChatSettings,
+  ReasoningEffort,
 } from '../types';
 import type { AuthUser } from '../api/client';
 import { agentsApi, conversationsApi, messagesApi, settingsApi, creditsApi, usageApi, authApi } from '../api/client';
@@ -72,6 +74,11 @@ interface AppState {
   reasoningOverride: ReasoningConfig | null;
   setReasoningOverride: (config: ReasoningConfig | null) => void;
 
+  // Per-conversation model override (null = use agent default)
+  conversationModelOverrides: Record<string, string | null>;
+  setConversationModelOverride: (conversationId: string, model: string | null) => void;
+  getConversationModelOverride: (conversationId: string) => string | null;
+
   // Ordered live activity timeline (text/thinking/tool) for current streaming message
   streamingActivityEvents: StreamingActivityEvent[];
   appendStreamingContentEvent: (chunk: string) => void;
@@ -100,6 +107,12 @@ interface AppState {
   usageStats: UsageStats | null;
   usageStatsLoading: boolean;
   loadUsageStats: () => Promise<void>;
+
+  // General Chat Settings
+  generalChatSettings: GeneralChatSettings | null;
+  generalChatSettingsLoading: boolean;
+  loadGeneralChatSettings: () => Promise<void>;
+  saveGeneralChatSettings: (settings: GeneralChatSettings) => Promise<void>;
 
   // UI
   agentEditorOpen: boolean;
@@ -141,7 +154,7 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   // View
-  currentView: 'agents',
+  currentView: 'chat',
   setCurrentView: (view) => set({ currentView: view }),
 
   // Agents
@@ -227,6 +240,19 @@ export const useStore = create<AppState>((set, get) => ({
   // Per-message reasoning override
   reasoningOverride: null,
   setReasoningOverride: (config) => set({ reasoningOverride: config }),
+
+  // Per-conversation model override
+  conversationModelOverrides: {},
+  setConversationModelOverride: (conversationId, model) =>
+    set((state) => ({
+      conversationModelOverrides: {
+        ...state.conversationModelOverrides,
+        [conversationId]: model,
+      },
+    })),
+  getConversationModelOverride: (conversationId) => {
+    return get().conversationModelOverrides[conversationId] ?? null;
+  },
 
   // Ordered streaming activity timeline (append by arrival order)
   streamingActivityEvents: [],
@@ -401,6 +427,45 @@ export const useStore = create<AppState>((set, get) => ({
     } catch (err) {
       console.error('Failed to load usage stats:', err);
       set({ usageStatsLoading: false });
+    }
+  },
+
+  // General Chat Settings
+  generalChatSettings: null,
+  generalChatSettingsLoading: false,
+  loadGeneralChatSettings: async () => {
+    set({ generalChatSettingsLoading: true });
+    try {
+      const settings = await settingsApi.getAll();
+      const generalSettings: GeneralChatSettings = {
+        model: settings['general_chat_model'] || 'openrouter/auto',
+        system_prompt: settings['general_chat_system_prompt'] || 'You are a helpful AI assistant. You provide thoughtful, well-structured responses.',
+        emoji: settings['general_chat_emoji'] || '💬',
+        reasoning_enabled: settings['general_chat_reasoning_enabled'] === 'true',
+        reasoning_effort: (settings['general_chat_reasoning_effort'] as ReasoningEffort) || 'medium',
+        reasoning_max_tokens: settings['general_chat_reasoning_max_tokens']
+          ? parseInt(settings['general_chat_reasoning_max_tokens'], 10)
+          : undefined,
+      };
+      set({ generalChatSettings: generalSettings, generalChatSettingsLoading: false });
+    } catch (err) {
+      console.error('Failed to load general chat settings:', err);
+      set({ generalChatSettingsLoading: false });
+    }
+  },
+  saveGeneralChatSettings: async (settings) => {
+    try {
+      await Promise.all([
+        settingsApi.set('general_chat_model', settings.model),
+        settingsApi.set('general_chat_system_prompt', settings.system_prompt),
+        settingsApi.set('general_chat_emoji', settings.emoji || '💬'),
+        settingsApi.set('general_chat_reasoning_enabled', String(settings.reasoning_enabled)),
+        settingsApi.set('general_chat_reasoning_effort', settings.reasoning_effort || 'medium'),
+        settingsApi.set('general_chat_reasoning_max_tokens', String(settings.reasoning_max_tokens || '')),
+      ]);
+      set({ generalChatSettings: settings });
+    } catch (err) {
+      console.error('Failed to save general chat settings:', err);
     }
   },
 

@@ -1,13 +1,14 @@
 import React, { useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Bot, MessageSquare, Wrench, Plug, Settings, ChevronLeft, ChevronRight, Coins, X, LogOut } from 'lucide-react';
+import { Bot, MessageSquare, Wrench, Plug, Settings, ChevronLeft, ChevronRight, Coins, X, LogOut, Plus } from 'lucide-react';
 import { useStore } from '../stores/store';
+import { useChat } from '../hooks/useChat';
 import { useIsMobile } from '../utils/breakpoints';
 import { ConversationList } from './ConversationList';
 
 const navItems = [
-  { id: 'agents' as const, label: 'Agents', icon: Bot },
   { id: 'chat' as const, label: 'Chat', icon: MessageSquare },
+  { id: 'agents' as const, label: 'Agents', icon: Bot },
   { id: 'tools' as const, label: 'Tools', icon: Wrench },
   { id: 'mcp' as const, label: 'MCP', icon: Plug },
 ];
@@ -29,7 +30,13 @@ export function Sidebar() {
     credits,
     openRouterApiKey,
     loadCredits,
+    conversations,
+    activeConversationId,
+    setSelectedAgentId,
+    setActiveConversationId,
+    generalChatSettings,
   } = useStore();
+  const { startGeneralChat } = useChat();
   const isMobile = useIsMobile();
 
   // Load credits on mount if OpenRouter key exists
@@ -207,14 +214,56 @@ export function Sidebar() {
         })}
       </div>
 
-      {/* Conversations list (when expanded and an agent is selected) */}
-      {showExpanded && selectedAgentId && (
+      {/* Conversations list (when expanded) */}
+      {showExpanded && (
         <>
           <div style={{
             height: '1px',
             background: 'var(--border)',
             margin: '4px 12px',
           }} />
+
+          {/* New Chat Button */}
+          <div style={{ padding: '8px 12px' }}>
+            <motion.button
+              onClick={() => startGeneralChat()}
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+              style={{
+                width: '100%',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '8px',
+                padding: '12px 16px',
+                background: 'linear-gradient(135deg, var(--accent) 0%, var(--accent-hover) 100%)',
+                color: '#fff',
+                border: 'none',
+                borderRadius: 'var(--radius-md)',
+                fontSize: '0.875rem',
+                fontWeight: 600,
+                cursor: 'pointer',
+                boxShadow: '0 4px 14px rgba(139, 92, 246, 0.4)',
+                position: 'relative',
+                overflow: 'hidden',
+              }}
+            >
+              {/* Shine effect */}
+              <div style={{
+                position: 'absolute',
+                top: 0,
+                left: '-100%',
+                width: '100%',
+                height: '100%',
+                background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent)',
+                animation: 'shine 3s infinite',
+              }} />
+              <Plus size={18} />
+              New Chat
+            </motion.button>
+          </div>
+
+          {/* Conversations */}
           <div style={{
             flex: 1,
             overflowY: 'auto',
@@ -225,8 +274,8 @@ export function Sidebar() {
         </>
       )}
 
-      {/* Spacer */}
-      {(!selectedAgentId || !showExpanded) && <div style={{ flex: 1 }} />}
+      {/* Spacer when collapsed */}
+      {!showExpanded && <div style={{ flex: 1 }} />}
 
       {/* Bottom actions */}
       <div style={{

@@ -243,6 +243,11 @@ export function migrate() {
     db.exec("ALTER TABLE messages ADD COLUMN attachments TEXT DEFAULT NULL");
   }
 
+  // Migration: add model column to messages for per-message model tracking
+  if (!msgColSetFinal.has('model')) {
+    db.exec("ALTER TABLE messages ADD COLUMN model TEXT DEFAULT NULL");
+  }
+
   // Seed builtin tools if none exist (each call to await_nanoid() returns a new id)
   const toolsCount = db.prepare('SELECT COUNT(*) as cnt FROM tools').get() as { cnt: number };
   if (toolsCount.cnt === 0) {
@@ -352,6 +357,43 @@ export function migrate() {
     db.exec('CREATE INDEX IF NOT EXISTS idx_conversations_user_id ON conversations(user_id)');
   }
 
+  // Migration: add model column to conversations for per-conversation model override
+  if (!convCols.some((c) => c.name === 'model')) {
+    db.exec('ALTER TABLE conversations ADD COLUMN model TEXT DEFAULT NULL');
+  }
+
+  // Migration: make agent_id nullable in conversations for general chat support
+  // SQLite doesn't support ALTER COLUMN, so we need to recreate the table
+  const agentIdCol = convCols.find((c) => c.name === 'agent_id');
+  if (agentIdCol && agentIdCol.notnull === 1) {
+    db.exec(`
+      CREATE TABLE conversations_new (
+        id TEXT PRIMARY KEY,
+        user_id TEXT,
+        agent_id TEXT REFERENCES agents(id) ON DELETE CASCADE,
+        title TEXT DEFAULT 'New conversation',
+        model TEXT DEFAULT NULL,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      );
+      CREATE INDEX idx_conversations_new_agent ON conversations_new(agent_id);
+      CREATE INDEX idx_conversations_new_user_id ON conversations_new(user_id);
+      INSERT INTO conversations_new (id, user_id, agent_id, title, model, created_at, updated_at)
+        SELECT id, user_id, agent_id, title, model, created_at, updated_at FROM conversations;
+      DROP TABLE conversations;
+      ALTER TABLE conversations_new RENAME TO conversations;
+    `);
+    console.log('[Agent Studio] Migrated conversations: agent_id is now nullable');
+  }
+
+  // Migration: add processed_by_agent_id to messages for @agent tracking
+  const msgColsFinal2 = db.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
+  if (!msgColsFinal2.some((c) => c.name === 'processed_by_agent_id')) {
+    db.exec("ALTER TABLE messages ADD COLUMN processed_by_agent_id TEXT DEFAULT NULL");
+    db.exec("ALTER TABLE messages ADD COLUMN processed_by_agent_name TEXT DEFAULT NULL");
+    console.log('[Agent Studio] Added processed_by_agent tracking to messages');
+  }
+
   const toolCols = db.prepare("PRAGMA table_info(tools)").all() as { name: string }[];
   if (!toolCols.some((c) => c.name === 'user_id')) {
     db.exec('ALTER TABLE tools ADD COLUMN user_id TEXT');
@@ -404,11 +446,18 @@ export function migrate() {
 
   // Reassign any data still under default user (local@localhost) to the admin (e.g. after restoring a local DB)
   if (existingAdmin && defaultUserId && existingAdmin.id !== defaultUserId) {
-    db.prepare('UPDATE agents SET user_id = ? WHERE user_id = ?').run(existingAdmin.id, defaultUserId);
-    db.prepare('UPDATE conversations SET user_id = ? WHERE user_id = ?').run(existingAdmin.id, defaultUserId);
-    db.prepare('UPDATE settings SET user_id = ? WHERE user_id = ?').run(existingAdmin.id, defaultUserId);
-    db.prepare('UPDATE tools SET user_id = ? WHERE user_id = ?').run(existingAdmin.id, defaultUserId);
-    db.prepare('UPDATE mcp_servers SET user_id = ? WHERE user_id = ?').run(existingAdmin.id, defaultUserId);
+    db.transaction(() => {
+      db.prepare('UPDATE agents SET user_id = ? WHERE user_id = ?').run(existingAdmin.id, defaultUserId);
+      db.prepare('UPDATE conversations SET user_id = ? WHERE user_id = ?').run(existingAdmin.id, defaultUserId);
+      db.prepare(`
+        INSERT INTO settings (user_id, key, value)
+        SELECT ?, key, value FROM settings WHERE user_id = ?
+        ON CONFLICT(user_id, key) DO NOTHING
+      `).run(existingAdmin.id, defaultUserId);
+      db.prepare('DELETE FROM settings WHERE user_id = ?').run(defaultUserId);
+      db.prepare('UPDATE tools SET user_id = ? WHERE user_id = ?').run(existingAdmin.id, defaultUserId);
+      db.prepare('UPDATE mcp_servers SET user_id = ? WHERE user_id = ?').run(existingAdmin.id, defaultUserId);
+    })();
   }
 
   if (!existingAdmin && defaultUserId) {
@@ -419,11 +468,18 @@ export function migrate() {
       const bcrypt = require('bcrypt');
       const password_hash = bcrypt.hashSync(rawPassword, 12);
       db.prepare('INSERT INTO users (id, email, password_hash) VALUES (?, ?, ?)').run(newAdminId, INITIAL_ADMIN_EMAIL, password_hash);
-      db.prepare('UPDATE agents SET user_id = ? WHERE user_id = ?').run(newAdminId, defaultUserId);
-      db.prepare('UPDATE conversations SET user_id = ? WHERE user_id = ?').run(newAdminId, defaultUserId);
-      db.prepare('UPDATE settings SET user_id = ? WHERE user_id = ?').run(newAdminId, defaultUserId);
-      db.prepare('UPDATE tools SET user_id = ? WHERE user_id = ?').run(newAdminId, defaultUserId);
-      db.prepare('UPDATE mcp_servers SET user_id = ? WHERE user_id = ?').run(newAdminId, defaultUserId);
+      db.transaction(() => {
+        db.prepare('UPDATE agents SET user_id = ? WHERE user_id = ?').run(newAdminId, defaultUserId);
+        db.prepare('UPDATE conversations SET user_id = ? WHERE user_id = ?').run(newAdminId, defaultUserId);
+        db.prepare(`
+          INSERT INTO settings (user_id, key, value)
+          SELECT ?, key, value FROM settings WHERE user_id = ?
+          ON CONFLICT(user_id, key) DO NOTHING
+        `).run(newAdminId, defaultUserId);
+        db.prepare('DELETE FROM settings WHERE user_id = ?').run(defaultUserId);
+        db.prepare('UPDATE tools SET user_id = ? WHERE user_id = ?').run(newAdminId, defaultUserId);
+        db.prepare('UPDATE mcp_servers SET user_id = ? WHERE user_id = ?').run(newAdminId, defaultUserId);
+      })();
       console.log('[Agent Studio] Initial admin created: ' + INITIAL_ADMIN_EMAIL);
       if (!adminPasswordSet) {
         console.log('[Agent Studio] One-time password (save it, then change after first login): ' + rawPassword);

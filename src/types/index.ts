@@ -64,10 +64,12 @@ export interface McpServer {
 
 export interface Conversation {
   id: string;
-  agent_id: string;
+  agent_id: string | null;
   title: string;
+  model?: string;
   agent_name?: string;
   agent_emoji?: string;
+  is_general?: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -101,6 +103,9 @@ export interface Message {
   cached_tokens?: number;
   tool_call_id?: string;
   tool_calls?: ToolCallSpec[];
+  model?: string;
+  processed_by_agent_id?: string | null;
+  processed_by_agent_name?: string | null;
   created_at: string;
 }
 
@@ -192,6 +197,17 @@ export interface AgentFormData {
   structured_output_enabled?: boolean;
   structured_output_schema?: string | null;
   response_healing_enabled?: boolean;
+}
+
+export interface GeneralChatSettings {
+  model: string;
+  system_prompt: string;
+  emoji?: string;
+  tool_ids?: string[];
+  mcp_server_ids?: string[];
+  reasoning_enabled?: boolean;
+  reasoning_effort?: ReasoningEffort | null;
+  reasoning_max_tokens?: number | null;
 }
 
 export interface UsageStats {

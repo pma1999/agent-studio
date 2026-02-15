@@ -98,6 +98,9 @@ export const agentsApi = {
   delete: (id: string) => request<{ success: boolean }>(`/agents/${id}`, {
     method: 'DELETE',
   }),
+  search: (query: string) => request<{ agents: { id: string; name: string; emoji: string; description: string }[] }>(
+    `/agents/search?q=${encodeURIComponent(query)}`
+  ),
 };
 
 // Conversations
@@ -105,13 +108,21 @@ export const conversationsApi = {
   list: (agentId?: string) => request<Conversation[]>(
     agentId ? `/conversations?agent_id=${agentId}` : '/conversations'
   ),
-  create: (agentId: string, title?: string) => request<Conversation>('/conversations', {
+  create: (agentId: string | null, title?: string) => request<Conversation>('/conversations', {
     method: 'POST',
     body: JSON.stringify({ agent_id: agentId, title }),
+  }),
+  createGeneral: (title?: string) => request<Conversation>('/conversations', {
+    method: 'POST',
+    body: JSON.stringify({ agent_id: null, title: title || 'General Chat' }),
   }),
   update: (id: string, title: string) => request<Conversation>(`/conversations/${id}`, {
     method: 'PUT',
     body: JSON.stringify({ title }),
+  }),
+  updateModel: (id: string, model: string | null) => request<Conversation>(`/conversations/${id}/model`, {
+    method: 'PUT',
+    body: JSON.stringify({ model }),
   }),
   delete: (id: string) => request<{ success: boolean }>(`/conversations/${id}`, {
     method: 'DELETE',
@@ -225,9 +236,16 @@ export async function streamChat(
   onToolResult?: (data: StreamToolResultData) => void,
   attachments?: ChatAttachmentInput[],
   pdf_engine?: PDFEngine,
+  model?: string,
+  invokeAgentId?: string,
 ): Promise<void> {
   try {
     const body: Record<string, unknown> = { conversation_id: conversationId, content };
+
+    // Include invoke_agent_id for @agent mentions
+    if (invokeAgentId) {
+      body.invoke_agent_id = invokeAgentId;
+    }
 
     // Include per-message reasoning override if provided
     if (reasoning) {
@@ -243,6 +261,9 @@ export async function streamChat(
     }
     if (pdf_engine) {
       body.pdf_engine = pdf_engine;
+    }
+    if (model) {
+      body.model = model;
     }
 
     // Retry loop for 503 (server restarting during deploy)
