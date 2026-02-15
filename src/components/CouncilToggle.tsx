@@ -422,6 +422,10 @@ const CouncilSelectorPopover = React.forwardRef<HTMLDivElement, CouncilSelectorP
                     onSelectCouncil(member.id, {
                       member_models: member.member_models,
                       synthesizer_model: member.synthesizer_model,
+                      synthesis_prompt_template: member.synthesis_prompt_template || undefined,
+                      show_member_responses: member.show_member_responses,
+                      tool_ids: member.tool_ids ?? [],
+                      mcp_server_ids: member.mcp_server_ids ?? [],
                     })
                   }
                   style={{
