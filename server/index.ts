@@ -123,33 +123,6 @@ app.get('/api/health', (_req, res) => {
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Debug: what the server actually sees in its DB (remove after fixing)
-app.get('/api/debug/db-check', (_req, res) => {
-  try {
-    const users = db.prepare('SELECT id, email FROM users ORDER BY email').all() as { id: string; email: string }[];
-    const agentCounts = db.prepare(`
-      SELECT u.email, COUNT(a.id) as count
-      FROM users u LEFT JOIN agents a ON a.user_id = u.id
-      GROUP BY u.id
-    `).all() as { email: string; count: number }[];
-    const admin = users.find((u) => u.email === 'pablomiguelargudo@gmail.com');
-    const agentsForAdmin = admin
-      ? (db.prepare('SELECT id, name, user_id FROM agents WHERE user_id = ?').all(admin.id) as { id: string; name: string; user_id: string }[])
-      : [];
-    res.json({
-      hint: 'Server DB state (remove /api/debug/db-check after debugging)',
-      env_DATABASE_PATH: process.env.DATABASE_PATH ?? '(not set – server uses default path, not /data)',
-      users: users.map((u) => ({ email: u.email, id: u.id })),
-      agents_per_user: agentCounts,
-      admin_user_id: admin?.id ?? null,
-      agents_for_admin_count: agentsForAdmin.length,
-      agents_for_admin: agentsForAdmin.map((a) => ({ id: a.id, name: a.name })),
-    });
-  } catch (e) {
-    res.status(500).json({ error: String(e) });
-  }
-});
-
 try {
   migrate();
 } catch (err) {
