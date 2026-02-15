@@ -7,6 +7,7 @@ import type { CouncilRunDetail } from '../../types';
 interface CouncilHeaderProps {
   councilRun: CouncilRunDetail;
   isComplete?: boolean;
+  durationMs?: number;
   showProgress?: boolean;
   progress?: number;
 }
@@ -14,6 +15,7 @@ interface CouncilHeaderProps {
 export function CouncilHeader({
   councilRun,
   isComplete = true,
+  durationMs,
   showProgress = false,
   progress = 100,
 }: CouncilHeaderProps) {
@@ -192,6 +194,12 @@ export function CouncilHeader({
               value={`${successfulResponses}/${totalResponses}`}
               color={successfulResponses === totalResponses ? '#7ab88f' : '#d4a557'}
             />
+            {durationMs !== undefined && durationMs >= 0 && (
+              <StatItem
+                label="Duration"
+                value={durationMs < 1000 ? `${durationMs}ms` : `${(durationMs / 1000).toFixed(1)}s`}
+              />
+            )}
           </motion.div>
         )}
       </div>
