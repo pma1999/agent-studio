@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { Plus, Building2, Pencil, Trash2, MessageSquare, Cpu, GitMerge, Sparkles } from 'lucide-react';
 import { useStore } from '../stores/store';
@@ -17,6 +17,11 @@ export function CouncilManager() {
     setEditingCouncil,
     setCurrentView,
   } = useStore();
+
+  // Load list when entering the councils view
+  useEffect(() => {
+    loadCouncilMembers();
+  }, [loadCouncilMembers]);
 
   const handleCreateCouncil = () => {
     setEditingCouncil(null);
