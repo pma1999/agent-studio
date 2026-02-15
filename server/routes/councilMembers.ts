@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { nanoid } from 'nanoid';
 import db from '../db.js';
 import { AuthRequest } from '../middleware/auth.js';
-import type { CouncilMember, CouncilRun, CouncilResponse, CouncilRunDetail, ToolResultRecord } from '../types.js';
+import type { CouncilMember, CouncilRun, CouncilResponse, CouncilRunDetail, ToolResultRecord, ToolCallSpec } from '../types.js';
 
 const router = Router();
 
@@ -103,14 +103,15 @@ router.get('/runs/:id', (req: AuthRequest, res: Response) => {
       return;
     }
 
+    type RawRow = Omit<CouncilResponse, 'tool_calls' | 'tool_results'> & {
+      tool_calls?: string | ToolCallSpec[];
+      tool_results?: string;
+    };
     const rawResponses = db.prepare(`
       SELECT * FROM council_responses
       WHERE council_run_id = ?
       ORDER BY display_order ASC
-    `).all(id) as Array<CouncilResponse & {
-      tool_calls?: string | CouncilResponse['tool_calls'];
-      tool_results?: string;
-    }>;
+    `).all(id) as RawRow[];
     const responses: CouncilResponse[] = rawResponses.map((r) => {
       const { tool_calls: rawTc, tool_results: rawTr, ...rest } = r;
       let tool_calls: CouncilResponse['tool_calls'];

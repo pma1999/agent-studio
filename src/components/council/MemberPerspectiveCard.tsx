@@ -15,7 +15,7 @@ function inferToolSource(name: string): ToolSource {
 }
 
 /** Normalize tool_calls from API (array or JSON string) to ToolCallSpec[]. */
-function normalizeToolCalls(raw: CouncilResponse['tool_calls']): ToolCallSpec[] {
+function normalizeToolCalls(raw: CouncilResponse['tool_calls'] | string): ToolCallSpec[] {
   if (Array.isArray(raw) && raw.length > 0) return raw;
   if (typeof raw === 'string' && raw.trim()) {
     try {
