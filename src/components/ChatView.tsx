@@ -2,14 +2,14 @@ import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion';
 import { Send, ArrowDown, StopCircle, MessageSquare, Bot, Brain, FileUp, Link, X } from 'lucide-react';
 import { useStore } from '../stores/store';
-import { useIsMobile } from '../utils/breakpoints';
+import { useIsMobile, usePrefersReducedMotion } from '../utils/breakpoints';
 import { useChat } from '../hooks/useChat';
 import { useAutoScroll } from '../hooks/useAutoScroll';
 import { MessageBubble } from './MessageBubble';
 import { EmptyState } from './EmptyState';
 import { Button } from './ui/Button';
-import { ModelSelector } from './ModelSelector';
-import { MessageModelSelector } from './MessageModelSelector';
+import { ModelSelectorCore } from './ModelSelectorCore';
+import { conversationsApi } from '../api/client';
 import { PremiumMentionInput } from './ui/PremiumMentionInput';
 import { ConversationTokenSummary, StreamingTokenCounter } from './TokenCounter';
 import type {
@@ -89,6 +89,10 @@ export function ChatView() {
     setReasoningOverride,
     streamStartTime,
     streamingActivityEvents,
+    conversationModelOverrides,
+    setConversationModelOverride,
+    loadConversations,
+    generalChatSettings,
   } = useStore();
   const streamingActivitySignature = useMemo(() => (
     streamingActivityEvents
@@ -122,8 +126,35 @@ export function ChatView() {
 
   const activeConversation = conversations.find((c) => c.id === activeConversationId);
   const agent = agents.find((a) => a.id === (activeConversation?.agent_id || selectedAgentId));
+  const isGeneralChat = !agent;
 
-  // Determine effective reasoning state: override > agent default
+  // Default model for this chat: agent's model, or general chat settings model when in general chat
+  const defaultModelForChat = agent
+    ? agent.model
+    : (generalChatSettings?.model ?? 'openrouter/auto');
+
+  const effectiveConversationModel = useMemo(() => {
+    if (!activeConversationId) return null;
+    const override = conversationModelOverrides[activeConversationId];
+    if (override !== undefined) return override;
+    return activeConversation?.model ?? null;
+  }, [activeConversationId, conversationModelOverrides, activeConversation?.model]);
+
+  const handleConversationModelChange = useCallback(
+    async (modelId: string | null) => {
+      if (!activeConversationId) return;
+      setConversationModelOverride(activeConversationId, modelId);
+      try {
+        await conversationsApi.updateModel(activeConversationId, modelId);
+        await loadConversations();
+      } catch (err) {
+        console.error('Failed to update conversation model:', err);
+      }
+    },
+    [activeConversationId, setConversationModelOverride, loadConversations]
+  );
+
+  // Determine effective reasoning state: override > agent default > general chat settings (when no agent)
   const effectiveReasoning: ReasoningConfig = useMemo(() => {
     if (reasoningOverride) return reasoningOverride;
     if (agent?.reasoning_enabled) {
@@ -133,12 +164,20 @@ export function ChatView() {
         max_tokens: agent.reasoning_max_tokens || undefined,
       };
     }
+    if (isGeneralChat && generalChatSettings?.reasoning_enabled) {
+      return {
+        enabled: true,
+        effort: generalChatSettings.reasoning_effort || undefined,
+        max_tokens: generalChatSettings.reasoning_max_tokens || undefined,
+      };
+    }
     return { enabled: false };
-  }, [reasoningOverride, agent]);
+  }, [reasoningOverride, agent, isGeneralChat, generalChatSettings]);
 
   const reasoningActive = effectiveReasoning.enabled;
   const currentEffort = effectiveReasoning.effort || 'medium';
   const isMobile = useIsMobile();
+  const prefersReducedMotion = usePrefersReducedMotion();
 
   // Close popover when clicking outside
   useEffect(() => {
@@ -159,9 +198,10 @@ export function ChatView() {
     if (reasoningActive) {
       setReasoningOverride({ enabled: false });
     } else {
-      setReasoningOverride({ enabled: true, effort: agent?.reasoning_effort || 'medium' });
+      const defaultEffort = agent?.reasoning_effort ?? generalChatSettings?.reasoning_effort ?? 'medium';
+      setReasoningOverride({ enabled: true, effort: defaultEffort });
     }
-  }, [reasoningActive, agent, setReasoningOverride]);
+  }, [reasoningActive, agent, generalChatSettings?.reasoning_effort, setReasoningOverride]);
 
   const setEffort = useCallback((effort: ReasoningEffort) => {
     setReasoningOverride({
@@ -336,148 +376,136 @@ export function ChatView() {
   const isLastMsgStreamingPlaceholder = lastMsg && lastMsg.role === 'assistant' && lastMsg.id.startsWith('temp-');
 
   return (
-    <div style={{
-      display: 'flex',
-      flexDirection: 'column',
-      height: '100%',
-      overflow: 'hidden',
-    }}>
-      {/* Chat Header */}
-      <div style={{
-        padding: '12px var(--content-padding-x)',
-        borderBottom: '1px solid var(--border)',
-        background: 'var(--bg-base)',
+    <div
+      className="chat-view"
+      style={{
         display: 'flex',
-        alignItems: 'center',
-        gap: '12px',
-        flexShrink: 0,
-        flexWrap: 'wrap',
-      }}>
-        {agent ? (
-          // Agent chat
-          <div style={{
-            width: '32px',
-            height: '32px',
-            borderRadius: 'var(--radius-sm)',
-            background: 'var(--accent-glow)',
-            border: '1px solid var(--border)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            fontSize: '1rem',
-            flexShrink: 0,
-          }}>
-            {agent.emoji}
-          </div>
-        ) : (
-          // General chat
-          <div style={{
-            width: '32px',
-            height: '32px',
-            borderRadius: 'var(--radius-sm)',
-            background: 'rgba(59, 130, 246, 0.15)',
-            border: '1px solid rgba(59, 130, 246, 0.3)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            fontSize: '1rem',
-            flexShrink: 0,
-          }}>
-            💬
-          </div>
-        )}
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{
-            fontSize: '0.938rem',
-            fontWeight: 500,
-            color: 'var(--text-primary)',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-          }}>
+        flexDirection: 'column',
+        height: '100%',
+        overflow: 'hidden',
+        position: 'relative',
+      }}
+    >
+      {/* Chat Header */}
+      <header className="chat-view-header" aria-label="Conversation header">
+        <div className="chat-view-header-icon">
+          {agent ? (
+            <span className="chat-view-header-icon-inner chat-view-header-icon-agent" aria-hidden="true">
+              {agent.emoji}
+            </span>
+          ) : (
+            <span className="chat-view-header-icon-inner chat-view-header-icon-general" aria-hidden="true">
+              {generalChatSettings?.emoji ?? '💬'}
+            </span>
+          )}
+        </div>
+        <div className="chat-view-header-main">
+          <h1 className="chat-view-header-title">
             {activeConversation?.title || 'New conversation'}
-          </div>
-          <div style={{
-            fontSize: '0.75rem',
-            color: 'var(--text-muted)',
-            fontFamily: 'var(--font-mono)',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '6px',
-            flexWrap: 'wrap',
-          }}>
+          </h1>
+          <div className="chat-view-header-meta">
             {agent?.name || 'General Chat'} ·
-            <ModelSelector
-              agentModel={agent?.model || 'openrouter/auto'}
-              conversationId={activeConversationId}
-            />
+            <span className="chat-view-header-model-wrap">
+              <ModelSelectorCore
+                variant="conversation"
+                value={effectiveConversationModel}
+                onChange={handleConversationModelChange}
+                agentModel={defaultModelForChat}
+                conversationModel={activeConversation?.model}
+                ariaLabel="Select AI model for this conversation"
+              />
+            </span>
           </div>
         </div>
-        {/* Conversation token summary */}
         <ConversationTokenSummary messages={messages} />
-      </div>
+      </header>
 
-      {/* Messages */}
-      <div
-        ref={containerRef}
-        onScroll={handleScroll}
-        style={{
-          flex: 1,
-          overflowY: 'auto',
-          padding: `0 var(--content-padding-x)`,
-        }}
-      >
-        <div style={{
-          maxWidth: '800px',
+      {/* Messages + FAB wrapper (position relative so FAB is positioned above input) */}
+      <div className="chat-view-messages-wrapper" style={{ flex: 1, minHeight: 0, position: 'relative', display: 'flex', flexDirection: 'column' }}>
+        <div
+          ref={containerRef}
+          onScroll={handleScroll}
+          className="chat-view-messages-scroll"
+          style={{
+            flex: 1,
+            overflowY: 'auto',
+            padding: `0 var(--content-padding-x)`,
+          }}
+        >
+        <div className="chat-view-messages-inner" style={{
+          maxWidth: 'var(--chat-content-max-width, 800px)',
           margin: '0 auto',
           paddingBottom: 'var(--content-padding-y)',
         }}>
           {messagesLoading ? (
-            <div style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              padding: '64px',
-              color: 'var(--text-muted)',
-            }}>
-              Loading messages...
+            <div className="chat-loading-skeleton" aria-live="polite" aria-busy="true">
+              {prefersReducedMotion ? (
+                <div className="chat-loading-simple">
+                  <div className="chat-loading-dots" aria-hidden="true">
+                    <span className="chat-loading-dot" />
+                    <span className="chat-loading-dot" />
+                    <span className="chat-loading-dot" />
+                  </div>
+                  <p>Loading conversation...</p>
+                </div>
+              ) : (
+                <>
+                  <div className="chat-loading-skeleton-row">
+                    <div className="chat-loading-skeleton-avatar" />
+                    <div className="chat-loading-skeleton-content">
+                      <div className="chat-loading-skeleton-line chat-loading-skeleton-line-short" />
+                      <div className="chat-loading-skeleton-line" />
+                    </div>
+                  </div>
+                  <div className="chat-loading-skeleton-row">
+                    <div className="chat-loading-skeleton-avatar" />
+                    <div className="chat-loading-skeleton-content">
+                      <div className="chat-loading-skeleton-line" />
+                      <div className="chat-loading-skeleton-line chat-loading-skeleton-line-medium" />
+                    </div>
+                  </div>
+                  <div className="chat-loading-skeleton-row">
+                    <div className="chat-loading-skeleton-avatar" />
+                    <div className="chat-loading-skeleton-content">
+                      <div className="chat-loading-skeleton-line chat-loading-skeleton-line-short" />
+                    </div>
+                  </div>
+                </>
+              )}
             </div>
           ) : messages.length === 0 ? (
             <motion.div
-              initial={{ opacity: 0, y: 20 }}
+              className="chat-welcome-state"
+              initial={prefersReducedMotion ? false : { opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
-              style={{
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                justifyContent: 'center',
-                padding: '80px 24px',
-                textAlign: 'center',
-                gap: '16px',
-              }}
+              transition={{ duration: prefersReducedMotion ? 0 : 0.4, ease: [0.4, 0, 0.2, 1] }}
             >
-              <div style={{
-                fontSize: '3rem',
-                marginBottom: '8px',
-              }}>
-                {agent?.emoji || '✨'}
+              <div className="chat-welcome-icon" aria-hidden="true">
+                {agent?.emoji ?? (generalChatSettings?.emoji ?? '✨')}
               </div>
-              <h2 style={{
-                fontFamily: 'var(--font-display)',
-                fontSize: '1.75rem',
-                fontWeight: 500,
-                color: 'var(--text-primary)',
-              }}>
-                Chat with {agent?.name || 'Agent'}
+              <h2 className="chat-welcome-title">
+                Chat with {agent?.name ?? (isGeneralChat ? 'General Chat' : 'Agent')}
               </h2>
-              <p style={{
-                color: 'var(--text-muted)',
-                maxWidth: '400px',
-                lineHeight: 1.6,
-                fontSize: '0.938rem',
-              }}>
+              <p className="chat-welcome-description">
                 {agent?.description || 'Send a message to start the conversation.'}
               </p>
+              <div className="chat-welcome-suggestions">
+                {[
+                  agent?.description ? 'What can you help me with?' : 'Ask anything',
+                  'Explain a concept simply',
+                  'Help me brainstorm',
+                ].slice(0, 3).map((label, i) => (
+                  <button
+                    key={i}
+                    type="button"
+                    className="chat-welcome-suggestion-chip"
+                    onClick={() => setInputValue(label)}
+                    aria-label={`Suggested: ${label}`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
             </motion.div>
           ) : (
             displayMessages.map((msg, i) => {
@@ -504,52 +532,47 @@ export function ChatView() {
             })
           )}
         </div>
+        </div>
+        {/* Scroll to bottom (inside wrapper so positioned relative to messages area) */}
+        <AnimatePresence>
+          {showScrollButton && (
+            <motion.button
+              type="button"
+              aria-label="Scroll to bottom"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 10 }}
+              onClick={scrollToBottom}
+              className="chat-scroll-btn"
+              style={{
+                position: 'absolute',
+                left: '50%',
+                transform: 'translateX(-50%)',
+                bottom: 'var(--chat-scroll-fab-bottom, 100px)',
+                width: '36px',
+                height: '36px',
+                borderRadius: '50%',
+                background: 'var(--bg-elevated)',
+                border: '1px solid var(--border)',
+                color: 'var(--text-secondary)',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                boxShadow: 'var(--shadow-md)',
+                zIndex: 10,
+                transition: 'background var(--transition-fast), color var(--transition-fast), transform var(--transition-fast)',
+              }}
+            >
+              <ArrowDown size={16} />
+            </motion.button>
+          )}
+        </AnimatePresence>
       </div>
 
-      {/* Scroll to bottom */}
-      <AnimatePresence>
-        {showScrollButton && (
-          <motion.button
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 10 }}
-            onClick={scrollToBottom}
-            style={{
-            position: 'absolute',
-            left: '50%',
-            transform: 'translateX(-50%)',
-              width: '36px',
-              height: '36px',
-              borderRadius: '50%',
-              background: 'var(--bg-elevated)',
-              border: '1px solid var(--border)',
-              color: 'var(--text-secondary)',
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              boxShadow: 'var(--shadow-md)',
-              zIndex: 10,
-            }}
-            className="chat-scroll-btn"
-          >
-            <ArrowDown size={16} />
-          </motion.button>
-        )}
-      </AnimatePresence>
-
       {/* Input Area */}
-      <div style={{
-        padding: '16px var(--content-padding-x) 20px',
-        paddingBottom: 'calc(20px + env(safe-area-inset-bottom, 0px))',
-        borderTop: '1px solid var(--border)',
-        background: 'var(--bg-base)',
-        flexShrink: 0,
-      }}>
-        <div style={{
-          maxWidth: '800px',
-          margin: '0 auto',
-        }}>
+      <div className="chat-view-input">
+        <div className="chat-view-input-inner">
           <div style={{
             display: 'flex',
             flexDirection: 'column',
@@ -569,6 +592,9 @@ export function ChatView() {
                 <div style={{ position: 'relative', flexShrink: 0 }}>
                   <button
                     ref={reasoningBtnRef}
+                    type="button"
+                    aria-label={reasoningActive ? `Thinking: ${currentEffort}` : 'Enable thinking'}
+                    aria-expanded={showReasoningPopover}
                     onClick={() => setShowReasoningPopover(!showReasoningPopover)}
                     title={reasoningActive ? `Thinking: ${currentEffort}` : 'Enable thinking'}
                     style={{
@@ -752,9 +778,11 @@ export function ChatView() {
                               lineHeight: 1.4,
                             }}>
                               Model will show its reasoning process before responding.
-                              {agent?.reasoning_enabled && !reasoningOverride && (
+                              {!reasoningOverride && (agent?.reasoning_enabled ? (
                                 <span style={{ color: 'var(--text-secondary)' }}> Using agent defaults.</span>
-                              )}
+                              ) : isGeneralChat && generalChatSettings?.reasoning_enabled ? (
+                                <span style={{ color: 'var(--text-secondary)' }}> Using general chat defaults.</span>
+                              ) : null)}
                             </div>
                           </div>
                         )}
@@ -766,13 +794,15 @@ export function ChatView() {
 
               {/* Message Model Selector */}
               <div style={{ position: 'relative', flexShrink: 0 }}>
-                <MessageModelSelector
-                  agentModel={agent?.model || 'openrouter/auto'}
-                  conversationModel={activeConversation?.model}
+                <ModelSelectorCore
+                  variant="message"
                   value={messageModelOverride}
                   onChange={setMessageModelOverride}
+                  agentModel={defaultModelForChat}
+                  conversationModel={activeConversation?.model}
                   disabled={isStreaming}
                   compact
+                  placement="above"
                 />
               </div>
             </div>
@@ -965,6 +995,9 @@ export function ChatView() {
             {/* Send / Stop button */}
             {isStreaming ? (
               <button
+                type="button"
+                className="chat-send-btn chat-stop-btn"
+                aria-label="Stop generating"
                 onClick={cancelStream}
                 title="Stop generating"
                 style={{
@@ -994,6 +1027,9 @@ export function ChatView() {
               </button>
             ) : (
               <button
+                type="button"
+                className="chat-send-btn"
+                aria-label="Send message"
                 onClick={handleSend}
                 disabled={!inputValue.trim()}
                 style={{
@@ -1028,7 +1064,7 @@ export function ChatView() {
             )}
           </div>
           </div>
-          <div style={{
+          <div className="chat-input-hints" style={{
             display: 'flex',
             justifyContent: 'space-between',
             alignItems: 'center',
@@ -1049,7 +1085,7 @@ export function ChatView() {
                     streamStartTime={streamStartTime}
                   />
                   <span style={{ marginLeft: '8px', color: 'var(--error)' }}>
-                    · click stop to cancel
+                    {isMobile ? '· stop' : '· click stop to cancel'}
                   </span>
                 </>
               ) : (

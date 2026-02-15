@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { nanoid } from 'nanoid';
 import db from '../db.js';
 import { AuthRequest } from '../middleware/auth.js';
+import { getSettingValue } from './settings.js';
 
 const router = Router();
 
@@ -55,10 +56,12 @@ router.post('/', (req: AuthRequest, res: Response) => {
 
     const id = nanoid();
     const conversationTitle = title || (agent_id ? 'New conversation' : 'General Chat');
+    // For general chat, set initial model from user's general_chat_model setting so the conversation keeps that model
+    const initialModel = !agent_id ? (getSettingValue(userId, 'general_chat_model') || null) : null;
     db.prepare(`
-      INSERT INTO conversations (id, user_id, agent_id, title)
-      VALUES (?, ?, ?, ?)
-    `).run(id, userId, agent_id || null, conversationTitle);
+      INSERT INTO conversations (id, user_id, agent_id, title, model)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(id, userId, agent_id || null, conversationTitle, initialModel);
 
     const conversation = db.prepare(`
       SELECT c.*, a.name as agent_name, a.emoji as agent_emoji

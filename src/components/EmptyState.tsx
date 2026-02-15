@@ -15,57 +15,24 @@ export function EmptyState({ icon, title, description, action }: EmptyStateProps
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.5, ease: [0.4, 0, 0.2, 1] }}
       className="empty-state-root"
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        textAlign: 'center',
-        gap: '20px',
-        height: '100%',
-      }}
     >
       <motion.div
+        className="empty-state-icon"
         initial={{ scale: 0.8 }}
         animate={{ scale: 1 }}
         transition={{ duration: 0.5, delay: 0.1 }}
-        style={{
-          width: '80px',
-          height: '80px',
-          borderRadius: '50%',
-          background: 'var(--accent-glow)',
-          border: '1px solid var(--border)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          color: 'var(--accent)',
-          marginBottom: '8px',
-        }}
+        aria-hidden="true"
       >
         {icon}
       </motion.div>
-      <h2 style={{
-        fontFamily: 'var(--font-display)',
-        fontSize: '1.75rem',
-        fontWeight: 500,
-        color: 'var(--text-primary)',
-      }}>
-        {title}
-      </h2>
-      <p style={{
-        color: 'var(--text-muted)',
-        maxWidth: '400px',
-        lineHeight: 1.6,
-        fontSize: '0.938rem',
-      }}>
-        {description}
-      </p>
+      <h2 className="empty-state-title">{title}</h2>
+      <p className="empty-state-description">{description}</p>
       {action && (
         <motion.div
+          className="empty-state-action"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ delay: 0.3 }}
-          style={{ marginTop: '8px' }}
         >
           {action}
         </motion.div>

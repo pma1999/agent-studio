@@ -2,12 +2,12 @@ import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { CheckCircle, AlertCircle, ExternalLink, Zap, Coins, BarChart3, Loader2, Globe, KeyRound, Database, MessageSquare, Brain, Check, ChevronDown, Sparkles, Lightbulb, SlidersHorizontal } from 'lucide-react';
 import { useStore } from '../stores/store';
-import { settingsApi, modelsApi } from '../api/client';
-import type { OpenRouterModel, ReasoningEffort } from '../types';
+import { settingsApi } from '../api/client';
+import type { ReasoningEffort } from '../types';
 import { Modal } from './ui/Modal';
 import { Input } from './ui/Input';
 import { Button } from './ui/Button';
-import { PremiumModelSelector } from './PremiumModelSelector';
+import { ModelSelectorCore } from './ModelSelectorCore';
 import { PremiumToggle } from './ui/PremiumToggle';
 import { PremiumEmojiPicker } from './ui/PremiumEmojiPicker';
 import { PremiumSelect } from './ui/PremiumSelect';
@@ -259,8 +259,6 @@ function GeneralChatSettingsSection() {
     generalChatSettingsLoading,
   } = useStore();
 
-  const [models, setModels] = useState<OpenRouterModel[]>([]);
-  const [modelsLoading, setModelsLoading] = useState(false);
   const [saving, setSaving] = useState(false);
 
   // Local state for editing
@@ -285,17 +283,6 @@ function GeneralChatSettingsSection() {
       setLocalEmoji(generalChatSettings.emoji || '💬');
     }
   }, [generalChatSettings]);
-
-  // Load available models
-  useEffect(() => {
-    setModelsLoading(true);
-    modelsApi.openrouter()
-      .then((data) => {
-        setModels(data.data || []);
-        setModelsLoading(false);
-      })
-      .catch(() => setModelsLoading(false));
-  }, []);
 
   const handleSave = async () => {
     setSaving(true);
@@ -377,11 +364,10 @@ function GeneralChatSettingsSection() {
         }}>
           Default Model
         </label>
-        <PremiumModelSelector
-          models={models}
+        <ModelSelectorCore
+          variant="settings"
           value={localModel}
-          onChange={setLocalModel}
-          loading={modelsLoading}
+          onChange={(id) => setLocalModel(id ?? 'openrouter/auto')}
           label=""
         />
       </div>

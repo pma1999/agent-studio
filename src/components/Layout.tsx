@@ -11,6 +11,7 @@ interface LayoutProps {
 export function Layout({ children }: LayoutProps) {
   const isMobile = useIsMobile();
   const setSidebarMobileOpen = useStore((s) => s.setSidebarMobileOpen);
+  const menuOpen = useStore((s) => s.sidebarMobileOpen);
 
   return (
     <div style={{
@@ -65,7 +66,9 @@ export function Layout({ children }: LayoutProps) {
                 e.currentTarget.style.background = 'transparent';
                 e.currentTarget.style.color = 'var(--text-secondary)';
               }}
+              id="sidebar-open-menu-btn"
               aria-label="Open menu"
+              aria-expanded={menuOpen}
             >
               <Menu size={22} />
             </button>

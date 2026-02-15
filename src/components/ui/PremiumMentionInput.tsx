@@ -362,15 +362,18 @@ export function PremiumMentionInput({
       <AnimatePresence>
         {showMentionDropdown && filteredAgents.length > 0 && (
           <motion.div
+            className="mention-dropdown"
+            role="listbox"
+            aria-label="Invoke agent"
             initial={{ opacity: 0, y: 10, scale: 0.96 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 10, scale: 0.96 }}
             transition={{ duration: 0.15 }}
             style={{
               position: 'fixed',
-              top: dropdownPos.top - 280, // Fixed height above input
+              top: Math.max(8, dropdownPos.top - 280),
               left: dropdownPos.left,
-              width: dropdownPos.width,
+              width: typeof window !== 'undefined' ? Math.min(dropdownPos.width, window.innerWidth - 24) : dropdownPos.width,
               maxHeight: '280px',
               background: 'var(--bg-elevated)',
               border: '1px solid var(--border-light)',
@@ -414,6 +417,9 @@ export function PremiumMentionInput({
                 <motion.button
                   key={agent.id}
                   type="button"
+                  role="option"
+                  aria-selected={index === highlightedIndex}
+                  className="mention-dropdown-item"
                   onClick={() => selectAgent(agent)}
                   onMouseEnter={() => setHighlightedIndex(index)}
                   style={{

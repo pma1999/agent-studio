@@ -410,27 +410,10 @@ export function MessageBubble({
       initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3, ease: [0.4, 0, 0.2, 1] }}
-      className="message-bubble-container"
-      style={{
-        display: 'flex',
-        gap: '14px',
-        alignItems: 'flex-start',
-        maxWidth: '100%',
-      }}
+      className={`message-bubble-container ${!isUser ? 'message-bubble-assistant' : ''}`}
     >
       {/* Avatar */}
-      <div style={{
-        width: '36px',
-        height: '36px',
-        borderRadius: '50%',
-        background: isUser ? 'var(--bg-elevated)' : 'var(--accent-glow)',
-        border: `1px solid ${isUser ? 'var(--border)' : 'var(--border-accent)'}`,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        flexShrink: 0,
-        fontSize: isUser ? '0' : '1.1rem',
-      }}>
+      <div className="message-bubble-avatar" data-user={isUser ? 'true' : undefined}>
         {isUser ? (
           <User size={16} style={{ color: 'var(--text-secondary)' }} />
         ) : (
@@ -439,47 +422,20 @@ export function MessageBubble({
       </div>
 
       {/* Content */}
-      <div style={{ flex: 1, minWidth: 0, overflow: 'hidden' }}>
+      <div className="message-bubble-content">
         {/* Role label */}
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          marginBottom: '6px',
-        }}>
-          <div style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '8px',
-          }}>
-            <span style={{
-              fontSize: '0.75rem',
-              fontWeight: 600,
-              color: isUser ? 'var(--text-secondary)' : 'var(--accent)',
-              textTransform: 'uppercase',
-              letterSpacing: '0.06em',
-              fontFamily: 'var(--font-body)',
-            }}>
+        <div className="message-bubble-role-row">
+          <div className="message-bubble-role-left">
+            <span className={`message-bubble-role-label ${isUser ? 'message-bubble-role-user' : 'message-bubble-role-assistant'}`}>
               {isUser ? 'You' : 'Assistant'}
             </span>
             {!isUser && message.processed_by_agent_id && message.processed_by_agent_name && (
               <motion.span
+                className="message-bubble-via-badge"
                 initial={{ opacity: 0, scale: 0.9, x: -10 }}
                 animate={{ opacity: 1, scale: 1, x: 0 }}
                 transition={{ duration: 0.2, delay: 0.1 }}
                 title={`Processed by ${message.processed_by_agent_name}`}
-                style={{
-                  fontSize: '0.6875rem',
-                  fontWeight: 500,
-                  color: 'var(--accent)',
-                  background: 'var(--accent-glow)',
-                  padding: '3px 10px',
-                  borderRadius: 'var(--radius-md)',
-                  border: '1px solid var(--border-accent)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '4px',
-                }}
               >
                 <Sparkles size={10} />
                 via {message.processed_by_agent_name}
@@ -488,30 +444,11 @@ export function MessageBubble({
           </div>
           {!isUser && displayContent && !isStreaming && (
             <button
+              type="button"
+              className="message-bubble-copy-btn"
               onClick={handleCopy}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '4px',
-                background: 'transparent',
-                border: 'none',
-                color: copied ? 'var(--success)' : 'var(--text-muted)',
-                cursor: 'pointer',
-                fontSize: '0.6875rem',
-                fontFamily: 'var(--font-mono)',
-                padding: '2px 8px',
-                borderRadius: '4px',
-                transition: 'all var(--transition-fast)',
-                opacity: 0.6,
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.opacity = '1';
-                if (!copied) e.currentTarget.style.color = 'var(--text-primary)';
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.opacity = '0.6';
-                if (!copied) e.currentTarget.style.color = 'var(--text-muted)';
-              }}
+              aria-label={copied ? 'Copied' : 'Copy message'}
+              style={{ color: copied ? 'var(--success)' : undefined }}
             >
               {copied ? <Check size={11} /> : <Copy size={11} />}
               {copied ? 'Copied' : 'Copy'}

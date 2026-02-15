@@ -27,3 +27,18 @@ export function useIsMobile(): boolean {
   }, []);
   return isMobile;
 }
+
+const reducedMotionQuery = '(prefers-reduced-motion: reduce)';
+
+export function usePrefersReducedMotion(): boolean {
+  const [prefersReduced, setPrefersReduced] = useState(() =>
+    typeof window !== 'undefined' ? window.matchMedia(reducedMotionQuery).matches : false
+  );
+  useEffect(() => {
+    const mql = window.matchMedia(reducedMotionQuery);
+    const handler = () => setPrefersReduced(mql.matches);
+    mql.addEventListener('change', handler);
+    return () => mql.removeEventListener('change', handler);
+  }, []);
+  return prefersReduced;
+}
