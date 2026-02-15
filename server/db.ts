@@ -350,7 +350,7 @@ export function migrate() {
     db.exec('CREATE INDEX IF NOT EXISTS idx_agents_user_id ON agents(user_id)');
   }
 
-  const convCols = db.prepare("PRAGMA table_info(conversations)").all() as { name: string }[];
+  const convCols = db.prepare("PRAGMA table_info(conversations)").all() as { name: string; notnull?: number }[];
   if (!convCols.some((c) => c.name === 'user_id')) {
     db.exec('ALTER TABLE conversations ADD COLUMN user_id TEXT');
     db.prepare('UPDATE conversations SET user_id = ? WHERE user_id IS NULL').run(defaultUserId);

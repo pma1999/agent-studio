@@ -34,8 +34,9 @@ interface Agent {
 interface Conversation {
   id: string;
   user_id: string;
-  agent_id: string;
+  agent_id: string | null;
   title: string;
+  model?: string | null;
 }
 
 interface Annotation {
