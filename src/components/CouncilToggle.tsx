@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Building2, Users, Plus, ChevronDown, Settings } from 'lucide-react';
 import { useStore } from '../stores/store';
 import { ModelAvatar, getModelDisplayName } from './council/ModelAvatar';
-import type { CouncilConfig } from '../types';
+import type { CouncilConfig, CouncilMember } from '../types';
 
 interface CouncilToggleProps {
   disabled?: boolean;
@@ -206,13 +206,7 @@ export function CouncilToggle({ disabled, placement = 'above' }: CouncilTogglePr
 
 interface CouncilSelectorPopoverProps {
   style: React.CSSProperties;
-  members: Array<{
-    id: string;
-    name: string;
-    description?: string;
-    member_models: string[];
-    synthesizer_model: string;
-  }>;
+  members: CouncilMember[];
   loading: boolean;
   onSelectCouncil: (id: string, config: CouncilConfig) => void;
   onSelectQuickConfig: (models: string[]) => void;
