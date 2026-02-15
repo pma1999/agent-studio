@@ -707,6 +707,14 @@ button:hover .conv-delete-btn,
   overflow: hidden;
 }
 
+.tool-telemetry.tool-telemetry-inline {
+  margin-top: 0;
+}
+
+.tool-telemetry.tool-telemetry-inline .tool-telemetry-list {
+  padding-top: 10px;
+}
+
 .tool-telemetry-header {
   display: flex;
   align-items: center;

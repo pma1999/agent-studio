@@ -4,7 +4,7 @@ import { User, Sparkles, Copy, Check, Brain, ChevronDown, ChevronRight, External
 import { MarkdownContent } from './MarkdownContent';
 import { MessageTokenPills } from './TokenCounter';
 import { ToolCallTimeline } from './ToolCallTimeline';
-import type { Message, Annotation, ToolExecution } from '../types';
+import type { Message, Annotation, ToolExecution, StreamingActivityEvent } from '../types';
 
 function tryParseJson(str: string): unknown | null {
   const trimmed = str.trim();
@@ -140,6 +140,7 @@ interface MessageBubbleProps {
   isStreaming?: boolean;
   streamingContent?: string;
   streamingReasoning?: string;
+  streamingActivityEvents?: StreamingActivityEvent[];
   agentEmoji?: string;
   toolExecutions?: ToolExecution[];
   toolActivityLive?: boolean;
@@ -368,6 +369,7 @@ export function MessageBubble({
   isStreaming,
   streamingContent,
   streamingReasoning,
+  streamingActivityEvents,
   agentEmoji,
   toolExecutions,
   toolActivityLive,
@@ -382,6 +384,8 @@ export function MessageBubble({
 
   // Annotations
   const annotations = message.annotations || [];
+  const orderedStreamingEvents = streamingActivityEvents || [];
+  const hasOrderedStreamingEvents = !!isStreaming && orderedStreamingEvents.length > 0;
 
   const handleCopy = () => {
     navigator.clipboard.writeText(displayContent);
@@ -507,20 +511,45 @@ export function MessageBubble({
           </>
         ) : (
           <>
-            {/* Reasoning / Thinking block */}
-            {reasoningText && (
-              <ReasoningBlock
-                content={reasoningText}
-                isStreaming={!!isStreaming}
-                tokenCount={reasoningTokens}
-              />
-            )}
+            {/* Ordered stream activity: reasoning/tool in real execution order */}
+            {hasOrderedStreamingEvents ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                {orderedStreamingEvents.map((ev) => (
+                  ev.type === 'reasoning' ? (
+                    <ReasoningBlock
+                      key={ev.id}
+                      content={ev.content}
+                      isStreaming={true}
+                      tokenCount={undefined}
+                    />
+                  ) : (
+                    <ToolCallTimeline
+                      key={ev.id}
+                      calls={[ev.tool]}
+                      isStreaming={!!toolActivityLive}
+                      showHeader={false}
+                    />
+                  )
+                ))}
+              </div>
+            ) : (
+              <>
+                {/* Reasoning / Thinking block */}
+                {reasoningText && (
+                  <ReasoningBlock
+                    content={reasoningText}
+                    isStreaming={!!isStreaming}
+                    tokenCount={reasoningTokens}
+                  />
+                )}
 
-            {toolExecutions && toolExecutions.length > 0 && (
-              <ToolCallTimeline
-                calls={toolExecutions}
-                isStreaming={!!toolActivityLive}
-              />
+                {toolExecutions && toolExecutions.length > 0 && (
+                  <ToolCallTimeline
+                    calls={toolExecutions}
+                    isStreaming={!!toolActivityLive}
+                  />
+                )}
+              </>
             )}
 
             {displayContent ? (

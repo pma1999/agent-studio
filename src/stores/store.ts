@@ -9,6 +9,7 @@ import type {
   ReasoningConfig,
   ToolExecution,
   ToolSource,
+  StreamingActivityEvent,
 } from '../types';
 import type { AuthUser } from '../api/client';
 import { agentsApi, conversationsApi, messagesApi, settingsApi, creditsApi, usageApi, authApi } from '../api/client';
@@ -71,12 +72,12 @@ interface AppState {
   reasoningOverride: ReasoningConfig | null;
   setReasoningOverride: (config: ReasoningConfig | null) => void;
 
-  // Live tool execution timeline for the currently streaming assistant message
-  streamingToolEvents: ToolExecution[];
-  setStreamingToolEvents: (events: ToolExecution[]) => void;
+  // Ordered live activity timeline (thinking/tool) for current streaming message
+  streamingActivityEvents: StreamingActivityEvent[];
+  appendStreamingReasoningEvent: (chunk: string) => void;
   upsertStreamingToolCall: (data: { id: string; name: string; arguments: string; source?: ToolSource }) => void;
   completeStreamingToolCall: (data: { id: string; name: string; ok: boolean; result?: string; duration_ms?: number; source?: ToolSource }) => void;
-  resetStreamingToolEvents: () => void;
+  resetStreamingActivityEvents: () => void;
 
   // Settings
   openRouterApiKey: string;
@@ -226,71 +227,113 @@ export const useStore = create<AppState>((set, get) => ({
   reasoningOverride: null,
   setReasoningOverride: (config) => set({ reasoningOverride: config }),
 
-  // Live streaming tool timeline
-  streamingToolEvents: [],
-  setStreamingToolEvents: (events) => set({ streamingToolEvents: events }),
+  // Ordered streaming activity timeline (append by arrival order)
+  streamingActivityEvents: [],
+  appendStreamingReasoningEvent: (chunk) => set((state) => {
+    if (!chunk) return {};
+    const events = state.streamingActivityEvents;
+    const last = events[events.length - 1];
+    if (last && last.type === 'reasoning') {
+      const next = [...events];
+      next[next.length - 1] = {
+        ...last,
+        content: last.content + chunk,
+      };
+      return { streamingActivityEvents: next };
+    }
+    return {
+      streamingActivityEvents: [
+        ...events,
+        {
+          id: `reasoning-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          type: 'reasoning',
+          content: chunk,
+        },
+      ],
+    };
+  }),
   upsertStreamingToolCall: (data) => set((state) => {
-    const idx = state.streamingToolEvents.findIndex((ev) => ev.id === data.id);
+    const idx = state.streamingActivityEvents.findIndex(
+      (ev) => ev.type === 'tool' && ev.tool.id === data.id
+    );
     if (idx === -1) {
       return {
-        streamingToolEvents: [
-          ...state.streamingToolEvents,
+        streamingActivityEvents: [
+          ...state.streamingActivityEvents,
           {
-            id: data.id,
-            name: data.name,
-            arguments: data.arguments || '{}',
-            status: 'running',
-            source: data.source || 'unknown',
+            id: `tool-${data.id}`,
+            type: 'tool',
+            tool: {
+              id: data.id,
+              name: data.name,
+              arguments: data.arguments || '{}',
+              status: 'running',
+              source: data.source || 'unknown',
+            },
           },
         ],
       };
     }
 
-    const next = [...state.streamingToolEvents];
+    const next = [...state.streamingActivityEvents];
     const prev = next[idx];
+    if (prev.type !== 'tool') return {};
     next[idx] = {
       ...prev,
-      name: data.name || prev.name,
-      arguments: data.arguments || prev.arguments,
-      status: 'running',
-      source: data.source || prev.source,
+      tool: {
+        ...prev.tool,
+        name: data.name || prev.tool.name,
+        arguments: data.arguments || prev.tool.arguments,
+        status: 'running',
+        source: data.source || prev.tool.source,
+      },
     };
-    return { streamingToolEvents: next };
+    return { streamingActivityEvents: next };
   }),
   completeStreamingToolCall: (data) => set((state) => {
-    const idx = state.streamingToolEvents.findIndex((ev) => ev.id === data.id);
+    const idx = state.streamingActivityEvents.findIndex(
+      (ev) => ev.type === 'tool' && ev.tool.id === data.id
+    );
     if (idx === -1) {
       return {
-        streamingToolEvents: [
-          ...state.streamingToolEvents,
+        streamingActivityEvents: [
+          ...state.streamingActivityEvents,
           {
-            id: data.id,
-            name: data.name,
-            arguments: '{}',
-            status: data.ok ? 'done' : 'error',
-            ok: data.ok,
-            result: data.result,
-            duration_ms: data.duration_ms,
-            source: data.source || 'unknown',
+            id: `tool-${data.id}`,
+            type: 'tool',
+            tool: {
+              id: data.id,
+              name: data.name,
+              arguments: '{}',
+              status: data.ok ? 'done' : 'error',
+              ok: data.ok,
+              result: data.result,
+              duration_ms: data.duration_ms,
+              source: data.source || 'unknown',
+            },
           },
         ],
       };
     }
 
-    const next = [...state.streamingToolEvents];
+    const next = [...state.streamingActivityEvents];
     const prev = next[idx];
+    if (prev.type !== 'tool') return {};
     next[idx] = {
       ...prev,
-      name: data.name || prev.name,
-      status: data.ok ? 'done' : 'error',
-      ok: data.ok,
-      result: data.result,
-      duration_ms: data.duration_ms,
-      source: data.source || prev.source,
+      tool: {
+        ...prev.tool,
+        name: data.name || prev.tool.name,
+        status: data.ok ? 'done' : 'error',
+        ok: data.ok,
+        result: data.result,
+        duration_ms: data.duration_ms,
+        source: data.source || prev.tool.source,
+      },
     };
-    return { streamingToolEvents: next };
+    return { streamingActivityEvents: next };
   }),
-  resetStreamingToolEvents: () => set({ streamingToolEvents: [] }),
+  resetStreamingActivityEvents: () => set({ streamingActivityEvents: [] }),
 
   // Settings
   openRouterApiKey: '',
