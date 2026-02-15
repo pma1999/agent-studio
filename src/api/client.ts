@@ -242,6 +242,14 @@ export async function streamChat(
   try {
     const body: Record<string, unknown> = { conversation_id: conversationId, content };
 
+    // Send user's timezone so the model can use local date/time for time-sensitive answers
+    try {
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      if (tz) body.timezone = tz;
+    } catch {
+      // ignore
+    }
+
     // Include invoke_agent_id for @agent mentions
     if (invokeAgentId) {
       body.invoke_agent_id = invokeAgentId;

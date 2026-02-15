@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { nanoid } from 'nanoid';
 import db from '../db.js';
 import { getSettingValue } from './settings.js';
-import { resolveToolsForAgent, toOpenRouterTools, runTool } from '../tools/index.js';
+import { resolveToolsForAgent, resolveToolsFromIds, toOpenRouterTools, runTool } from '../tools/index.js';
 import { annotationsFromWebSearchResults } from '../tools/registry.js';
 import type { McpConnection } from '../mcp/index.js';
 import { AuthRequest } from '../middleware/auth.js';
@@ -107,6 +107,46 @@ function validateAttachments(attachments: unknown): { valid: ChatAttachmentInput
   return { valid };
 }
 
+/** Returns true if the string is a valid IANA timezone (e.g. Europe/Madrid, America/New_York). */
+function isValidTimezone(tz: string): boolean {
+  if (typeof tz !== 'string' || !tz.trim()) return false;
+  const s = tz.trim();
+  if (s.length < 2 || s.length > 40) return false;
+  if (!/^[A-Za-z0-9_+\-/]+$/.test(s)) return false;
+  try {
+    Intl.DateTimeFormat(undefined, { timeZone: s });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const DATE_TIME_OPTS: Intl.DateTimeFormatOptions = {
+  weekday: 'long',
+  day: 'numeric',
+  month: 'long',
+  year: 'numeric',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hour12: false,
+};
+
+/** Prepends current date/time context to the system prompt so the model knows "now" in the user's timezone. */
+function buildSystemPromptWithDateTime(systemPrompt: string, userTimezone?: string | null): string {
+  const now = new Date();
+  const utcStr = now.toLocaleString('en-GB', { ...DATE_TIME_OPTS, timeZone: 'UTC' });
+
+  let contextLine: string;
+  if (userTimezone && isValidTimezone(userTimezone)) {
+    const localStr = now.toLocaleString('en-GB', { ...DATE_TIME_OPTS, timeZone: userTimezone });
+    contextLine = `[Context: Current date and time (user's local time) — ${localStr} (${userTimezone}). UTC: ${utcStr}. Use this for time-sensitive answers.]`;
+  } else {
+    contextLine = `[Context: Current date and time — ${utcStr} UTC. Use this for time-sensitive answers.]`;
+  }
+  return `${contextLine}\n\n${systemPrompt}`;
+}
+
 // POST /api/chat - Send message and stream response
 router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
   let clientDisconnected = false;
@@ -138,8 +178,8 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       res.status(401).json({ error: 'Unauthorized' });
       return;
     }
-    const body = req.body as { conversation_id?: string; content?: string; reasoning?: unknown; attachments?: unknown; pdf_engine?: string; model?: string; invoke_agent_id?: string };
-    const { conversation_id, content, reasoning, attachments: attachmentsRaw, pdf_engine: pdfEngineRaw, model: messageModel, invoke_agent_id } = body;
+    const body = req.body as { conversation_id?: string; content?: string; reasoning?: unknown; attachments?: unknown; pdf_engine?: string; model?: string; invoke_agent_id?: string; timezone?: string };
+    const { conversation_id, content, reasoning, attachments: attachmentsRaw, pdf_engine: pdfEngineRaw, model: messageModel, invoke_agent_id, timezone: bodyTimezone } = body;
 
     if (!conversation_id || !content) {
       res.status(400).json({ error: 'conversation_id and content are required' });
@@ -166,6 +206,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     // Priority: 1) invoke_agent_id (@agent mention), 2) conversation's agent_id, 3) general chat settings
     let agent: Agent | undefined;
     let processedByAgentId: string | null = null;
+    let generalSettings: ReturnType<typeof loadGeneralChatSettings> | undefined;
 
     if (invoke_agent_id) {
       // User invoked a specific agent with @agentname
@@ -184,7 +225,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       }
     } else {
       // General chat - load settings from database or use defaults
-      const generalSettings = loadGeneralChatSettings(userId);
+      generalSettings = loadGeneralChatSettings(userId);
       agent = createGeneralChatAgent(generalSettings);
     }
 
@@ -238,8 +279,14 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       return { role: row.role as 'user' | 'assistant', content: row.content };
     });
 
+    // User timezone: request body (browser) overrides stored setting; invalid values are ignored
+    const userTimezone =
+      (typeof bodyTimezone === 'string' ? bodyTimezone.trim() : null) ||
+      getSettingValue(userId, 'user_timezone') ||
+      null;
+
     let messages: Array<{ role: string; content?: string | unknown[] | null; tool_call_id?: string; tool_calls?: unknown[]; annotations?: unknown[] }> = [
-      { role: 'system', content: agent.system_prompt },
+      { role: 'system', content: buildSystemPromptWithDateTime(agent.system_prompt, userTimezone) },
       ...history,
     ];
 
@@ -258,7 +305,9 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     }
 
     // Resolve tools for this agent (with user context for settings)
-    const resolved = await resolveToolsForAgent(agent.id, userId);
+    const resolved = agent.id === 'general' && generalSettings
+      ? await resolveToolsFromIds(generalSettings.tool_ids || [], generalSettings.mcp_server_ids || [], userId)
+      : await resolveToolsForAgent(agent.id, userId);
     const resolvedTools = resolved.resolvedTools;
     mcpClients = resolved.mcpClients;
     const openRouterTools = toOpenRouterTools(resolvedTools);
@@ -293,6 +342,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
 
     // Hierarchy: message override > conversation override > agent default
     const effectiveModel = messageModel || conversation.model || agent.model;
+    let actualModelFromResponse: string | null = null;
 
     const requestBody: Record<string, unknown> = {
       model: effectiveModel,
@@ -412,7 +462,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         reasoningTokens,
         cachedTokens,
         toolCallsJson,
-        effectiveModel,
+        actualModelFromResponse ?? effectiveModel,
         processedByAgentId
       );
     };
@@ -499,6 +549,10 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         const promptDetails = u.prompt_tokens_details as { cached_tokens?: number } | undefined;
         if (promptDetails?.cached_tokens !== undefined) cachedTokens = promptDetails.cached_tokens;
       }
+      const dataWithModel = data as { model?: string };
+      if (dataWithModel.model && typeof dataWithModel.model === 'string' && dataWithModel.model.trim()) {
+        actualModelFromResponse = dataWithModel.model;
+      }
       if (fullReasoning) {
         res.write(`data: ${JSON.stringify({ reasoning: fullReasoning })}\n\n`);
       }
@@ -516,6 +570,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     let lastFinishReason: string | null = null;
 
     while (iteration < MAX_TOOL_ITERATIONS) {
+      actualModelFromResponse = null;
       streamedAnnotations = null;
       requestBody.messages = messages;
       if (openRouterTools.length > 0) {
@@ -609,6 +664,9 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
               if (parsed.error) {
                 res.write(`data: ${JSON.stringify({ error: parsed.error.message || 'Stream error' })}\n\n`);
                 continue;
+              }
+              if (parsed.model && typeof parsed.model === 'string' && parsed.model.trim()) {
+                actualModelFromResponse = parsed.model;
               }
 
               const delta = parsed.choices?.[0]?.delta;
@@ -799,6 +857,8 @@ function loadGeneralChatSettings(userId: string): {
   reasoning_enabled: boolean;
   reasoning_effort: string | null;
   reasoning_max_tokens: number | null;
+  tool_ids: string[];
+  mcp_server_ids: string[];
   tool_choice: string;
   parallel_tool_calls: number;
 } {
@@ -808,6 +868,8 @@ function loadGeneralChatSettings(userId: string): {
     reasoning_enabled: false,
     reasoning_effort: null as string | null,
     reasoning_max_tokens: null as number | null,
+    tool_ids: [] as string[],
+    mcp_server_ids: [] as string[],
     tool_choice: 'auto',
     parallel_tool_calls: 1,
   };
@@ -818,6 +880,32 @@ function loadGeneralChatSettings(userId: string): {
     const reasoningEnabled = getSettingValue(userId, 'general_chat_reasoning_enabled');
     const reasoningEffort = getSettingValue(userId, 'general_chat_reasoning_effort');
     const reasoningMaxTokens = getSettingValue(userId, 'general_chat_reasoning_max_tokens');
+    const toolChoice = getSettingValue(userId, 'general_chat_tool_choice');
+    const parallelToolCallsRaw = getSettingValue(userId, 'general_chat_parallel_tool_calls');
+
+    let tool_ids = defaults.tool_ids;
+    const rawToolIds = getSettingValue(userId, 'general_chat_tool_ids');
+    if (rawToolIds && typeof rawToolIds === 'string') {
+      try {
+        const parsed = JSON.parse(rawToolIds) as unknown;
+        if (Array.isArray(parsed)) tool_ids = parsed.filter((id): id is string => typeof id === 'string');
+      } catch {
+        // keep default
+      }
+    }
+
+    let mcp_server_ids = defaults.mcp_server_ids;
+    const rawMcpIds = getSettingValue(userId, 'general_chat_mcp_server_ids');
+    if (rawMcpIds && typeof rawMcpIds === 'string') {
+      try {
+        const parsed = JSON.parse(rawMcpIds) as unknown;
+        if (Array.isArray(parsed)) mcp_server_ids = parsed.filter((id): id is string => typeof id === 'string');
+      } catch {
+        // keep default
+      }
+    }
+
+    const parallel_tool_calls = parallelToolCallsRaw === '0' ? 0 : 1;
 
     return {
       model: model || defaults.model,
@@ -825,8 +913,10 @@ function loadGeneralChatSettings(userId: string): {
       reasoning_enabled: reasoningEnabled === '1' || reasoningEnabled === 'true',
       reasoning_effort: reasoningEffort || defaults.reasoning_effort,
       reasoning_max_tokens: reasoningMaxTokens ? parseInt(reasoningMaxTokens, 10) : defaults.reasoning_max_tokens,
-      tool_choice: defaults.tool_choice,
-      parallel_tool_calls: defaults.parallel_tool_calls,
+      tool_ids,
+      mcp_server_ids,
+      tool_choice: toolChoice === 'none' ? 'none' : 'auto',
+      parallel_tool_calls,
     };
   } catch {
     return defaults;

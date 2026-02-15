@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { CheckCircle, AlertCircle, ExternalLink, Zap, Coins, BarChart3, Loader2, Globe, KeyRound, Database, MessageSquare, Brain, Check, ChevronDown, Sparkles, Lightbulb, SlidersHorizontal } from 'lucide-react';
+import { CheckCircle, AlertCircle, ExternalLink, Zap, Coins, BarChart3, Loader2, Globe, KeyRound, Database, MessageSquare, Brain, Check, ChevronDown, Sparkles, Lightbulb, SlidersHorizontal, Wrench, Plug } from 'lucide-react';
 import { useStore } from '../stores/store';
-import { settingsApi } from '../api/client';
-import type { ReasoningEffort } from '../types';
+import { settingsApi, toolsApi, mcpServersApi } from '../api/client';
+import type { ReasoningEffort, Tool, McpServer } from '../types';
 import { Modal } from './ui/Modal';
 import { Input } from './ui/Input';
 import { Button } from './ui/Button';
@@ -267,11 +267,25 @@ function GeneralChatSettingsSection() {
   const [localReasoningEnabled, setLocalReasoningEnabled] = useState(false);
   const [localReasoningEffort, setLocalReasoningEffort] = useState<ReasoningEffort>('medium');
   const [localEmoji, setLocalEmoji] = useState('💬');
+  const [localToolIds, setLocalToolIds] = useState<string[]>([]);
+  const [localMcpServerIds, setLocalMcpServerIds] = useState<string[]>([]);
+  const [localToolChoice, setLocalToolChoice] = useState<'auto' | 'none'>('auto');
+  const [localParallelToolCalls, setLocalParallelToolCalls] = useState(true);
+  const [allTools, setAllTools] = useState<Tool[]>([]);
+  const [allMcpServers, setAllMcpServers] = useState<McpServer[]>([]);
 
   // Load settings on mount
   useEffect(() => {
     loadGeneralChatSettings();
   }, [loadGeneralChatSettings]);
+
+  // Load tools and MCP servers when general settings are available
+  useEffect(() => {
+    if (generalChatSettings) {
+      toolsApi.list().then(setAllTools).catch(() => setAllTools([]));
+      mcpServersApi.list().then(setAllMcpServers).catch(() => setAllMcpServers([]));
+    }
+  }, [generalChatSettings]);
 
   // Update local state when settings load
   useEffect(() => {
@@ -281,6 +295,10 @@ function GeneralChatSettingsSection() {
       setLocalReasoningEnabled(generalChatSettings.reasoning_enabled || false);
       setLocalReasoningEffort(generalChatSettings.reasoning_effort || 'medium');
       setLocalEmoji(generalChatSettings.emoji || '💬');
+      setLocalToolIds(generalChatSettings.tool_ids ?? []);
+      setLocalMcpServerIds(generalChatSettings.mcp_server_ids ?? []);
+      setLocalToolChoice(generalChatSettings.tool_choice ?? 'auto');
+      setLocalParallelToolCalls((generalChatSettings.parallel_tool_calls ?? 1) !== 0);
     }
   }, [generalChatSettings]);
 
@@ -293,18 +311,30 @@ function GeneralChatSettingsSection() {
         reasoning_enabled: localReasoningEnabled,
         reasoning_effort: localReasoningEffort,
         emoji: localEmoji,
+        tool_ids: localToolIds,
+        mcp_server_ids: localMcpServerIds,
+        tool_choice: localToolChoice,
+        parallel_tool_calls: localParallelToolCalls ? 1 : 0,
       });
     } finally {
       setSaving(false);
     }
   };
 
+  const hasToolMcpChanges = generalChatSettings && (
+    JSON.stringify([...(generalChatSettings.tool_ids ?? [])].sort()) !== JSON.stringify([...localToolIds].sort()) ||
+    JSON.stringify([...(generalChatSettings.mcp_server_ids ?? [])].sort()) !== JSON.stringify([...localMcpServerIds].sort()) ||
+    (generalChatSettings.tool_choice ?? 'auto') !== localToolChoice ||
+    ((generalChatSettings.parallel_tool_calls ?? 1) !== 0) !== localParallelToolCalls
+  );
+
   const hasChanges = generalChatSettings && (
     localModel !== generalChatSettings.model ||
     localSystemPrompt !== generalChatSettings.system_prompt ||
     localReasoningEnabled !== (generalChatSettings.reasoning_enabled || false) ||
     localReasoningEffort !== (generalChatSettings.reasoning_effort || 'medium') ||
-    localEmoji !== (generalChatSettings.emoji || '💬')
+    localEmoji !== (generalChatSettings.emoji || '💬') ||
+    !!hasToolMcpChanges
   );
 
   const reasoningEffortOptions = [
@@ -522,6 +552,155 @@ function GeneralChatSettingsSection() {
         </AnimatePresence>
       </div>
 
+      {/* Tools (assign which tools General Chat can use) */}
+      {allTools.length > 0 && (
+        <div style={{
+          border: '1px solid var(--border)',
+          borderRadius: 'var(--radius-sm)',
+          overflow: 'hidden',
+        }}>
+          <div style={{
+            padding: '10px 12px',
+            background: 'var(--bg-elevated)',
+            borderBottom: '1px solid var(--border)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            fontSize: '0.8125rem',
+            fontWeight: 500,
+            color: 'var(--text-secondary)',
+          }}>
+            <Wrench size={14} />
+            Tools
+          </div>
+          <div style={{ padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+            {allTools.map((tool) => {
+              const checked = localToolIds.includes(tool.id);
+              return (
+                <label
+                  key={tool.id}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '10px',
+                    cursor: 'pointer',
+                    fontSize: '0.8125rem',
+                    color: 'var(--text-primary)',
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => {
+                      if (checked) setLocalToolIds(localToolIds.filter((id) => id !== tool.id));
+                      else setLocalToolIds([...localToolIds, tool.id]);
+                    }}
+                    style={{ width: '16px', height: '16px', accentColor: 'var(--accent)' }}
+                  />
+                  <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 500 }}>{tool.name}</span>
+                  <span style={{ color: 'var(--text-muted)', fontSize: '0.75rem' }}>{tool.type}</span>
+                </label>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* MCP Servers (assign which MCP servers General Chat uses) */}
+      {allMcpServers.length > 0 && (
+        <div style={{
+          border: '1px solid var(--border)',
+          borderRadius: 'var(--radius-sm)',
+          overflow: 'hidden',
+        }}>
+          <div style={{
+            padding: '10px 12px',
+            background: 'var(--bg-elevated)',
+            borderBottom: '1px solid var(--border)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            fontSize: '0.8125rem',
+            fontWeight: 500,
+            color: 'var(--text-secondary)',
+          }}>
+            <Plug size={14} />
+            MCP Servers
+          </div>
+          <div style={{ padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+            {allMcpServers.map((mcp) => {
+              const checked = localMcpServerIds.includes(mcp.id);
+              return (
+                <label
+                  key={mcp.id}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '10px',
+                    cursor: 'pointer',
+                    fontSize: '0.8125rem',
+                    color: 'var(--text-primary)',
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => {
+                      if (checked) setLocalMcpServerIds(localMcpServerIds.filter((id) => id !== mcp.id));
+                      else setLocalMcpServerIds([...localMcpServerIds, mcp.id]);
+                    }}
+                    style={{ width: '16px', height: '16px', accentColor: 'var(--accent)' }}
+                  />
+                  <span style={{ fontWeight: 500 }}>{mcp.name}</span>
+                  <span style={{ color: 'var(--text-muted)', fontSize: '0.75rem' }}>{mcp.transport}</span>
+                </label>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Tool choice & parallel tool calls (when General Chat has tools or MCP) */}
+      {(localToolIds.length > 0 || localMcpServerIds.length > 0) && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+            <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Tool choice</label>
+            <select
+              value={localToolChoice}
+              onChange={(e) => setLocalToolChoice(e.target.value as 'auto' | 'none')}
+              style={{
+                width: '100%',
+                padding: '10px 12px',
+                borderRadius: 'var(--radius-sm)',
+                border: '1px solid var(--border)',
+                background: 'var(--bg-elevated)',
+                color: 'var(--text-primary)',
+                fontSize: '0.875rem',
+              }}
+            >
+              <option value="auto">Auto — model decides when to call tools</option>
+              <option value="none">None — disable tool calls for this request</option>
+            </select>
+          </div>
+          <label style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '10px',
+            cursor: 'pointer',
+            fontSize: '0.8125rem',
+            color: 'var(--text-primary)',
+          }}>
+            <input
+              type="checkbox"
+              checked={localParallelToolCalls}
+              onChange={(e) => setLocalParallelToolCalls(e.target.checked)}
+              style={{ width: '16px', height: '16px', accentColor: 'var(--accent)' }}
+            />
+            Allow parallel tool calls
+          </label>
+        </div>
+      )}
+
       {/* Save Button */}
       <motion.div
         initial={false}
@@ -539,6 +718,10 @@ function GeneralChatSettingsSection() {
                 setLocalReasoningEnabled(generalChatSettings.reasoning_enabled || false);
                 setLocalReasoningEffort(generalChatSettings.reasoning_effort || 'medium');
                 setLocalEmoji(generalChatSettings.emoji || '💬');
+                setLocalToolIds(generalChatSettings.tool_ids ?? []);
+                setLocalMcpServerIds(generalChatSettings.mcp_server_ids ?? []);
+                setLocalToolChoice(generalChatSettings.tool_choice ?? 'auto');
+                setLocalParallelToolCalls((generalChatSettings.parallel_tool_calls ?? 1) !== 0);
               }
             }}
             style={{

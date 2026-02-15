@@ -1234,6 +1234,18 @@ button:hover .conv-delete-btn,
   gap: 4px;
 }
 
+.message-bubble-model-pill {
+  font-size: 0.6875rem;
+  font-weight: 500;
+  font-family: var(--font-mono);
+  padding: 3px 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .message-bubble-copy-btn {
   display: flex;
   align-items: center;

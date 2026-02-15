@@ -205,6 +205,8 @@ export interface GeneralChatSettings {
   emoji?: string;
   tool_ids?: string[];
   mcp_server_ids?: string[];
+  tool_choice?: 'auto' | 'none';
+  parallel_tool_calls?: number;
   reasoning_enabled?: boolean;
   reasoning_effort?: ReasoningEffort | null;
   reasoning_max_tokens?: number | null;

@@ -162,6 +162,9 @@ export function ChatView() {
     return activeConversation?.model ?? null;
   }, [activeConversationId, conversationModelOverrides, activeConversation?.model]);
 
+  // Model used for the next (or current streaming) message; shown in the assistant bubble when streaming.
+  const effectiveModelForThisMessage = messageModelOverride ?? effectiveConversationModel ?? defaultModelForChat;
+
   const handleConversationModelChange = useCallback(
     async (modelId: string | null) => {
       if (!activeConversationId) return;
@@ -549,6 +552,7 @@ export function ChatView() {
                   agentEmoji={agent?.emoji}
                   toolExecutions={timelineCalls}
                   toolActivityLive={isStreamingMsg && !!activityEvents?.some((ev) => ev.type === 'tool')}
+                  streamingModel={isStreamingMsg && effectiveModelForThisMessage ? effectiveModelForThisMessage : undefined}
                 />
               );
             })
@@ -564,7 +568,7 @@ export function ChatView() {
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: 10 }}
-              onClick={scrollToBottom}
+              onClick={() => scrollToBottom()}
               className="chat-scroll-btn"
               style={{
                 position: 'absolute',

@@ -4,7 +4,32 @@ import { User, Sparkles, Copy, Check, Brain, ChevronDown, ChevronRight, External
 import { MarkdownContent } from './MarkdownContent';
 import { MessageTokenPills } from './TokenCounter';
 import { ToolCallTimeline } from './ToolCallTimeline';
+import { formatModelId, getModelAuthor, getAuthorColor, formatAuthor } from '../utils/modelUtils';
 import type { Message, Annotation, ToolExecution, StreamingActivityEvent } from '../types';
+
+/** Compact pill showing which model generated the message; provider color and full id in tooltip. */
+function MessageModelBadge({ modelId, title }: { modelId: string; title?: string }) {
+  const author = getModelAuthor(modelId);
+  const shortName = formatModelId(modelId);
+  const displayName = shortName === 'auto' ? 'Auto' : shortName;
+  const color = getAuthorColor(author);
+  const tooltip = title ?? (author !== 'other' ? `${formatAuthor(author)} — ${modelId}` : modelId);
+  const isHex = color.startsWith('#');
+  const bg = isHex ? `${color}14` : 'var(--bg-elevated)';
+  return (
+    <span
+      className="message-bubble-model-pill"
+      title={tooltip}
+      style={{
+        color,
+        borderColor: color,
+        background: bg,
+      }}
+    >
+      {displayName}
+    </span>
+  );
+}
 
 function tryParseJson(str: string): unknown | null {
   const trimmed = str.trim();
@@ -144,6 +169,8 @@ interface MessageBubbleProps {
   agentEmoji?: string;
   toolExecutions?: ToolExecution[];
   toolActivityLive?: boolean;
+  /** Model used for this message when streaming (before message.model is set). */
+  streamingModel?: string;
 }
 
 function formatCost(cost: number): string {
@@ -382,6 +409,7 @@ export function MessageBubble({
   agentEmoji,
   toolExecutions,
   toolActivityLive,
+  streamingModel,
 }: MessageBubbleProps) {
   const [copied, setCopied] = React.useState(false);
   const isUser = message.role === 'user';
@@ -440,6 +468,9 @@ export function MessageBubble({
                 <Sparkles size={10} />
                 via {message.processed_by_agent_name}
               </motion.span>
+            )}
+            {!isUser && (message.model ?? (isStreaming && streamingModel ? streamingModel : null)) && (
+              <MessageModelBadge modelId={message.model ?? streamingModel!} />
             )}
           </div>
           {!isUser && displayContent && !isStreaming && (

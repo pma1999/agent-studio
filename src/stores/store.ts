@@ -439,10 +439,39 @@ export const useStore = create<AppState>((set, get) => ({
     set({ generalChatSettingsLoading: true });
     try {
       const settings = await settingsApi.getAll();
+      let tool_ids: string[] = [];
+      try {
+        const raw = settings['general_chat_tool_ids'];
+        if (raw && typeof raw === 'string') {
+          const parsed = JSON.parse(raw) as unknown;
+          if (Array.isArray(parsed)) tool_ids = parsed.filter((id): id is string => typeof id === 'string');
+        }
+      } catch {
+        // keep []
+      }
+      let mcp_server_ids: string[] = [];
+      try {
+        const raw = settings['general_chat_mcp_server_ids'];
+        if (raw && typeof raw === 'string') {
+          const parsed = JSON.parse(raw) as unknown;
+          if (Array.isArray(parsed)) mcp_server_ids = parsed.filter((id): id is string => typeof id === 'string');
+        }
+      } catch {
+        // keep []
+      }
+      const toolChoiceRaw = settings['general_chat_tool_choice'];
+      const tool_choice = toolChoiceRaw === 'none' ? 'none' : 'auto';
+      const parallelRaw = settings['general_chat_parallel_tool_calls'];
+      const parallel_tool_calls = parallelRaw === '0' ? 0 : 1;
+
       const generalSettings: GeneralChatSettings = {
         model: settings['general_chat_model'] || 'openrouter/auto',
         system_prompt: settings['general_chat_system_prompt'] || 'You are a helpful AI assistant. You provide thoughtful, well-structured responses.',
         emoji: settings['general_chat_emoji'] || '💬',
+        tool_ids,
+        mcp_server_ids,
+        tool_choice,
+        parallel_tool_calls,
         reasoning_enabled: settings['general_chat_reasoning_enabled'] === 'true',
         reasoning_effort: (settings['general_chat_reasoning_effort'] as ReasoningEffort) || 'medium',
         reasoning_max_tokens: settings['general_chat_reasoning_max_tokens']
@@ -461,6 +490,10 @@ export const useStore = create<AppState>((set, get) => ({
         settingsApi.set('general_chat_model', settings.model),
         settingsApi.set('general_chat_system_prompt', settings.system_prompt),
         settingsApi.set('general_chat_emoji', settings.emoji || '💬'),
+        settingsApi.set('general_chat_tool_ids', JSON.stringify(settings.tool_ids ?? [])),
+        settingsApi.set('general_chat_mcp_server_ids', JSON.stringify(settings.mcp_server_ids ?? [])),
+        settingsApi.set('general_chat_tool_choice', settings.tool_choice ?? 'auto'),
+        settingsApi.set('general_chat_parallel_tool_calls', String(settings.parallel_tool_calls ?? 1)),
         settingsApi.set('general_chat_reasoning_enabled', String(settings.reasoning_enabled)),
         settingsApi.set('general_chat_reasoning_effort', settings.reasoning_effort || 'medium'),
         settingsApi.set('general_chat_reasoning_max_tokens', String(settings.reasoning_max_tokens || '')),
