@@ -8,6 +8,8 @@ import { AgentEditor } from './components/AgentEditor';
 import { ChatView } from './components/ChatView';
 import { ToolsView } from './components/ToolsView';
 import { McpView } from './components/McpView';
+import { CouncilManager } from './components/CouncilManager';
+import { CouncilEditor } from './components/CouncilEditor';
 import { SettingsPanel } from './components/SettingsPanel';
 import { AuthView } from './components/AuthView';
 import { settingsApi, setOnUnauthorized } from './api/client';
@@ -207,6 +209,18 @@ function App() {
             <McpView />
           </motion.div>
         )}
+        {currentView === 'councils' && (
+          <motion.div
+            key="councils"
+            initial={{ opacity: 0, x: -20 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: 20 }}
+            transition={{ duration: 0.25, ease: [0.4, 0, 0.2, 1] }}
+            style={{ height: '100%', overflow: 'hidden' }}
+          >
+            <CouncilManager />
+          </motion.div>
+        )}
         {currentView === 'chat' && (
           <motion.div
             key="chat"
@@ -237,6 +251,7 @@ function App() {
 
       {/* Modals */}
       <AgentEditor />
+      <CouncilEditor />
       <SettingsPanel />
     </Layout>
   );

@@ -43,6 +43,21 @@ export interface ToolRow {
   config: string | null;
 }
 
+/**
+ * Build a safe prefix slug from MCP server name and id for tool names.
+ * Ensures uniqueness when multiple servers have the same name.
+ */
+export function slugFromServerName(serverName: string, serverId: string): string {
+  const slug = (serverName || 'mcp')
+    .trim()
+    .replace(/\s+/g, '_')
+    .replace(/[^a-zA-Z0-9_-]/g, '')
+    .toLowerCase()
+    .slice(0, 24) || 'mcp';
+  const shortId = serverId.replace(/[^a-z0-9]/gi, '').slice(0, 6);
+  return shortId ? `${slug}_${shortId}` : slug;
+}
+
 function isUsable(t: ToolRow, userId: string): boolean {
   if (t.type === 'builtin') {
     const def = getBuiltinDefinition(t.name);
@@ -178,7 +193,8 @@ export async function resolveToolsForAgent(agentId: string, userId: string): Pro
     try {
       mcpClients.set(mcp_server_id, connection);
 
-      const namePrefix = `mcp_${mcp_server_id.slice(0, 8)}`;
+      const slug = slugFromServerName(serverRow.name, mcp_server_id);
+      const namePrefix = `mcp_${slug}`;
       const mcpTools = await listMcpTools(connection.client, namePrefix);
 
       for (const mt of mcpTools) {
@@ -307,7 +323,8 @@ export async function resolveToolsFromIds(
     try {
       mcpClients.set(mcp_server_id, connection);
 
-      const namePrefix = `mcp_${mcp_server_id.slice(0, 8)}`;
+      const slug = slugFromServerName(serverRow.name, mcp_server_id);
+      const namePrefix = `mcp_${slug}`;
       const mcpTools = await listMcpTools(connection.client, namePrefix);
 
       for (const mt of mcpTools) {
@@ -339,6 +356,18 @@ export function toOpenRouterTools(resolved: ResolvedTool[]): { type: 'function';
       parameters: r.openAIDef.function.parameters,
     },
   }));
+}
+
+/**
+ * If resolvedTools includes any MCP tool, append an instruction so the model uses exact tool names.
+ */
+export function appendToolInstructionsIfNeeded(systemPrompt: string, resolvedTools: ResolvedTool[]): string {
+  const hasMcp = resolvedTools.some((t) => t.type === 'mcp');
+  if (!hasMcp) return systemPrompt;
+  return (
+    systemPrompt +
+    '\n\nWhen calling tools, always use the exact tool name from the tools list. MCP tools have names starting with mcp_; do not omit this prefix.'
+  );
 }
 
 function tryParse(s: string): unknown {

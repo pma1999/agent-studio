@@ -266,7 +266,10 @@ export async function listMcpTools(
     const annotationHints = buildAnnotationHints(
       (tool as { annotations?: Record<string, unknown> }).annotations
     );
-    const description = baseDescription + annotationHints;
+    const description =
+      baseDescription +
+      annotationHints +
+      (namePrefix ? ` You must call this tool using its exact name: ${displayName}.` : '');
 
     result.push({
       name: displayName,

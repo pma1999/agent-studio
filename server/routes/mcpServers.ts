@@ -1,7 +1,8 @@
 import { Router, Response } from 'express';
 import { nanoid } from 'nanoid';
 import db from '../db.js';
-import { createAndConnectMcpClient, listMcpTools } from '../mcp/index.js';
+import { createAndConnectMcpClient, listMcpTools, prefixToolName } from '../mcp/index.js';
+import { slugFromServerName } from '../tools/index.js';
 import type { McpServerConfig, McpTransport } from '../mcp/types.js';
 import { AuthRequest } from '../middleware/auth.js';
 
@@ -248,10 +249,12 @@ router.post('/:id/test', async (req: AuthRequest, res: Response) => {
       } catch { /* capabilities not critical */ }
 
       await connection.close();
+      const namePrefix = `mcp_${slugFromServerName(row.name, row.id)}`;
       res.json({
         ok: true,
         tools: tools.map((t) => ({
           name: t.name,
+          name_in_chat: prefixToolName(namePrefix, t.mcpToolName),
           description: t.openAIDef.function.description,
           parameters: t.openAIDef.function.parameters,
         })),

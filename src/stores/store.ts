@@ -12,6 +12,8 @@ import type {
   StreamingActivityEvent,
   GeneralChatSettings,
   ReasoningEffort,
+  CouncilMember,
+  CouncilConfig,
 } from '../types';
 import type { AuthUser } from '../api/client';
 import { agentsApi, conversationsApi, messagesApi, settingsApi, creditsApi, usageApi, authApi } from '../api/client';
@@ -113,6 +115,40 @@ interface AppState {
   generalChatSettingsLoading: boolean;
   loadGeneralChatSettings: () => Promise<void>;
   saveGeneralChatSettings: (settings: GeneralChatSettings) => Promise<void>;
+
+  // Council / Model Council
+  councilEnabled: boolean;
+  toggleCouncil: () => void;
+  selectedCouncilId: string | null;
+  setSelectedCouncilId: (id: string | null) => void;
+  councilConfig: CouncilConfig | null;
+  setCouncilConfig: (config: CouncilConfig | null) => void;
+  councilMembers: CouncilMember[];
+  councilMembersLoading: boolean;
+  loadCouncilMembers: () => Promise<void>;
+  councilIsExecuting: boolean;
+  setCouncilIsExecuting: (executing: boolean) => void;
+  councilMemberProgress: Map<
+    number,
+    { status: 'pending' | 'running' | 'complete' | 'error'; modelId: string; progress?: number }
+  >;
+  setCouncilMemberProgress: (
+    progress: Map<number, { status: 'pending' | 'running' | 'complete' | 'error'; modelId: string; progress?: number }> |
+    ((prev: Map<number, { status: 'pending' | 'running' | 'complete' | 'error'; modelId: string; progress?: number }>) =>
+      Map<number, { status: 'pending' | 'running' | 'complete' | 'error'; modelId: string; progress?: number }>)
+  ) => void;
+  councilSynthesisPhase: boolean;
+  setCouncilSynthesisPhase: (phase: boolean) => void;
+  councilStreamingContent: string;
+  setCouncilStreamingContent: (content: string | ((prev: string) => string)) => void;
+  appendCouncilStreamingContent: (chunk: string) => void;
+  resetCouncilState: () => void;
+
+  // Council Editor
+  councilEditorOpen: boolean;
+  setCouncilEditorOpen: (open: boolean) => void;
+  editingCouncil: CouncilMember | null;
+  setEditingCouncil: (council: CouncilMember | null) => void;
 
   // UI
   agentEditorOpen: boolean;
@@ -503,6 +539,61 @@ export const useStore = create<AppState>((set, get) => ({
       console.error('Failed to save general chat settings:', err);
     }
   },
+
+  // Council / Model Council
+  councilEnabled: false,
+  toggleCouncil: () => set((state) => ({ councilEnabled: !state.councilEnabled })),
+  selectedCouncilId: null,
+  setSelectedCouncilId: (id) => set({ selectedCouncilId: id }),
+  councilConfig: null,
+  setCouncilConfig: (config) => set({ councilConfig: config }),
+  councilMembers: [],
+  councilMembersLoading: false,
+  loadCouncilMembers: async () => {
+    set({ councilMembersLoading: true });
+    try {
+      const { getCouncilMembers } = await import('../api/councilClient.js');
+      const members = await getCouncilMembers();
+      set({ councilMembers: members, councilMembersLoading: false });
+    } catch (err) {
+      console.error('Failed to load council members:', err);
+      set({ councilMembersLoading: false });
+    }
+  },
+  councilIsExecuting: false,
+  setCouncilIsExecuting: (executing) => set({ councilIsExecuting: executing }),
+  councilMemberProgress: new Map(),
+  setCouncilMemberProgress: (progress) => set((state) => ({
+    councilMemberProgress: typeof progress === 'function'
+      ? progress(state.councilMemberProgress)
+      : progress
+  })),
+  councilSynthesisPhase: false,
+  setCouncilSynthesisPhase: (phase) => set({ councilSynthesisPhase: phase }),
+  councilStreamingContent: '',
+  setCouncilStreamingContent: (content) => set((state) => ({
+    councilStreamingContent: typeof content === 'function'
+      ? (content as (prev: string) => string)(state.councilStreamingContent)
+      : content
+  })),
+  appendCouncilStreamingContent: (chunk) => set((state) => ({
+    councilStreamingContent: state.councilStreamingContent + chunk,
+  })),
+  resetCouncilState: () => set({
+    councilEnabled: false,
+    selectedCouncilId: null,
+    councilConfig: null,
+    councilIsExecuting: false,
+    councilMemberProgress: new Map(),
+    councilSynthesisPhase: false,
+    councilStreamingContent: '',
+  }),
+
+  // Council Editor
+  councilEditorOpen: false,
+  setCouncilEditorOpen: (open) => set({ councilEditorOpen: open }),
+  editingCouncil: null,
+  setEditingCouncil: (council) => set({ editingCouncil: council }),
 
   // UI
   agentEditorOpen: false,

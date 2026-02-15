@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { nanoid } from 'nanoid';
 import db from '../db.js';
 import { getSettingValue } from './settings.js';
-import { resolveToolsForAgent, resolveToolsFromIds, toOpenRouterTools, runTool } from '../tools/index.js';
+import { resolveToolsForAgent, resolveToolsFromIds, toOpenRouterTools, runTool, appendToolInstructionsIfNeeded } from '../tools/index.js';
 import { annotationsFromWebSearchResults } from '../tools/registry.js';
 import type { McpConnection } from '../mcp/index.js';
 import { AuthRequest } from '../middleware/auth.js';
@@ -311,6 +311,11 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     const resolvedTools = resolved.resolvedTools;
     mcpClients = resolved.mcpClients;
     const openRouterTools = toOpenRouterTools(resolvedTools);
+
+    // Augment system prompt with MCP tool naming instruction when applicable
+    if (messages[0]?.role === 'system' && typeof messages[0].content === 'string') {
+      messages[0].content = appendToolInstructionsIfNeeded(messages[0].content, resolvedTools);
+    }
 
     // Early exit if server is shutting down (shouldn't reach here due to
     // middleware, but defend in depth for requests already past middleware).

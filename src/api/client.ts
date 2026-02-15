@@ -15,6 +15,10 @@ import type {
   ChatAttachmentInput,
   PDFEngine,
   ToolSource,
+  CouncilMember,
+  CouncilRun,
+  CouncilRunDetail,
+  CouncilConfig,
 } from '../types';
 
 /** In production (Vercel), set VITE_API_URL to your Railway API URL (e.g. https://your-app.railway.app). No trailing slash. */
@@ -425,6 +429,56 @@ export const importApi = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+};
+
+// Council APIs
+export const councilsApi = {
+  list: () => request<CouncilMember[]>('/council/members'),
+  create: (data: {
+    name: string;
+    description?: string;
+    member_models: string[];
+    synthesizer_model: string;
+    synthesis_prompt_template?: string;
+    auto_expand_responses?: boolean;
+    show_member_responses?: boolean;
+    tool_ids?: string[];
+    mcp_server_ids?: string[];
+  }) => request<CouncilMember>('/council/members', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  }),
+  update: (id: string, data: Partial<{
+    name: string;
+    description?: string;
+    member_models: string[];
+    synthesizer_model: string;
+    synthesis_prompt_template?: string;
+    auto_expand_responses?: boolean;
+    show_member_responses?: boolean;
+    tool_ids?: string[];
+    mcp_server_ids?: string[];
+  }>) => request<CouncilMember>(`/council/members/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  }),
+  delete: (id: string) => request<{ success: boolean }>(`/council/members/${id}`, {
+    method: 'DELETE',
+  }),
+  listRuns: (conversationId: string) => request<Array<{
+    id: string;
+    status: string;
+    member_count: number;
+    synthesizer_model: string;
+    total_cost: number;
+    total_tokens: number;
+    failed_members: number;
+    started_at: string;
+    completed_at: string | null;
+    message_preview: string | null;
+    successful_members: number;
+  }>>(`/council/runs?conversation_id=${conversationId}`),
+  getRun: (id: string) => request<CouncilRunDetail>(`/council/runs/${id}`),
 };
 
 /** Trigger download of JSON as a file (e.g. export data). */

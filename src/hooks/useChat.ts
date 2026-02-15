@@ -2,13 +2,15 @@ import { useCallback } from 'react';
 import { useStore } from '../stores/store';
 import { streamChat } from '../api/client';
 import { conversationsApi } from '../api/client';
-import type { Message, ChatAttachmentInput, PDFEngine } from '../types';
+import { streamCouncilChat } from '../api/councilClient';
+import type { Message, ChatAttachmentInput, PDFEngine, CouncilConfig } from '../types';
 
 export interface SendMessageOptions {
   attachments?: ChatAttachmentInput[];
   pdf_engine?: PDFEngine;
   model?: string;
   invokeAgentId?: string;
+  councilConfig?: CouncilConfig;
 }
 
 export function useChat() {
@@ -34,9 +36,150 @@ export function useChat() {
     upsertStreamingToolCall,
     completeStreamingToolCall,
     resetStreamingActivityEvents,
+    // Council state
+    councilEnabled,
+    setCouncilIsExecuting,
+    setCouncilMemberProgress,
+    setCouncilSynthesisPhase,
+    setCouncilStreamingContent,
+    appendCouncilStreamingContent,
+    resetCouncilState,
   } = useStore();
 
   const sendMessage = useCallback(async (content: string, options?: SendMessageOptions) => {
+    // Check if council mode is enabled or council config is provided
+    const useCouncil = councilEnabled || options?.councilConfig;
+
+    if (useCouncil) {
+      return sendCouncilMessage(content, options);
+    }
+
+    return sendRegularMessage(content, options);
+  }, [councilEnabled, activeConversationId, isStreaming, addMessage, setIsStreaming, setStreamingContent, appendStreamingContent, appendStreamingContentEvent, setAbortController, setStreamStartTime, setReasoningContent, appendReasoningContent, appendStreamingReasoningEvent, reasoningOverride, upsertStreamingToolCall, completeStreamingToolCall, resetStreamingActivityEvents, loadMessages, loadConversations, selectedAgentId]);
+
+  const sendCouncilMessage = useCallback(async (content: string, options?: SendMessageOptions) => {
+    if (!activeConversationId || isStreaming || !content.trim()) return;
+
+    const attachments = options?.attachments;
+    const pdf_engine = options?.pdf_engine;
+    const invokeAgentId = options?.invokeAgentId;
+    const councilConfig = options?.councilConfig;
+
+    if (!councilConfig) {
+      console.error('Council config required for council mode');
+      return;
+    }
+
+    // Add user message to local state immediately
+    const userMsg: Message = {
+      id: `temp-user-${Date.now()}`,
+      conversation_id: activeConversationId,
+      role: 'user',
+      content: content.trim(),
+      created_at: new Date().toISOString(),
+      ...(attachments?.length && { attachments: attachments.map((a) => ({ filename: a.filename })) }),
+    };
+    addMessage(userMsg);
+
+    // Add placeholder assistant message for synthesis
+    const assistantMsg: Message = {
+      id: `temp-council-${Date.now()}`,
+      conversation_id: activeConversationId,
+      role: 'assistant',
+      content: '',
+      created_at: new Date().toISOString(),
+    };
+    addMessage(assistantMsg);
+
+    // Create AbortController for cancellation
+    const controller = new AbortController();
+    setAbortController(controller);
+
+    setCouncilIsExecuting(true);
+    setCouncilStreamingContent('');
+    setCouncilMemberProgress(new Map());
+    setCouncilSynthesisPhase(false);
+    setIsStreaming(true);
+    setStreamStartTime(Date.now());
+    resetStreamingActivityEvents();
+
+    try {
+      await streamCouncilChat(
+        {
+          conversation_id: activeConversationId,
+          content: content.trim(),
+          council_config: councilConfig,
+          attachments,
+          pdf_engine,
+          invoke_agent_id: invokeAgentId,
+        },
+        {
+          onMemberStart: (event) => {
+            setCouncilMemberProgress((prev) => {
+              const next = new Map(prev);
+              next.set(event.member_index, {
+                status: 'running',
+                modelId: event.model_id,
+                progress: 0,
+              });
+              return next;
+            });
+          },
+          onMemberComplete: (event) => {
+            setCouncilMemberProgress((prev) => {
+              const next = new Map(prev);
+              next.set(event.member_index, {
+                status: event.status === 'success' ? 'complete' : 'error',
+                modelId: event.model_id,
+              });
+              return next;
+            });
+          },
+          onSynthesisStart: () => {
+            setCouncilSynthesisPhase(true);
+          },
+          onSynthesisChunk: (chunk) => {
+            setCouncilStreamingContent((prev) => prev + chunk);
+            appendCouncilStreamingContent(chunk);
+            appendStreamingContentEvent(chunk);
+          },
+          onComplete: async () => {
+            setCouncilIsExecuting(false);
+            setIsStreaming(false);
+            setStreamStartTime(null);
+            setCouncilStreamingContent('');
+            setCouncilMemberProgress(new Map());
+            setCouncilSynthesisPhase(false);
+            setAbortController(null);
+            await loadMessages(activeConversationId, { silent: true });
+            await loadConversations(selectedAgentId || undefined);
+          },
+          onError: async (error) => {
+            setCouncilIsExecuting(false);
+            setIsStreaming(false);
+            setStreamStartTime(null);
+            setCouncilStreamingContent('');
+            setCouncilMemberProgress(new Map());
+            setCouncilSynthesisPhase(false);
+            setAbortController(null);
+            console.error('Council error:', error);
+            await loadMessages(activeConversationId, { silent: true });
+            await loadConversations(selectedAgentId || undefined);
+          },
+        },
+        controller.signal
+      );
+    } catch (err) {
+      console.error('Council message error:', err);
+      setCouncilIsExecuting(false);
+      setIsStreaming(false);
+      setStreamStartTime(null);
+      setAbortController(null);
+      await loadMessages(activeConversationId, { silent: true });
+    }
+  }, [activeConversationId, isStreaming, addMessage, setIsStreaming, setStreamStartTime, setCouncilIsExecuting, setCouncilMemberProgress, setCouncilSynthesisPhase, setCouncilStreamingContent, appendCouncilStreamingContent, appendStreamingContentEvent, setAbortController, resetStreamingActivityEvents, loadMessages, loadConversations, selectedAgentId]);
+
+  const sendRegularMessage = useCallback(async (content: string, options?: SendMessageOptions) => {
     if (!activeConversationId || isStreaming || !content.trim()) return;
 
     const attachments = options?.attachments;

@@ -106,6 +106,8 @@ export interface Message {
   model?: string;
   processed_by_agent_id?: string | null;
   processed_by_agent_name?: string | null;
+  council_run_id?: string | null;
+  is_council_synthesis?: boolean;
   created_at: string;
 }
 
@@ -117,7 +119,7 @@ export interface ChatAttachmentInput {
   url?: string;
 }
 
-export type View = 'agents' | 'chat' | 'tools' | 'mcp' | 'settings';
+export type View = 'agents' | 'chat' | 'tools' | 'mcp' | 'settings' | 'councils';
 
 export type ToolType = 'builtin' | 'http';
 
@@ -235,4 +237,213 @@ export interface OpenRouterModel {
   description?: string;
   context_length: number;
   pricing: { prompt: string; completion: string };
+}
+
+// ===== Model Council Types =====
+
+export interface CouncilMember {
+  id: string;
+  user_id: string;
+  name: string;
+  description?: string;
+  member_models: string[];
+  synthesizer_model: string;
+  synthesis_prompt_template?: string;
+  auto_expand_responses: boolean;
+  show_member_responses: boolean;
+  tool_ids: string[];
+  mcp_server_ids: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CouncilRun {
+  id: string;
+  user_id: string;
+  conversation_id: string;
+  message_id?: string;
+  user_message_id: string;
+  synthesizer_model: string;
+  member_count: number;
+  system_prompt?: string;
+  status: 'running' | 'completed' | 'partial_failure' | 'failed';
+  started_at: string;
+  completed_at?: string;
+  total_cost: number;
+  total_tokens: number;
+  total_prompt_tokens: number;
+  total_completion_tokens: number;
+  failed_members: number;
+  error_log?: string;
+  show_member_responses?: boolean;
+  created_at: string;
+}
+
+export interface CouncilResponse {
+  id: string;
+  council_run_id: string;
+  model_id: string;
+  content: string;
+  reasoning_content?: string;
+  tokens_used: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  reasoning_tokens: number;
+  cached_tokens: number;
+  cost: number;
+  response_time_ms: number;
+  status: 'success' | 'error' | 'timeout' | 'cancelled';
+  error_message?: string;
+  display_order: number;
+  tool_calls?: ToolCallSpec[];
+  created_at: string;
+}
+
+export interface CouncilRunDetail extends CouncilRun {
+  responses: CouncilResponse[];
+  synthesis_message?: Message;
+}
+
+export interface CouncilConfig {
+  member_models: string[];
+  synthesizer_model: string;
+  synthesis_prompt_template?: string;
+  show_member_responses?: boolean;
+  tool_ids?: string[];
+  mcp_server_ids?: string[];
+}
+
+export interface CouncilExecutionOptions {
+  conversationId: string;
+  userId: string;
+  content: string;
+  memberModels: string[];
+  synthesizerModel: string;
+  systemPrompt: string;
+  messageHistory: Array<{ role: string; content: string }>;
+  attachments?: ChatAttachmentInput[];
+  pdfEngine?: PDFEngine;
+  tools?: Array<{ id: string; name: string; description: string; parameters_schema: Record<string, unknown> }>;
+  mcpClients?: Map<string, unknown>;
+  onMemberStart: (index: number, modelId: string) => void;
+  onMemberComplete: (index: number, result: MemberResult) => void;
+  onSynthesisStart: (modelId: string, memberResults: MemberResult[]) => void;
+  onSynthesisChunk: (chunk: string) => void;
+  signal?: AbortSignal;
+}
+
+export interface MemberResult {
+  modelId: string;
+  content: string;
+  reasoningContent?: string;
+  tokensUsed: number;
+  promptTokens: number;
+  completionTokens: number;
+  reasoningTokens: number;
+  cost: number;
+  responseTimeMs: number;
+  status: 'success' | 'error' | 'timeout';
+  errorMessage?: string;
+  toolCalls?: ToolCallSpec[];
+}
+
+export interface SynthesisResult {
+  content: string;
+  reasoningContent?: string;
+  tokensUsed: number;
+  promptTokens: number;
+  completionTokens: number;
+  cost: number;
+  responseTimeMs: number;
+}
+
+export interface CouncilResult {
+  memberResults: MemberResult[];
+  synthesis: SynthesisResult;
+  totalCost: number;
+  totalTokens: number;
+}
+
+// Council Streaming Events
+export type CouncilMemberStartEvent = {
+  type: 'council_member_start';
+  member_index: number;
+  model_id: string;
+  total_members: number;
+};
+
+export type CouncilMemberCompleteEvent = {
+  type: 'council_member_complete';
+  member_index: number;
+  model_id: string;
+  status: 'success' | 'error' | 'timeout';
+  tokens_used?: number;
+  cost?: number;
+  response_time_ms?: number;
+  error_message?: string;
+};
+
+export type CouncilSynthesisStartEvent = {
+  type: 'council_synthesis_start';
+  synthesizer_model: string;
+  successful_members: number;
+  failed_members: number;
+};
+
+export type CouncilSynthesisChunkEvent = {
+  type: 'council_synthesis_chunk';
+  content: string;
+};
+
+export type CouncilSynthesisReasoningEvent = {
+  type: 'council_synthesis_reasoning';
+  content: string;
+};
+
+export type CouncilCompleteEvent = {
+  type: 'council_complete';
+  council_run_id: string;
+  message_id: string;
+  total_cost: number;
+  total_tokens: number;
+  synthesis_tokens: number;
+  synthesis_cost: number;
+};
+
+export type CouncilErrorEvent = {
+  type: 'council_error';
+  error: string;
+  phase: 'execution' | 'synthesis' | 'storage';
+};
+
+export type CouncilStreamEvent =
+  | CouncilMemberStartEvent
+  | CouncilMemberCompleteEvent
+  | CouncilSynthesisStartEvent
+  | CouncilSynthesisChunkEvent
+  | CouncilSynthesisReasoningEvent
+  | CouncilCompleteEvent
+  | CouncilErrorEvent;
+
+// Council Chat Request
+export interface CouncilChatRequest {
+  conversation_id: string;
+  content: string;
+  council_member_id?: string;
+  council_config?: CouncilConfig;
+  attachments?: ChatAttachmentInput[];
+  pdf_engine?: PDFEngine;
+  timezone?: string;
+  invoke_agent_id?: string;
+}
+
+// Council UI State
+export interface CouncilUIState {
+  isEnabled: boolean;
+  selectedCouncilId: string | null;
+  councilConfig: CouncilConfig | null;
+  isExecuting: boolean;
+  memberProgress: Map<number, { status: 'pending' | 'running' | 'complete' | 'error'; modelId: string; progress?: number }>;
+  synthesisPhase: boolean;
+  streamingContent: string;
 }

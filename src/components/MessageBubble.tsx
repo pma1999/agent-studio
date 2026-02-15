@@ -1,11 +1,13 @@
 import React from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { User, Sparkles, Copy, Check, Brain, ChevronDown, ChevronRight, ExternalLink, Globe, FileUp, Braces } from 'lucide-react';
+import { User, Sparkles, Copy, Check, Brain, ChevronDown, ChevronRight, ExternalLink, Globe, FileUp, Braces, Users } from 'lucide-react';
 import { MarkdownContent } from './MarkdownContent';
 import { MessageTokenPills } from './TokenCounter';
 import { ToolCallTimeline } from './ToolCallTimeline';
+import { CouncilMessageView } from './CouncilMessageView';
 import { formatModelId, getModelAuthor, getAuthorColor, formatAuthor } from '../utils/modelUtils';
-import type { Message, Annotation, ToolExecution, StreamingActivityEvent } from '../types';
+import { getCouncilRun } from '../api/councilClient';
+import type { Message, Annotation, ToolExecution, StreamingActivityEvent, CouncilRunDetail } from '../types';
 
 /** Compact pill showing which model generated the message; provider color and full id in tooltip. */
 function MessageModelBadge({ modelId, title }: { modelId: string; title?: string }) {
@@ -412,8 +414,29 @@ export function MessageBubble({
   streamingModel,
 }: MessageBubbleProps) {
   const [copied, setCopied] = React.useState(false);
+  const [councilRun, setCouncilRun] = React.useState<CouncilRunDetail | null>(null);
   const isUser = message.role === 'user';
   const displayContent = isStreaming ? (streamingContent || '') : message.content;
+  const isCouncilMessage = !isUser && (message.is_council_synthesis === true || !!message.council_run_id);
+
+  // Load council run detail when message has council_run_id (and not streaming)
+  React.useEffect(() => {
+    if (!message.council_run_id || isStreaming) {
+      setCouncilRun(null);
+      return;
+    }
+    let cancelled = false;
+    getCouncilRun(message.council_run_id)
+      .then((run) => {
+        if (!cancelled) setCouncilRun(run);
+      })
+      .catch(() => {
+        if (!cancelled) setCouncilRun(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [message.council_run_id, message.id, isStreaming]);
 
   // Reasoning: use streaming reasoning during stream, or persisted reasoning_content
   const reasoningText = isStreaming ? (streamingReasoning || '') : (message.reasoning_content || '');
@@ -472,6 +495,23 @@ export function MessageBubble({
             {!isUser && (message.model ?? (isStreaming && streamingModel ? streamingModel : null)) && (
               <MessageModelBadge modelId={message.model ?? streamingModel!} />
             )}
+            {!isUser && message.is_council_synthesis && (
+              <span
+                className="message-bubble-model-pill"
+                title="This response was synthesized from multiple AI models"
+                style={{
+                  color: '#4aa87d',
+                  borderColor: '#4aa87d',
+                  background: 'rgba(74, 168, 125, 0.14)',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                }}
+              >
+                <Users size={10} />
+                Council
+              </span>
+            )}
           </div>
           {!isUser && displayContent && !isStreaming && (
             <button
@@ -514,6 +554,39 @@ export function MessageBubble({
                   Attached: {message.attachments.map((a) => a.filename).join(', ')}
                 </span>
               </div>
+            )}
+          </>
+        ) : isCouncilMessage ? (
+          <>
+            <CouncilMessageView
+              content={displayContent}
+              reasoningContent={reasoningText || undefined}
+              councilRun={councilRun ?? undefined}
+              isStreaming={!!isStreaming}
+            />
+            {/* Web search citation links */}
+            {!isStreaming && annotations.length > 0 && (
+              <CitationLinks annotations={annotations} />
+            )}
+            {/* PDF/document annotations (file type from OpenRouter) */}
+            {!isStreaming && annotations.some((a) => a.type === 'file' && a.file?.name) && (
+              <div style={{
+                marginTop: '8px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                flexWrap: 'wrap',
+                fontSize: '0.75rem',
+                color: 'var(--text-muted)',
+              }}>
+                <FileUp size={12} style={{ flexShrink: 0 }} />
+                <span>
+                  Document(s) used: {annotations.filter((a) => a.type === 'file' && a.file?.name).map((a) => a.file!.name).join(', ')}
+                </span>
+              </div>
+            )}
+            {!isUser && !isStreaming && (
+              <MessageTokenPills message={message} />
             )}
           </>
         ) : (

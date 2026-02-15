@@ -40,7 +40,28 @@ export async function runTool(
   mcpClients?: Map<string, McpConnection>,
   userId?: string
 ): Promise<RunToolResult> {
-  const tool = resolvedTools.find((t) => t.name === toolName);
+  let tool = resolvedTools.find((t) => t.name === toolName);
+
+  // Fallback: if model called MCP tool by short name (e.g. search_legislation), resolve when unique
+  if (!tool) {
+    const mcpMatches = resolvedTools.filter(
+      (t): t is ResolvedTool & { type: 'mcp'; config: ResolvedToolMcpConfig } =>
+        t.type === 'mcp' && (t.config as ResolvedToolMcpConfig).mcp_tool_name === toolName
+    );
+    if (mcpMatches.length === 1) {
+      tool = mcpMatches[0];
+    } else if (mcpMatches.length > 1) {
+      const fullNames = mcpMatches.map((t) => t.name).join(', ');
+      return {
+        output: JSON.stringify({
+          error: `Multiple MCP tools named '${toolName}'. Use the full tool name: ${fullNames}`,
+        }),
+        isError: true,
+        source: 'mcp',
+      };
+    }
+  }
+
   if (!tool) {
     return {
       output: JSON.stringify({ error: `Unknown or disabled tool: ${toolName}` }),

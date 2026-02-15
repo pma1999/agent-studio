@@ -1,6 +1,8 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Send, ArrowDown, StopCircle, MessageSquare, Bot, Brain, FileUp, Link, X } from 'lucide-react';
+import { Send, ArrowDown, StopCircle, MessageSquare, Bot, Brain, FileUp, Link, X, Users } from 'lucide-react';
+import { CouncilToggle } from './CouncilToggle';
+import { CouncilStreamingView } from './CouncilStreamingView';
 import { useStore } from '../stores/store';
 import { useIsMobile, usePrefersReducedMotion } from '../utils/breakpoints';
 import { useChat } from '../hooks/useChat';
@@ -93,6 +95,10 @@ export function ChatView() {
     setConversationModelOverride,
     loadConversations,
     generalChatSettings,
+    councilEnabled,
+    councilConfig,
+    councilMemberProgress,
+    councilSynthesisPhase,
   } = useStore();
   const streamingActivitySignature = useMemo(() => (
     streamingActivityEvents
@@ -358,6 +364,7 @@ export function ChatView() {
       ...(pdfEngine && { pdf_engine: pdfEngine }),
       ...(messageModelOverride && { model: messageModelOverride }),
       ...(invokeAgentId && { invokeAgentId }),
+      ...(councilEnabled && councilConfig && { councilConfig }),
     });
     setInputValue('');
     setPendingAttachments([]);
@@ -533,7 +540,16 @@ export function ChatView() {
               </div>
             </motion.div>
           ) : (
-            displayMessages.map((msg, i) => {
+            <>
+              {/* Council Streaming View */}
+              {(councilEnabled || councilMemberProgress.size > 0) && isStreaming && (
+                <CouncilStreamingView
+                  memberProgress={councilMemberProgress}
+                  synthesisPhase={councilSynthesisPhase}
+                  streamingContent={streamingContent}
+                />
+              )}
+              {displayMessages.map((msg, i) => {
               const isStreamingMsg = isLastMsgStreamingPlaceholder && i === displayMessages.length - 1;
               const timelineCalls = !isStreamingMsg
                 ? toolExecutionsByMessageId.get(msg.id)
@@ -555,7 +571,8 @@ export function ChatView() {
                   streamingModel={isStreamingMsg && effectiveModelForThisMessage ? effectiveModelForThisMessage : undefined}
                 />
               );
-            })
+            })}
+            </>
           )}
         </div>
         </div>
@@ -817,6 +834,9 @@ export function ChatView() {
                   </AnimatePresence>
                 </div>
               )}
+
+              {/* Council Toggle */}
+              <CouncilToggle disabled={isStreaming} placement="above" />
 
               {/* Message Model Selector */}
               <div style={{ position: 'relative', flexShrink: 0 }}>

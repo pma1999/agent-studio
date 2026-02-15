@@ -1,6 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Bot, MessageSquare, Wrench, Plug, Settings, ChevronLeft, ChevronRight, Coins, X, LogOut, Plus } from 'lucide-react';
+import { Bot, MessageSquare, Wrench, Plug, Settings, ChevronLeft, ChevronRight, Coins, X, LogOut, Plus, Users } from 'lucide-react';
 import { useStore } from '../stores/store';
 import { useChat } from '../hooks/useChat';
 import { useIsMobile, usePrefersReducedMotion } from '../utils/breakpoints';
@@ -9,6 +9,7 @@ import { ConversationList } from './ConversationList';
 const navItems = [
   { id: 'chat' as const, label: 'Chat', icon: MessageSquare },
   { id: 'agents' as const, label: 'Agents', icon: Bot },
+  { id: 'councils' as const, label: 'Councils', icon: Users },
   { id: 'tools' as const, label: 'Tools', icon: Wrench },
   { id: 'mcp' as const, label: 'MCP', icon: Plug },
 ];
@@ -109,7 +110,7 @@ export function Sidebar() {
     return () => el.removeEventListener('keydown', onKeyDown);
   }, [isMobile, sidebarMobileOpen]);
 
-  const navClick = (view: 'agents' | 'chat' | 'tools' | 'mcp') => {
+  const navClick = (view: 'agents' | 'chat' | 'tools' | 'mcp' | 'councils') => {
     setCurrentView(view);
     if (isMobile) setSidebarMobileOpen(false);
   };

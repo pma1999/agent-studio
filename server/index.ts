@@ -17,6 +17,8 @@ import usageRouter from './routes/usage.js';
 import toolsRouter from './routes/tools.js';
 import mcpServersRouter from './routes/mcpServers.js';
 import { exportRouter, importRouter } from './routes/exportImport.js';
+import chatCouncilRouter from './routes/chatCouncil.js';
+import councilMembersRouter from './routes/councilMembers.js';
 
 const app = express();
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3001;
@@ -62,9 +64,17 @@ const chatLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: 'Too many chat messages. Try again in a few minutes.' },
 });
+const councilLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20, // Stricter limit for council (expensive operation)
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many council requests. Try again in a few minutes.' },
+});
 
 app.use('/api', apiLimiter);
 app.use('/api/chat', chatLimiter);
+app.use('/api/chat/council', councilLimiter);
 
 // Reject new requests during shutdown so Railway routes them to the new instance.
 app.use((req, res, next) => {
@@ -95,6 +105,8 @@ app.use('/api/tools', authMiddleware, toolsRouter);
 app.use('/api/mcp-servers', authMiddleware, mcpServersRouter);
 app.use('/api/export', authMiddleware, exportRouter);
 app.use('/api/import', authMiddleware, importRouter);
+app.use('/api/chat/council', authMiddleware, chatCouncilRouter);
+app.use('/api/council', authMiddleware, councilMembersRouter);
 
 // Root: for load balancer / health probes that hit /
 app.get('/', (_req, res) => {

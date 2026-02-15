@@ -488,6 +488,102 @@ export function migrate() {
       console.error('[Agent Studio] Failed to create initial admin:', e);
     }
   }
+
+  // --- Model Council migrations ---
+  migrateCouncilTables();
+}
+
+function migrateCouncilTables() {
+  // Create council_runs table - tracks each council execution
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS council_runs (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+      message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
+      user_message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+      synthesizer_model TEXT NOT NULL DEFAULT 'anthropic/claude-3.5-sonnet',
+      member_count INTEGER NOT NULL DEFAULT 3,
+      system_prompt TEXT,
+      status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'partial_failure', 'failed')) DEFAULT 'running',
+      started_at TEXT DEFAULT (datetime('now')),
+      completed_at TEXT,
+      total_cost REAL DEFAULT 0,
+      total_tokens INTEGER DEFAULT 0,
+      total_prompt_tokens INTEGER DEFAULT 0,
+      total_completion_tokens INTEGER DEFAULT 0,
+      failed_members INTEGER DEFAULT 0,
+      error_log TEXT,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_council_runs_user ON council_runs(user_id);
+    CREATE INDEX IF NOT EXISTS idx_council_runs_conversation ON council_runs(conversation_id);
+    CREATE INDEX IF NOT EXISTS idx_council_runs_message ON council_runs(message_id);
+    CREATE INDEX IF NOT EXISTS idx_council_runs_status ON council_runs(status);
+  `);
+
+  // Create council_members table - stores council configurations
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS council_members (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT,
+      member_models TEXT NOT NULL,
+      synthesizer_model TEXT NOT NULL DEFAULT 'anthropic/claude-3.5-sonnet',
+      synthesis_prompt_template TEXT,
+      auto_expand_responses INTEGER DEFAULT 0,
+      show_member_responses INTEGER DEFAULT 1,
+      tool_ids TEXT DEFAULT '[]',
+      mcp_server_ids TEXT DEFAULT '[]',
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_council_members_user ON council_members(user_id);
+  `);
+
+  // Create council_responses table - individual responses from each council member
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS council_responses (
+      id TEXT PRIMARY KEY,
+      council_run_id TEXT NOT NULL REFERENCES council_runs(id) ON DELETE CASCADE,
+      model_id TEXT NOT NULL,
+      content TEXT NOT NULL,
+      reasoning_content TEXT,
+      tokens_used INTEGER DEFAULT 0,
+      prompt_tokens INTEGER DEFAULT 0,
+      completion_tokens INTEGER DEFAULT 0,
+      reasoning_tokens INTEGER DEFAULT 0,
+      cached_tokens INTEGER DEFAULT 0,
+      cost REAL DEFAULT 0,
+      response_time_ms INTEGER,
+      status TEXT NOT NULL CHECK(status IN ('success', 'error', 'timeout', 'cancelled')) DEFAULT 'success',
+      error_message TEXT,
+      display_order INTEGER DEFAULT 0,
+      tool_calls TEXT DEFAULT NULL,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_council_responses_run ON council_responses(council_run_id);
+    CREATE INDEX IF NOT EXISTS idx_council_responses_model ON council_responses(model_id);
+    CREATE INDEX IF NOT EXISTS idx_council_responses_status ON council_responses(status);
+  `);
+
+  // Add council columns to messages table
+  const msgCols = db.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
+  if (!msgCols.some((c) => c.name === 'council_run_id')) {
+    db.exec("ALTER TABLE messages ADD COLUMN council_run_id TEXT DEFAULT NULL REFERENCES council_runs(id) ON DELETE SET NULL");
+    db.exec("ALTER TABLE messages ADD COLUMN is_council_synthesis INTEGER DEFAULT 0");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_messages_council_run ON messages(council_run_id)");
+  }
+
+  // Add show_member_responses to council_runs (default 1 = true)
+  const runCols = db.prepare("PRAGMA table_info(council_runs)").all() as { name: string }[];
+  if (!runCols.some((c) => c.name === 'show_member_responses')) {
+    db.exec("ALTER TABLE council_runs ADD COLUMN show_member_responses INTEGER DEFAULT 1");
+  }
 }
 
 // Synchronous nanoid workaround for seeding

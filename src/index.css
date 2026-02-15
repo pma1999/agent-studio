@@ -34,6 +34,30 @@
   --error: #c96b6b;
   --warning: #d4a557;
 
+  /* Council - Deliberative Chamber Theme */
+  --council-accent: #c9956b;
+  --council-accent-glow: rgba(201, 149, 107, 0.4);
+  --council-success: #7ab88f;
+  --council-waiting: #d4a557;
+  --council-error: #c96b6b;
+  --council-bg: rgba(201, 149, 107, 0.08);
+  --council-bg-hover: rgba(201, 149, 107, 0.12);
+  --council-border: rgba(201, 149, 107, 0.25);
+  --council-border-strong: rgba(201, 149, 107, 0.4);
+  --council-text: #e2b886;
+  --council-muted: rgba(201, 149, 107, 0.6);
+
+  /* Council Gradients */
+  --synthesis-gradient: linear-gradient(135deg, rgba(201, 149, 107, 0.15) 0%, rgba(201, 149, 107, 0.05) 100%);
+  --deliberation-gradient: linear-gradient(180deg, rgba(201, 149, 107, 0.1) 0%, transparent 100%);
+  --council-chamber-gradient: linear-gradient(145deg, rgba(17, 17, 17, 0.95) 0%, rgba(26, 26, 26, 0.98) 50%, rgba(17, 17, 17, 0.95) 100%);
+
+  /* Council Effects */
+  --council-glow: 0 0 30px rgba(201, 149, 107, 0.15);
+  --council-glow-strong: 0 0 40px rgba(201, 149, 107, 0.25);
+  --council-card-lift: 0 8px 32px rgba(0, 0, 0, 0.4);
+  --council-inner-shadow: inset 0 1px 1px rgba(201, 149, 107, 0.1);
+
   /* Typography */
   --font-display: 'Cormorant Garamond', 'Georgia', serif;
   --font-body: 'DM Sans', -apple-system, 'Segoe UI', sans-serif;
@@ -522,6 +546,107 @@ button:hover .conv-delete-btn,
   0% { left: -100%; }
   40% { left: 100%; }
   100% { left: 100%; }
+}
+
+/* ---------- Council Animations ---------- */
+@keyframes councilPulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(201, 149, 107, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(201, 149, 107, 0);
+  }
+}
+
+@keyframes councilGlow {
+  0%, 100% {
+    opacity: 0.5;
+    filter: blur(20px);
+  }
+  50% {
+    opacity: 0.8;
+    filter: blur(25px);
+  }
+}
+
+@keyframes councilShimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+@keyframes deliberationDot {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.2);
+    opacity: 0.7;
+  }
+}
+
+@keyframes synthesisReveal {
+  0% {
+    opacity: 0;
+    transform: translateY(10px);
+    filter: blur(4px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+
+@keyframes memberCardEnter {
+  0% {
+    opacity: 0;
+    transform: translateY(20px) scale(0.96);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes progressShine {
+  0% {
+    left: -100%;
+  }
+  100% {
+    left: 100%;
+  }
+}
+
+.council-pulse {
+  animation: councilPulse 2s ease-in-out infinite;
+}
+
+.council-glow {
+  animation: councilGlow 3s ease-in-out infinite;
+}
+
+.council-shimmer {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(201, 149, 107, 0.1) 50%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: councilShimmer 2s linear infinite;
+}
+
+.synthesis-reveal {
+  animation: synthesisReveal 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.member-card-enter {
+  animation: memberCardEnter 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
 .animate-fade-in {
