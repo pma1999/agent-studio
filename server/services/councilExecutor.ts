@@ -8,8 +8,8 @@ import type {
 } from '../types.js';
 import { runTool, toOpenRouterTools } from '../tools/index.js';
 
-const MEMBER_TIMEOUT_MS = 60000; // 60 seconds per member
-const SYNTHESIS_TIMEOUT_MS = 120000; // 120 seconds for synthesis
+const MEMBER_TIMEOUT_MS = 240000; // 4 minutes per member
+const SYNTHESIS_TIMEOUT_MS = 240000; // 4 minutes for synthesis
 const MAX_RETRIES = 1;
 
 interface StreamChunk {
