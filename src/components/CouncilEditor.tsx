@@ -2,12 +2,14 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Users, Plus, X, ChevronDown, ChevronUp, Wrench, Server, Sparkles, Cpu, GitMerge } from 'lucide-react';
 import { useStore } from '../stores/store';
-import { councilsApi, toolsApi, mcpServersApi, modelsApi } from '../api/client';
+import { councilsApi, toolsApi, mcpServersApi } from '../api/client';
 import { Button } from './ui/Button';
 import { Input } from './ui/Input';
 import { TextArea } from './ui/TextArea';
 import { Modal } from './ui/Modal';
-import type { CouncilMember, OpenRouterModel } from '../types';
+import { ModelSelectorCore } from './ModelSelectorCore';
+import { useOpenRouterModels } from '../hooks/useOpenRouterModels';
+import type { CouncilMember } from '../types';
 
 const DEFAULT_SYNTHESIS_TEMPLATE = `You are a synthesis expert. Your task is to analyze multiple AI model responses to the same query and create a unified, comprehensive answer.
 
@@ -80,32 +82,26 @@ export function CouncilEditor() {
 
   const [errors, setErrors] = useState<Partial<Record<keyof CouncilFormData, string>>>({});
   const [saving, setSaving] = useState(false);
-  const [availableModels, setAvailableModels] = useState<OpenRouterModel[]>([]);
   const [availableTools, setAvailableTools] = useState<{ id: string; name: string; description: string }[]>([]);
   const [availableMcpServers, setAvailableMcpServers] = useState<{ id: string; name: string }[]>([]);
-  const [loadingModels, setLoadingModels] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [modelSearch, setModelSearch] = useState('');
+
+  const { models: availableModels, loading: loadingModels } = useOpenRouterModels({ enabled: councilEditorOpen });
 
   // Load available data
   useEffect(() => {
     if (!councilEditorOpen) return;
 
     const loadData = async () => {
-      setLoadingModels(true);
       try {
-        const [modelsRes, toolsRes, mcpRes] = await Promise.all([
-          modelsApi.openrouter(),
+        const [toolsRes, mcpRes] = await Promise.all([
           toolsApi.list(),
           mcpServersApi.list(),
         ]);
-        setAvailableModels(modelsRes.data);
         setAvailableTools(toolsRes.map(t => ({ id: t.id, name: t.name, description: t.description })));
         setAvailableMcpServers(mcpRes.map(m => ({ id: m.id, name: m.name })));
       } catch (err) {
         console.error('Failed to load available data:', err);
-      } finally {
-        setLoadingModels(false);
       }
     };
 
@@ -141,17 +137,11 @@ export function CouncilEditor() {
     }
     setErrors({});
     setShowAdvanced(false);
-    setModelSearch('');
   }, [editingCouncil, councilEditorOpen]);
 
-  const filteredModels = useMemo(() => {
-    if (!modelSearch.trim()) return availableModels;
-    const search = modelSearch.toLowerCase();
-    return availableModels.filter(m =>
-      m.name.toLowerCase().includes(search) ||
-      m.id.toLowerCase().includes(search)
-    );
-  }, [availableModels, modelSearch]);
+  const availableModelMap = useMemo(() => {
+    return new Map(availableModels.map((model) => [model.id, model]));
+  }, [availableModels]);
 
   const validate = (): boolean => {
     const newErrors: Partial<Record<keyof CouncilFormData, string>> = {};
@@ -219,6 +209,14 @@ export function CouncilEditor() {
       if (prev.member_models.length >= 10) {
         return prev; // Max 10 models
       }
+      return { ...prev, member_models: [...prev.member_models, modelId] };
+    });
+  };
+
+  const handleAddMemberModel = (modelId: string | null) => {
+    if (!modelId) return;
+    setForm((prev) => {
+      if (prev.member_models.includes(modelId) || prev.member_models.length >= 10) return prev;
       return { ...prev, member_models: [...prev.member_models, modelId] };
     });
   };
@@ -323,7 +321,7 @@ export function CouncilEditor() {
           {form.member_models.length > 0 && (
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
               {form.member_models.map((modelId) => {
-                const model = availableModels.find(m => m.id === modelId);
+                const model = availableModelMap.get(modelId);
                 return (
                   <span
                     key={modelId}
@@ -359,74 +357,13 @@ export function CouncilEditor() {
             </div>
           )}
 
-          {/* Model Search */}
-          <Input
-            placeholder="Search models..."
-            value={modelSearch}
-            onChange={(e) => setModelSearch(e.target.value)}
-            style={{ marginBottom: '8px' }}
+          <ModelSelectorCore
+            value={null}
+            onChange={handleAddMemberModel}
+            variant="council"
+            disabled={loadingModels || form.member_models.length >= 10}
+            label={form.member_models.length >= 10 ? 'Maximum 10 models selected' : 'Add member model'}
           />
-
-          {/* Model List */}
-          <div style={{
-            border: '1px solid var(--border)',
-            borderRadius: 'var(--radius-md)',
-            maxHeight: '200px',
-            overflowY: 'auto',
-          }}>
-            {loadingModels ? (
-              <div style={{ padding: '16px', textAlign: 'center', color: 'var(--text-muted)' }}>
-                Loading models...
-              </div>
-            ) : filteredModels.length === 0 ? (
-              <div style={{ padding: '16px', textAlign: 'center', color: 'var(--text-muted)' }}>
-                No models found
-              </div>
-            ) : (
-              <div style={{ padding: '8px' }}>
-                {filteredModels.slice(0, 50).map((model) => {
-                  const isSelected = form.member_models.includes(model.id);
-                  return (
-                    <label
-                      key={model.id}
-                      style={{
-                        display: 'flex',
-                        alignItems: 'flex-start',
-                        gap: '10px',
-                        padding: '8px',
-                        borderRadius: 'var(--radius-sm)',
-                        cursor: 'pointer',
-                        background: isSelected ? 'rgba(74, 168, 125, 0.05)' : 'transparent',
-                      }}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={isSelected}
-                        onChange={() => toggleModel(model.id)}
-                        disabled={!isSelected && form.member_models.length >= 10}
-                      />
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{
-                          fontSize: '0.8125rem',
-                          fontWeight: 500,
-                          color: 'var(--text-primary)',
-                        }}>
-                          {model.name}
-                        </div>
-                        <div style={{
-                          fontSize: '0.6875rem',
-                          fontFamily: 'var(--font-mono)',
-                          color: 'var(--text-muted)',
-                        }}>
-                          {model.id}
-                        </div>
-                      </div>
-                    </label>
-                  );
-                })}
-              </div>
-            )}
-          </div>
 
           <div style={{ fontSize: '0.6875rem', color: 'var(--text-muted)' }}>
             Select 2-10 models. These models will process your queries in parallel.
@@ -453,26 +390,13 @@ export function CouncilEditor() {
             <div style={{ fontSize: '0.75rem', color: 'var(--error)' }}>{errors.synthesizer_model}</div>
           )}
 
-          <select
-            value={form.synthesizer_model}
-            onChange={(e) => setForm({ ...form, synthesizer_model: e.target.value })}
-            style={{
-              padding: '10px 14px',
-              fontSize: '0.875rem',
-              background: 'var(--bg-surface)',
-              color: 'var(--text-primary)',
-              border: `1px solid ${errors.synthesizer_model ? 'var(--error)' : 'var(--border)'}`,
-              borderRadius: 'var(--radius-md)',
-              outline: 'none',
-            }}
-          >
-            <option value="">Select a model...</option>
-            {availableModels.map((model) => (
-              <option key={model.id} value={model.id}>
-                {model.name}
-              </option>
-            ))}
-          </select>
+          <ModelSelectorCore
+            value={form.synthesizer_model || null}
+            onChange={(modelId) => setForm({ ...form, synthesizer_model: modelId ?? '' })}
+            variant="council"
+            disabled={loadingModels}
+            label="Synthesizer model"
+          />
 
           <div style={{ fontSize: '0.6875rem', color: 'var(--text-muted)' }}>
             This model will synthesize all member responses into a unified answer.

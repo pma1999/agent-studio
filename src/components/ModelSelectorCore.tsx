@@ -38,7 +38,7 @@ function ProviderIcon({ name, size = 14 }: { name: 'sparkles' | 'zap' | 'eye' | 
   return Icon ? <Icon size={size} /> : <Sparkles size={size} />;
 }
 
-export type ModelSelectorVariant = 'conversation' | 'message' | 'settings' | 'agent';
+export type ModelSelectorVariant = 'conversation' | 'message' | 'settings' | 'agent' | 'council';
 
 export interface ModelSelectorCoreProps {
   value: string | null;
@@ -135,7 +135,7 @@ export function ModelSelectorCore({
     const showDefault =
       (variant === 'conversation' || variant === 'message') && !search.trim();
     const showRecent =
-      (variant === 'conversation' || variant === 'message' || variant === 'agent') &&
+      (variant === 'conversation' || variant === 'message' || variant === 'agent' || variant === 'council') &&
       !search.trim() &&
       recent.length > 0;
     const showTiers = variant === 'settings';
@@ -267,54 +267,55 @@ export function ModelSelectorCore({
   }, [isOpen]);
 
   const isSettings = variant === 'settings';
+  const isPanelVariant = variant === 'settings' || variant === 'council';
   const isMessage = variant === 'message';
 
-  const triggerMinHeight = compact ? 32 : isMobile ? 44 : isSettings ? 56 : undefined;
+  const triggerMinHeight = compact ? 32 : isMobile ? 44 : isPanelVariant ? 56 : undefined;
 
   const triggerButton = (
     <motion.button
       type="button"
       onClick={() => !disabled && !loading && setIsOpen(!isOpen)}
-      disabled={disabled || (isSettings && loading)}
+      disabled={disabled || (isPanelVariant && loading)}
       aria-expanded={isOpen}
       aria-haspopup="listbox"
       aria-label={ariaLabel}
-      whileHover={disabled || (isSettings && loading) ? {} : { backgroundColor: 'var(--bg-surface)' }}
-      whileTap={disabled || (isSettings && loading) ? {} : { scale: 0.98 }}
+      whileHover={disabled || (isPanelVariant && loading) ? {} : { backgroundColor: 'var(--bg-surface)' }}
+      whileTap={disabled || (isPanelVariant && loading) ? {} : { scale: 0.98 }}
       transition={{ duration: 0.15, ease: [0.4, 0, 0.2, 1] }}
       style={{
         display: 'flex',
         alignItems: 'center',
-        gap: compact ? '4px' : isSettings ? '12px' : '6px',
+        gap: compact ? '4px' : isPanelVariant ? '12px' : '6px',
         padding: compact
           ? '0 10px'
-          : isSettings
+          : isPanelVariant
             ? '12px 16px'
             : '4px 10px 4px 8px',
         minHeight: triggerMinHeight,
         height: compact ? 32 : undefined,
-        width: isSettings ? '100%' : undefined,
-        maxWidth: isSettings ? undefined : compact ? 140 : isMobile ? 180 : 200,
-        fontSize: compact ? '0.75rem' : isSettings ? '0.9375rem' : '0.75rem',
-        fontFamily: 'var(--font-mono)',
-        color: isUsingDefault && !isSettings ? 'var(--text-muted)' : 'var(--text-primary)',
+        width: isPanelVariant ? '100%' : undefined,
+        maxWidth: isPanelVariant ? undefined : compact ? 140 : isMobile ? 180 : 200,
+        fontSize: compact ? '0.75rem' : isPanelVariant ? '0.9375rem' : '0.75rem',
+        fontFamily: isPanelVariant ? 'var(--font-body)' : 'var(--font-mono)',
+        color: isUsingDefault && !isPanelVariant ? 'var(--text-muted)' : 'var(--text-primary)',
         background:
-          disabled || (isSettings && loading)
+          disabled || (isPanelVariant && loading)
             ? 'var(--bg-surface)'
             : isOpen
               ? 'var(--bg-surface)'
-              : isSettings
+              : isPanelVariant
                 ? 'var(--bg-elevated)'
                 : 'transparent',
         border: `1px solid ${
-          isOpen && isSettings ? 'var(--accent)' : isOpen ? 'var(--border)' : 'transparent'
+          isOpen && isPanelVariant ? 'var(--accent)' : isOpen ? 'var(--border)' : 'transparent'
         }`,
         borderRadius: 'var(--radius-md)',
-        cursor: disabled || (isSettings && loading) ? 'not-allowed' : 'pointer',
+        cursor: disabled || (isPanelVariant && loading) ? 'not-allowed' : 'pointer',
         transition: 'border-color var(--transition-fast), box-shadow var(--transition-fast)',
         outline: 'none',
-        boxShadow: isOpen && isSettings ? '0 0 0 3px var(--accent-muted)' : 'none',
-        textAlign: isSettings ? 'left' : undefined,
+        boxShadow: isOpen && isPanelVariant ? '0 0 0 3px var(--accent-muted)' : 'none',
+        textAlign: isPanelVariant ? 'left' : undefined,
       }}
       onFocus={(e) => {
         if (isOpen) return;
@@ -324,7 +325,7 @@ export function ModelSelectorCore({
         if (!isOpen) e.currentTarget.style.borderColor = 'transparent';
       }}
     >
-      {isSettings ? (
+      {isPanelVariant ? (
         <>
           <div
             style={{
@@ -589,7 +590,7 @@ export function ModelSelectorCore({
                           style={{
                             fontSize: '0.75rem',
                             color: 'var(--text-muted)',
-                            fontFamily: 'var(--font-mono)',
+                            fontFamily: isPanelVariant ? 'var(--font-body)' : 'var(--font-mono)',
                           }}
                         >
                           {conversationModel
