@@ -42,6 +42,7 @@ export async function streamCouncilChat(
 ): Promise<void> {
   const response = await fetch(`${API_BASE}/chat/council`, {
     method: 'POST',
+    credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(request),
     signal,
@@ -128,7 +129,9 @@ export async function getCouncilRuns(conversationId: string): Promise<
     message_preview: string | null;
   }>
 > {
-  const response = await fetch(`${API_BASE}/council/runs?conversation_id=${encodeURIComponent(conversationId)}`);
+  const response = await fetch(`${API_BASE}/council/runs?conversation_id=${encodeURIComponent(conversationId)}`, {
+    credentials: 'include',
+  });
   if (!response.ok) {
     throw new Error('Failed to fetch council runs');
   }
@@ -136,7 +139,9 @@ export async function getCouncilRuns(conversationId: string): Promise<
 }
 
 export async function getCouncilRun(id: string): Promise<CouncilRunDetail> {
-  const response = await fetch(`${API_BASE}/council/runs/${encodeURIComponent(id)}`);
+  const response = await fetch(`${API_BASE}/council/runs/${encodeURIComponent(id)}`, {
+    credentials: 'include',
+  });
   if (!response.ok) {
     throw new Error('Failed to fetch council run');
   }
@@ -145,7 +150,9 @@ export async function getCouncilRun(id: string): Promise<CouncilRunDetail> {
 
 // Council members (configurations)
 export async function getCouncilMembers(): Promise<CouncilMember[]> {
-  const response = await fetch(`${API_BASE}/council/members`);
+  const response = await fetch(`${API_BASE}/council/members`, {
+    credentials: 'include',
+  });
   if (!response.ok) {
     throw new Error('Failed to fetch council members');
   }
@@ -155,6 +162,7 @@ export async function getCouncilMembers(): Promise<CouncilMember[]> {
 export async function createCouncilMember(member: Omit<CouncilMember, 'id' | 'user_id' | 'created_at' | 'updated_at'>): Promise<CouncilMember> {
   const response = await fetch(`${API_BASE}/council/members`, {
     method: 'POST',
+    credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(member),
   });
@@ -171,6 +179,7 @@ export async function updateCouncilMember(
 ): Promise<CouncilMember> {
   const response = await fetch(`${API_BASE}/council/members/${encodeURIComponent(id)}`, {
     method: 'PUT',
+    credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(updates),
   });
@@ -184,6 +193,7 @@ export async function updateCouncilMember(
 export async function deleteCouncilMember(id: string): Promise<void> {
   const response = await fetch(`${API_BASE}/council/members/${encodeURIComponent(id)}`, {
     method: 'DELETE',
+    credentials: 'include',
   });
   if (!response.ok) {
     throw new Error('Failed to delete council');
