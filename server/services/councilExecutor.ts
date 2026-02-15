@@ -12,6 +12,8 @@ import { runTool, toOpenRouterTools } from '../tools/index.js';
 const MEMBER_TIMEOUT_MS = 240000; // 4 minutes per member
 const SYNTHESIS_TIMEOUT_MS = 240000; // 4 minutes for synthesis
 const COMPARISON_EXTRACTION_TIMEOUT_MS = 60000; // 1 minute
+const COMPARISON_EXTRACTION_MAX_TOKENS = 8192;
+const COMPARISON_EXTRACTION_MAX_REPAIR_ATTEMPTS = 1;
 const MAX_RETRIES = 1;
 const MAX_MEMBER_CONTENT_FOR_COMPARISON = 2800; // chars per member to stay within context
 
@@ -677,8 +679,78 @@ export class CouncilExecutor {
   }
 
   /**
+   * Single request to OpenRouter for comparison JSON (structured output).
+   * Returns raw content string or throws on API error / missing content.
+   */
+  private async requestComparisonJson(
+    messages: Array<{ role: string; content: string }>,
+    maxTokens: number,
+    synthesizerModel: string,
+    signal?: AbortSignal
+  ): Promise<string> {
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error('Comparison extraction timeout')), COMPARISON_EXTRACTION_TIMEOUT_MS);
+    });
+
+    const fetchPromise = fetch(this.apiUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${this.apiKey}`,
+        'HTTP-Referer': 'http://localhost:5173',
+        'X-Title': 'Agent Studio',
+      },
+      body: JSON.stringify({
+        model: synthesizerModel,
+        messages,
+        temperature: 0.3,
+        max_tokens: maxTokens,
+        stream: false,
+        response_format: {
+          type: 'json_schema',
+          json_schema: COUNCIL_COMPARISON_JSON_SCHEMA,
+        },
+      }),
+      signal,
+    });
+
+    const response = await Promise.race([fetchPromise, timeoutPromise]);
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`Comparison API ${response.status}: ${text.slice(0, 200)}`);
+    }
+
+    const data = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
+    const raw = data.choices?.[0]?.message?.content;
+    if (typeof raw !== 'string' || !raw.trim()) {
+      throw new Error('Comparison API returned no content');
+    }
+
+    return raw;
+  }
+
+  /** True if the error is from JSON.parse (truncated or malformed JSON). */
+  private isJsonParseError(e: unknown): boolean {
+    if (e instanceof SyntaxError) return true;
+    const msg = e instanceof Error ? e.message : String(e);
+    return /Unterminated string|Unexpected end|JSON at position/i.test(msg);
+  }
+
+  /**
+   * Parse and validate comparison JSON. Returns raw string if valid, throws on parse error.
+   */
+  private parseComparisonJson(raw: string): string {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (typeof parsed !== 'object' || parsed === null) {
+      throw new SyntaxError('Comparison JSON is not an object');
+    }
+    return raw;
+  }
+
+  /**
    * Call OpenRouter with response_format json_schema to get structured comparison.
-   * Returns raw JSON string or null on failure (graceful degradation).
+   * On invalid/truncated JSON, retries once with a repair prompt. Returns raw JSON string or null on failure (graceful degradation).
    */
   private async extractComparison(
     memberResults: MemberResult[],
@@ -713,60 +785,51 @@ ${synthesisContent.slice(0, 4000)}${synthesisContent.length > 4000 ? '…' : ''}
 
 Output only the JSON object that matches the schema. Use the exact model_id values from the responses (e.g. anthropic/claude-3.5-sonnet, openai/gpt-4o).`;
 
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error('Comparison extraction timeout')), COMPARISON_EXTRACTION_TIMEOUT_MS);
-    });
+    const repairPrompt = `The previous JSON response was truncated or invalid and could not be parsed. Output a complete, valid JSON object that matches the same schema (question_type, agreements, disagreements, unique_findings). Fix any unterminated strings, missing brackets, or cut-off values. Output only the JSON object, no explanation or markdown.`;
 
-    const fetchPromise = fetch(this.apiUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${this.apiKey}`,
-        'HTTP-Referer': 'http://localhost:5173',
-        'X-Title': 'Agent Studio',
-      },
-      body: JSON.stringify({
-        model: synthesizerModel,
-        messages: [
-          { role: 'user', content: prompt },
-        ],
-        temperature: 0.3,
-        max_tokens: 2048,
-        stream: false,
-        response_format: {
-          type: 'json_schema',
-          json_schema: COUNCIL_COMPARISON_JSON_SCHEMA,
-        },
-      }),
-      signal,
-    });
-
-    const response = await Promise.race([fetchPromise, timeoutPromise]);
-
+    let raw: string;
     try {
-      if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`Comparison API ${response.status}: ${text.slice(0, 200)}`);
-      }
-
-      const data = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
-      const raw = data.choices?.[0]?.message?.content;
-      if (typeof raw !== 'string' || !raw.trim()) {
-        return null;
-      }
-
-      // Validate that it parses and has expected shape (optional but safer)
-      const parsed = JSON.parse(raw) as Record<string, unknown>;
-      if (typeof parsed !== 'object' || parsed === null) {
-        return null;
-      }
-
-      return raw;
-    } catch (e) {
-      if (e instanceof Error && e.name === 'AbortError') {
+      raw = await this.requestComparisonJson(
+        [{ role: 'user', content: prompt }],
+        COMPARISON_EXTRACTION_MAX_TOKENS,
+        synthesizerModel,
+        signal
+      );
+    } catch (requestError) {
+      if (requestError instanceof Error && requestError.name === 'AbortError') {
         throw new Error('Comparison extraction timeout');
       }
-      throw e;
+      throw requestError;
+    }
+
+    try {
+      return this.parseComparisonJson(raw);
+    } catch (parseError) {
+      if (!this.isJsonParseError(parseError)) {
+        throw parseError;
+      }
+      // First response was invalid or truncated JSON. Retry once with repair.
+      const repairMessages: Array<{ role: string; content: string }> = [
+        { role: 'user', content: prompt },
+        { role: 'assistant', content: raw },
+        { role: 'user', content: repairPrompt },
+      ];
+
+      try {
+        const repairRaw = await this.requestComparisonJson(
+          repairMessages,
+          COMPARISON_EXTRACTION_MAX_TOKENS,
+          synthesizerModel,
+          signal
+        );
+        const result = this.parseComparisonJson(repairRaw);
+        console.log(`   📊 Comparison extraction OK after repair`);
+        return result;
+      } catch (repairError) {
+        const msg = repairError instanceof Error ? repairError.message : String(repairError);
+        console.log(`   ⚠️ Comparison extraction failed after repair: ${msg.slice(0, 80)}`);
+        return null;
+      }
     }
   }
 
