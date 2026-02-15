@@ -17,6 +17,7 @@ import type { ToolExecution, ToolSource } from '../types';
 interface ToolCallTimelineProps {
   calls: ToolExecution[];
   isStreaming?: boolean;
+  showHeader?: boolean;
 }
 
 function tryParseJson(value: string): unknown | null {
@@ -185,29 +186,31 @@ function ToolCallCard({
   );
 }
 
-export function ToolCallTimeline({ calls, isStreaming = false }: ToolCallTimelineProps) {
+export function ToolCallTimeline({ calls, isStreaming = false, showHeader = true }: ToolCallTimelineProps) {
   if (!calls.length) return null;
   const runningCount = calls.filter((c) => c.status === 'running').length;
 
   return (
-    <section className="tool-telemetry">
-      <div className="tool-telemetry-header">
-        <div className="tool-telemetry-title">
-          <Sparkles size={13} />
-          Tool activity
-        </div>
-        <div className="tool-telemetry-meta">
-          <span className="tool-telemetry-count">
-            {calls.length} call{calls.length !== 1 ? 's' : ''}
-          </span>
-          {isStreaming && (
-            <span className="tool-telemetry-live">
-              <span className="tool-telemetry-live-dot" />
-              {runningCount > 0 ? `${runningCount} running` : 'Live'}
+    <section className={`tool-telemetry${showHeader ? '' : ' tool-telemetry-inline'}`}>
+      {showHeader && (
+        <div className="tool-telemetry-header">
+          <div className="tool-telemetry-title">
+            <Sparkles size={13} />
+            Tool activity
+          </div>
+          <div className="tool-telemetry-meta">
+            <span className="tool-telemetry-count">
+              {calls.length} call{calls.length !== 1 ? 's' : ''}
             </span>
-          )}
+            {isStreaming && (
+              <span className="tool-telemetry-live">
+                <span className="tool-telemetry-live-dot" />
+                {runningCount > 0 ? `${runningCount} running` : 'Live'}
+              </span>
+            )}
+          </div>
         </div>
-      </div>
+      )}
       <div className="tool-telemetry-list">
         {calls.map((call, index) => (
           <ToolCallCard key={call.id} call={call} index={index} />

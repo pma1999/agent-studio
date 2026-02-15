@@ -148,6 +148,20 @@ export interface ToolExecution {
   source?: ToolSource;
 }
 
+export interface StreamingReasoningEvent {
+  id: string;
+  type: 'reasoning';
+  content: string;
+}
+
+export interface StreamingToolEvent {
+  id: string;
+  type: 'tool';
+  tool: ToolExecution;
+}
+
+export type StreamingActivityEvent = StreamingReasoningEvent | StreamingToolEvent;
+
 export interface AgentFormData {
   name: string;
   description: string;

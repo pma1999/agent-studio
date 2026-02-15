@@ -9,7 +9,15 @@ import { MessageBubble } from './MessageBubble';
 import { EmptyState } from './EmptyState';
 import { Button } from './ui/Button';
 import { ConversationTokenSummary, StreamingTokenCounter } from './TokenCounter';
-import type { ReasoningEffort, ReasoningConfig, PDFEngine, ChatAttachmentInput, ToolExecution, ToolSource } from '../types';
+import type {
+  ReasoningEffort,
+  ReasoningConfig,
+  PDFEngine,
+  ChatAttachmentInput,
+  ToolExecution,
+  ToolSource,
+  StreamingActivityEvent,
+} from '../types';
 
 const MAX_PDF_ATTACHMENTS = 5;
 const MAX_PDF_MB = 20;
@@ -77,8 +85,17 @@ export function ChatView() {
     reasoningOverride,
     setReasoningOverride,
     streamStartTime,
-    streamingToolEvents,
+    streamingActivityEvents,
   } = useStore();
+  const streamingActivitySignature = useMemo(() => (
+    streamingActivityEvents
+      .map((ev) => (
+        ev.type === 'reasoning'
+          ? `r:${ev.id}:${ev.content.length}`
+          : `t:${ev.tool.id}:${ev.tool.status}:${(ev.tool.result || '').length}`
+      ))
+      .join('|')
+  ), [streamingActivityEvents]);
   const { sendMessage, cancelStream, startNewChat } = useChat();
   const [inputValue, setInputValue] = useState('');
   const [showReasoningPopover, setShowReasoningPopover] = useState(false);
@@ -92,7 +109,7 @@ export function ChatView() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { containerRef, scrollToBottom, showScrollButton, handleScroll } = useAutoScroll(
     isStreaming
-      ? `${streamingContent.length}:${reasoningContent.length}:${streamingToolEvents.length}`
+      ? `${streamingContent.length}:${reasoningContent.length}:${streamingActivitySignature}`
       : messages.length
   );
 
@@ -445,9 +462,12 @@ export function ChatView() {
           ) : (
             displayMessages.map((msg, i) => {
               const isStreamingMsg = isLastMsgStreamingPlaceholder && i === displayMessages.length - 1;
-              const timelineCalls = isStreamingMsg
-                ? streamingToolEvents
-                : toolExecutionsByMessageId.get(msg.id);
+              const timelineCalls = !isStreamingMsg
+                ? toolExecutionsByMessageId.get(msg.id)
+                : undefined;
+              const activityEvents: StreamingActivityEvent[] | undefined = isStreamingMsg
+                ? streamingActivityEvents
+                : undefined;
               return (
                 <MessageBubble
                   key={msg.id}
@@ -455,9 +475,10 @@ export function ChatView() {
                   isStreaming={isStreamingMsg}
                   streamingContent={isStreamingMsg ? streamingContent : undefined}
                   streamingReasoning={isStreamingMsg ? reasoningContent : undefined}
+                  streamingActivityEvents={activityEvents}
                   agentEmoji={agent?.emoji}
                   toolExecutions={timelineCalls}
-                  toolActivityLive={isStreamingMsg && timelineCalls !== undefined && timelineCalls.length > 0}
+                  toolActivityLive={isStreamingMsg && !!activityEvents?.some((ev) => ev.type === 'tool')}
                 />
               );
             })

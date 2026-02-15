@@ -22,6 +22,7 @@ export function useChat() {
     reasoningContent,
     setReasoningContent,
     appendReasoningContent,
+    appendStreamingReasoningEvent,
     reasoningOverride,
     addMessage,
     loadMessages,
@@ -29,7 +30,7 @@ export function useChat() {
     selectedAgentId,
     upsertStreamingToolCall,
     completeStreamingToolCall,
-    resetStreamingToolEvents,
+    resetStreamingActivityEvents,
   } = useStore();
 
   const sendMessage = useCallback(async (content: string, options?: SendMessageOptions) => {
@@ -67,7 +68,7 @@ export function useChat() {
     setStreamStartTime(Date.now());
     setStreamingContent('');
     setReasoningContent('');
-    resetStreamingToolEvents();
+    resetStreamingActivityEvents();
 
     await streamChat(
       activeConversationId,
@@ -78,7 +79,7 @@ export function useChat() {
         setStreamStartTime(null);
         setStreamingContent('');
         setReasoningContent('');
-        resetStreamingToolEvents();
+        resetStreamingActivityEvents();
         setAbortController(null);
         await loadMessages(activeConversationId);
         await loadConversations(selectedAgentId || undefined);
@@ -88,7 +89,7 @@ export function useChat() {
         setStreamStartTime(null);
         setStreamingContent('');
         setReasoningContent('');
-        resetStreamingToolEvents();
+        resetStreamingActivityEvents();
         setAbortController(null);
         const errorMsg: Message = {
           id: `error-${Date.now()}`,
@@ -100,7 +101,10 @@ export function useChat() {
         await loadMessages(activeConversationId);
         addMessage(errorMsg);
       },
-      (chunk) => appendReasoningContent(chunk),
+      (chunk) => {
+        appendReasoningContent(chunk);
+        appendStreamingReasoningEvent(chunk);
+      },
       controller.signal,
       reasoningOverride,
       (data) => upsertStreamingToolCall(data),
@@ -108,7 +112,7 @@ export function useChat() {
       attachments,
       pdf_engine,
     );
-  }, [activeConversationId, isStreaming, addMessage, setIsStreaming, setStreamingContent, appendStreamingContent, setAbortController, setStreamStartTime, setReasoningContent, appendReasoningContent, reasoningOverride, upsertStreamingToolCall, completeStreamingToolCall, resetStreamingToolEvents, loadMessages, loadConversations, selectedAgentId]);
+  }, [activeConversationId, isStreaming, addMessage, setIsStreaming, setStreamingContent, appendStreamingContent, setAbortController, setStreamStartTime, setReasoningContent, appendReasoningContent, appendStreamingReasoningEvent, reasoningOverride, upsertStreamingToolCall, completeStreamingToolCall, resetStreamingActivityEvents, loadMessages, loadConversations, selectedAgentId]);
 
   const cancelStream = useCallback(() => {
     const controller = useStore.getState().abortController;
@@ -119,14 +123,14 @@ export function useChat() {
     setStreamStartTime(null);
     setStreamingContent('');
     setReasoningContent('');
-    resetStreamingToolEvents();
+    resetStreamingActivityEvents();
     setAbortController(null);
     // Reload messages to get whatever was saved server-side
     if (activeConversationId) {
       loadMessages(activeConversationId);
       loadConversations(selectedAgentId || undefined);
     }
-  }, [activeConversationId, setIsStreaming, setStreamStartTime, setStreamingContent, setReasoningContent, resetStreamingToolEvents, setAbortController, loadMessages, loadConversations, selectedAgentId]);
+  }, [activeConversationId, setIsStreaming, setStreamStartTime, setStreamingContent, setReasoningContent, resetStreamingActivityEvents, setAbortController, loadMessages, loadConversations, selectedAgentId]);
 
   const startNewChat = useCallback(async (agentId: string) => {
     try {
