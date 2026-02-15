@@ -46,7 +46,7 @@ interface AppState {
   // Messages
   messages: Message[];
   messagesLoading: boolean;
-  loadMessages: (conversationId: string) => Promise<void>;
+  loadMessages: (conversationId: string, options?: { silent?: boolean }) => Promise<void>;
   addMessage: (message: Message) => void;
   updateLastAssistantMessage: (content: string) => void;
 
@@ -192,8 +192,10 @@ export const useStore = create<AppState>((set, get) => ({
   // Messages
   messages: [],
   messagesLoading: false,
-  loadMessages: async (conversationId: string) => {
-    set({ messagesLoading: true });
+  loadMessages: async (conversationId: string, options?: { silent?: boolean }) => {
+    if (!options?.silent) {
+      set({ messagesLoading: true });
+    }
     try {
       const messages = await messagesApi.list(conversationId);
       set({ messages, messagesLoading: false });

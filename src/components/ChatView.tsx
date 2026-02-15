@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Send, ArrowDown, StopCircle, MessageSquare, Bot, Brain, FileUp, Link, X } from 'lucide-react';
 import { useStore } from '../stores/store';
@@ -118,11 +118,33 @@ export function ChatView() {
   const reasoningBtnRef = useRef<HTMLButtonElement>(null);
   const reasoningPopoverRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const { containerRef, scrollToBottom, showScrollButton, handleScroll } = useAutoScroll(
-    isStreaming
-      ? `${streamingContent.length}:${reasoningContent.length}:${streamingActivitySignature}`
-      : messages.length
+  const prevIsStreamingRef = useRef(isStreaming);
+  const scrollDependency = useMemo(
+    () =>
+      isStreaming
+        ? `${streamingContent.length}:${reasoningContent.length}:${streamingActivitySignature}`
+        : `${messages.length}:${messages[messages.length - 1]?.id ?? ''}`,
+    [
+      isStreaming,
+      streamingContent.length,
+      reasoningContent.length,
+      streamingActivitySignature,
+      messages.length,
+      messages[messages.length - 1]?.id,
+    ]
   );
+  const { containerRef, scrollToBottom, showScrollButton, handleScroll } = useAutoScroll(scrollDependency);
+
+  // When stream ends, keep view at bottom (instant scroll after layout)
+  useLayoutEffect(() => {
+    const wasStreaming = prevIsStreamingRef.current;
+    prevIsStreamingRef.current = isStreaming;
+    if (wasStreaming && !isStreaming && messages.length > 0) {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => scrollToBottom('auto'));
+      });
+    }
+  }, [isStreaming, messages.length, scrollToBottom]);
 
   const activeConversation = conversations.find((c) => c.id === activeConversationId);
   const agent = agents.find((a) => a.id === (activeConversation?.agent_id || selectedAgentId));

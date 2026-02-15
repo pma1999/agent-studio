@@ -89,7 +89,7 @@ export function useChat() {
         setReasoningContent('');
         resetStreamingActivityEvents();
         setAbortController(null);
-        await loadMessages(activeConversationId);
+        await loadMessages(activeConversationId, { silent: true });
         await loadConversations(selectedAgentId || undefined);
       },
       async (error) => {
@@ -106,7 +106,7 @@ export function useChat() {
           content: `**Error:** ${error}`,
           created_at: new Date().toISOString(),
         };
-        await loadMessages(activeConversationId);
+        await loadMessages(activeConversationId, { silent: true });
         addMessage(errorMsg);
       },
       (chunk) => {
@@ -137,7 +137,7 @@ export function useChat() {
     setAbortController(null);
     // Reload messages to get whatever was saved server-side
     if (activeConversationId) {
-      loadMessages(activeConversationId);
+      loadMessages(activeConversationId, { silent: true });
       loadConversations(selectedAgentId || undefined);
     }
   }, [activeConversationId, setIsStreaming, setStreamStartTime, setStreamingContent, setReasoningContent, resetStreamingActivityEvents, setAbortController, loadMessages, loadConversations, selectedAgentId]);
