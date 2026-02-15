@@ -139,7 +139,8 @@ router.get('/runs/:id', (req: AuthRequest, res: Response) => {
       return { ...rest, tool_calls, tool_results };
     });
 
-    const { show_member_responses: rawShow, comparison_json: comparisonJsonRaw } = run;
+    const rawShow = (run as { show_member_responses?: number }).show_member_responses;
+    const comparisonJsonRaw = run.comparison_json;
     let comparison: CouncilComparison | undefined;
     if (comparisonJsonRaw && comparisonJsonRaw.trim()) {
       try {
