@@ -5,6 +5,7 @@ import type {
   SynthesisResult,
   CouncilResult,
   ToolCallSpec,
+  ToolResultRecord,
 } from '../types.js';
 import { runTool, toOpenRouterTools } from '../tools/index.js';
 
@@ -263,7 +264,8 @@ export class CouncilExecutor {
     let completionTokens = 0;
     let reasoningTokens = 0;
     let cost = 0;
-    let finalToolCalls: ToolCallSpec[] = [];
+    const finalToolCalls: ToolCallSpec[] = [];
+    const finalToolResults: ToolResultRecord[] = [];
 
     while (iteration < MAX_TOOL_ITERATIONS) {
       if (options.signal?.aborted) {
@@ -405,15 +407,17 @@ export class CouncilExecutor {
             options.userId
           );
 
+          const output = result.output ?? '';
           messages.push({
             role: 'tool',
             tool_call_id: tc.id,
-            content: result.output,
+            content: output,
           });
+          finalToolResults.push({ id: tc.id, content: output });
         }
 
         console.log(`      ✅ Tools completed for ${modelId.split('/').pop()}, continuing conversation...`);
-        finalToolCalls = [...finalToolCalls, ...toolCallsArray];
+        finalToolCalls.push(...toolCallsArray);
         iteration++;
         continue;
       }
@@ -431,6 +435,7 @@ export class CouncilExecutor {
       reasoningTokens,
       cost,
       toolCalls: finalToolCalls.length > 0 ? finalToolCalls : undefined,
+      toolResults: finalToolResults.length > 0 ? finalToolResults : undefined,
     };
   }
 

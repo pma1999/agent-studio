@@ -140,6 +140,12 @@ export interface ToolCallSpec {
   function: { name: string; arguments: string };
 }
 
+/** Tool result for council member responses (id = tool_call_id). */
+export interface ToolResultRecord {
+  id: string;
+  content: string;
+}
+
 export type ToolSource = 'builtin' | 'http' | 'mcp' | 'unknown';
 
 export type ToolExecutionStatus = 'running' | 'done' | 'error';
@@ -296,6 +302,7 @@ export interface CouncilResponse {
   error_message?: string;
   display_order: number;
   tool_calls?: ToolCallSpec[];
+  tool_results?: ToolResultRecord[];
   created_at: string;
 }
 

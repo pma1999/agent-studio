@@ -27,6 +27,12 @@ export interface CouncilConfig {
   mcp_server_ids?: string[];
 }
 
+/** Tool result stored per council member response (id = tool_call_id). */
+export interface ToolResultRecord {
+  id: string;
+  content: string;
+}
+
 export interface MemberResult {
   modelId: string;
   content: string;
@@ -40,6 +46,8 @@ export interface MemberResult {
   status: 'success' | 'error' | 'timeout';
   errorMessage?: string;
   toolCalls?: ToolCallSpec[];
+  /** Results for each tool call (same order as toolCalls, keyed by id). */
+  toolResults?: ToolResultRecord[];
 }
 
 export interface SynthesisResult {
@@ -164,5 +172,7 @@ export interface CouncilResponse {
   error_message?: string;
   display_order: number;
   tool_calls?: ToolCallSpec[];
+  /** Parsed from DB JSON; maps tool_call_id to result content. */
+  tool_results?: ToolResultRecord[];
   created_at: string;
 }

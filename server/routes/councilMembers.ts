@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { nanoid } from 'nanoid';
 import db from '../db.js';
 import { AuthRequest } from '../middleware/auth.js';
-import type { CouncilMember, CouncilRun, CouncilResponse, CouncilRunDetail } from '../types.js';
+import type { CouncilMember, CouncilRun, CouncilResponse, CouncilRunDetail, ToolResultRecord } from '../types.js';
 
 const router = Router();
 
@@ -103,11 +103,39 @@ router.get('/runs/:id', (req: AuthRequest, res: Response) => {
       return;
     }
 
-    const responses = db.prepare(`
+    const rawResponses = db.prepare(`
       SELECT * FROM council_responses
       WHERE council_run_id = ?
       ORDER BY display_order ASC
-    `).all(id) as CouncilResponse[];
+    `).all(id) as Array<CouncilResponse & {
+      tool_calls?: string | CouncilResponse['tool_calls'];
+      tool_results?: string;
+    }>;
+    const responses: CouncilResponse[] = rawResponses.map((r) => {
+      const { tool_calls: rawTc, tool_results: rawTr, ...rest } = r;
+      let tool_calls: CouncilResponse['tool_calls'];
+      if (Array.isArray(rawTc)) {
+        tool_calls = rawTc;
+      } else if (typeof rawTc === 'string' && rawTc.trim()) {
+        try {
+          tool_calls = JSON.parse(rawTc) as CouncilResponse['tool_calls'];
+        } catch {
+          tool_calls = undefined;
+        }
+      } else {
+        tool_calls = undefined;
+      }
+      let tool_results: ToolResultRecord[] | undefined;
+      if (typeof rawTr === 'string' && rawTr.trim()) {
+        try {
+          const parsed = JSON.parse(rawTr) as unknown;
+          tool_results = Array.isArray(parsed) ? parsed : undefined;
+        } catch {
+          tool_results = undefined;
+        }
+      }
+      return { ...rest, tool_calls, tool_results };
+    });
 
     const { show_member_responses: rawShow } = run as { show_member_responses?: number };
     const result: CouncilRunDetail = {

@@ -395,8 +395,8 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
           INSERT INTO council_responses (
             id, council_run_id, model_id, content, reasoning_content,
             tokens_used, prompt_tokens, completion_tokens, reasoning_tokens, cached_tokens,
-            cost, response_time_ms, status, error_message, display_order, tool_calls
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            cost, response_time_ms, status, error_message, display_order, tool_calls, tool_results
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           responseId,
           councilRunId,
@@ -413,7 +413,8 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
           memberResult.status,
           memberResult.errorMessage || null,
           index,
-          memberResult.toolCalls ? JSON.stringify(memberResult.toolCalls) : null
+          memberResult.toolCalls ? JSON.stringify(memberResult.toolCalls) : null,
+          memberResult.toolResults?.length ? JSON.stringify(memberResult.toolResults) : null
         );
 
         if (!clientDisconnected) {

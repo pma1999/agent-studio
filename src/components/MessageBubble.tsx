@@ -590,10 +590,10 @@ export function MessageBubble({
             )}
           </>
         ) : (
-          <>
-            {/* Ordered stream activity: reasoning/tool in real execution order */}
+          <div className="message-bubble-body" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            {/* Chat-like order: reasoning → tool calls → answer */}
             {hasOrderedStreamingEvents ? (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
                 {orderedStreamingEvents.map((ev) => (
                   ev.type === 'reasoning' ? (
                     <ReasoningBlock
@@ -619,7 +619,6 @@ export function MessageBubble({
               </div>
             ) : (
               <>
-                {/* Reasoning / Thinking block */}
                 {reasoningText && (
                   <ReasoningBlock
                     content={reasoningText}
@@ -632,6 +631,7 @@ export function MessageBubble({
                   <ToolCallTimeline
                     calls={toolExecutions}
                     isStreaming={!!toolActivityLive}
+                    showHeader={true}
                   />
                 )}
               </>
@@ -700,7 +700,7 @@ export function MessageBubble({
             {!isUser && !isStreaming && (
               <MessageTokenPills message={message} />
             )}
-          </>
+          </div>
         )}
       </div>
     </motion.div>

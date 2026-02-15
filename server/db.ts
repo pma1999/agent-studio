@@ -572,6 +572,12 @@ function migrateCouncilTables() {
     CREATE INDEX IF NOT EXISTS idx_council_responses_status ON council_responses(status);
   `);
 
+  // Council responses: store tool results (JSON array of { id, content }) for display like normal chat
+  const councilRespCols = db.prepare("PRAGMA table_info(council_responses)").all() as { name: string }[];
+  if (!councilRespCols.some((c) => c.name === 'tool_results')) {
+    db.exec("ALTER TABLE council_responses ADD COLUMN tool_results TEXT DEFAULT NULL");
+  }
+
   // Add council columns to messages table
   const msgCols = db.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
   if (!msgCols.some((c) => c.name === 'council_run_id')) {

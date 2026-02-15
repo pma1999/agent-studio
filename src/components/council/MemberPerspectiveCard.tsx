@@ -1,10 +1,71 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ChevronDown, CheckCircle2, XCircle, Clock, Brain, Terminal, Sparkles } from 'lucide-react';
 import { ModelAvatar, getModelDisplayName, getProviderName } from './ModelAvatar';
 import { CostBadge } from './CostBadge';
 import { MarkdownContent } from '../MarkdownContent';
-import type { CouncilResponse } from '../../types';
+import { ToolCallTimeline } from '../ToolCallTimeline';
+import type { CouncilResponse, ToolExecution, ToolSource, ToolCallSpec, ToolResultRecord } from '../../types';
+
+function inferToolSource(name: string): ToolSource {
+  if (name.startsWith('mcp_')) return 'mcp';
+  if (name === 'web_search' || name === 'get_current_time') return 'builtin';
+  if (name.startsWith('http_') || name.includes('_http')) return 'http';
+  return 'unknown';
+}
+
+/** Normalize tool_calls from API (array or JSON string) to ToolCallSpec[]. */
+function normalizeToolCalls(raw: CouncilResponse['tool_calls']): ToolCallSpec[] {
+  if (Array.isArray(raw) && raw.length > 0) return raw;
+  if (typeof raw === 'string' && raw.trim()) {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+/** Normalize tool_results from API to Map<id, content>. */
+function normalizeToolResults(raw: CouncilResponse['tool_results']): Map<string, string> {
+  const map = new Map<string, string>();
+  if (!Array.isArray(raw) || raw.length === 0) return map;
+  for (const r of raw as ToolResultRecord[]) {
+    if (r?.id != null && typeof r.content === 'string') map.set(r.id, r.content);
+  }
+  return map;
+}
+
+/**
+ * Build ToolExecution[] for council member response (same shape as chat).
+ * Uses stored tool_results when available; legacy runs show a short fallback.
+ */
+function buildCouncilToolExecutions(
+  tool_calls: CouncilResponse['tool_calls'],
+  tool_results: CouncilResponse['tool_results']
+): ToolExecution[] {
+  const specs = normalizeToolCalls(tool_calls);
+  if (specs.length === 0) return [];
+  const resultsById = normalizeToolResults(tool_results);
+  const legacyFallback = 'Result was used by the model (not stored in this run).';
+
+  return specs.map((tc) => {
+    const name = tc.function?.name || tc.id;
+    const stored = resultsById.get(tc.id);
+    const hasStoredResult = stored !== undefined && stored !== '';
+    return {
+      id: tc.id,
+      name,
+      arguments: tc.function?.arguments || '{}',
+      status: 'done' as const,
+      result: hasStoredResult ? stored : legacyFallback,
+      ok: true,
+      source: inferToolSource(name),
+    };
+  });
+}
 
 interface MemberPerspectiveCardProps {
   response: CouncilResponse;
@@ -19,6 +80,11 @@ export function MemberPerspectiveCard({
 }: MemberPerspectiveCardProps) {
   const [isExpanded, setIsExpanded] = useState(initialExpanded);
   const [showReasoning, setShowReasoning] = useState(false);
+
+  const toolExecutions = useMemo(
+    () => buildCouncilToolExecutions(response.tool_calls, response.tool_results),
+    [response.tool_calls, response.tool_results]
+  );
 
   const modelName = getModelDisplayName(response.model_id);
   const providerName = getProviderName(response.model_id);
@@ -314,6 +380,17 @@ export function MemberPerspectiveCard({
                       </motion.div>
                     )}
                   </AnimatePresence>
+                </div>
+              )}
+
+              {/* Tool calls (same chat-like order: reasoning → tools → answer) */}
+              {toolExecutions.length > 0 && (
+                <div style={{ marginBottom: '16px' }}>
+                  <ToolCallTimeline
+                    calls={toolExecutions}
+                    isStreaming={false}
+                    showHeader={true}
+                  />
                 </div>
               )}
 
