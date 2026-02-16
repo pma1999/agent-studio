@@ -339,7 +339,6 @@ export class CouncilExecutor {
 
     // Handle tool calling loop
     let iteration = 0;
-    const MAX_TOOL_ITERATIONS = 5;
     let fullContent = '';
     let fullReasoning = '';
     let totalTokens = 0;
@@ -350,7 +349,7 @@ export class CouncilExecutor {
     const finalToolCalls: ToolCallSpec[] = [];
     const finalToolResults: ToolResultRecord[] = [];
 
-    while (iteration < MAX_TOOL_ITERATIONS) {
+    while (true) {
       if (options.signal?.aborted) {
         throw new Error('Execution cancelled');
       }

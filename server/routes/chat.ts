@@ -10,7 +10,6 @@ import { AuthRequest } from '../middleware/auth.js';
 import { trackStream, untrackStream, isShuttingDown } from '../shutdown.js';
 
 const router = Router();
-const MAX_TOOL_ITERATIONS = 10;
 
 interface Agent {
   id: string;
@@ -577,7 +576,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     let iteration = 0;
     let lastFinishReason: string | null = null;
 
-    while (iteration < MAX_TOOL_ITERATIONS) {
+    while (true) {
       actualModelFromResponse = null;
       streamedAnnotations = null;
       requestBody.messages = messages;
@@ -841,11 +840,6 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       return;
     }
 
-    if (iteration >= MAX_TOOL_ITERATIONS) {
-      res.write(`data: ${JSON.stringify({ done: true, warning: 'Maximum tool iterations reached' })}\n\n`);
-      res.write('data: [DONE]\n\n');
-      res.end();
-    }
   } catch (err: unknown) {
     // AbortError is expected when client disconnects
     const errName = err instanceof Error ? err.name : '';
