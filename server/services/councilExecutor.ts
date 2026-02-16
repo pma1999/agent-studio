@@ -8,6 +8,7 @@ import type {
   ToolResultRecord,
 } from '../types.js';
 import { runTool, toOpenRouterTools } from '../tools/index.js';
+import { parseReasoningToolCalls } from '../utils/parseReasoningToolCalls.js';
 
 const MEMBER_TIMEOUT_MS = 240000; // 4 minutes per member
 const SYNTHESIS_TIMEOUT_MS = 240000; // 4 minutes for synthesis
@@ -449,10 +450,11 @@ export class CouncilExecutor {
         reader.cancel().catch(() => {});
       }
 
-      // Handle tool calls
+      // Tool calls: from delta (finish_reason === 'tool_calls') or parsed from reasoning (e.g. Kimi K2)
+      let toolCallsArray: ToolCallSpec[] = [];
       if (lastFinishReason === 'tool_calls' && resolvedTools.length > 0) {
         const indices = Object.keys(toolCallsByIndex).map(Number).sort((a, b) => a - b);
-        const toolCallsArray: ToolCallSpec[] = indices.map((idx) => ({
+        toolCallsArray = indices.map((idx) => ({
           id: toolCallsByIndex[idx].id || `call_${nanoid()}`,
           type: (toolCallsByIndex[idx].type || 'function') as 'function',
           function: {
@@ -460,13 +462,20 @@ export class CouncilExecutor {
             arguments: toolCallsByIndex[idx].function?.arguments || '{}',
           },
         })).filter((tc) => tc.function.name);
+      } else if (fullReasoning.trim() && resolvedTools.length > 0) {
+        const fromReasoning = parseReasoningToolCalls(fullReasoning);
+        if (fromReasoning.length > 0) {
+          toolCallsArray = fromReasoning;
+          console.log(`      📋 Tool calls parsed from reasoning for ${modelId.split('/').pop()}:`, toolCallsArray.map((t) => t.function.name).join(', '));
+        }
+      }
 
-        if (toolCallsArray.length === 0) break;
-
+      if (toolCallsArray.length > 0) {
         messages.push({
           role: 'assistant',
           content: fullContent || null,
           tool_calls: toolCallsArray,
+          ...(fullReasoning.trim() ? { reasoning: fullReasoning } : {}),
         });
 
         // Execute tools
@@ -655,17 +664,7 @@ export class CouncilExecutor {
 
     console.log(`   ✅ Synthesis Complete: ${totalTokens.toLocaleString()} tokens | $${(cost || 0).toFixed(4)} | ${(responseTimeMs / 1000).toFixed(1)}s`);
 
-    // Extract structured comparison (agreements, disagreements, unique findings) via structured output
-    let comparisonJson: string | null = null;
-    try {
-      comparisonJson = await this.extractComparison(successfulResults, fullContent, options.content, synthesizerModel, options.signal);
-      if (comparisonJson) {
-        console.log(`   📊 Comparison extraction OK (${comparisonJson.length} chars)`);
-      }
-    } catch (err) {
-      console.log(`   ⚠️ Comparison extraction skipped: ${err instanceof Error ? err.message : String(err)}`);
-    }
-
+    // Comparison extraction runs in the route after sending council_complete, so the client is not blocked
     return {
       content: fullContent,
       reasoningContent: fullReasoning || undefined,
@@ -674,7 +673,6 @@ export class CouncilExecutor {
       completionTokens,
       cost,
       responseTimeMs,
-      comparisonJson: comparisonJson ?? undefined,
     };
   }
 
@@ -751,8 +749,9 @@ export class CouncilExecutor {
   /**
    * Call OpenRouter with response_format json_schema to get structured comparison.
    * On invalid/truncated JSON, retries once with a repair prompt. Returns raw JSON string or null on failure (graceful degradation).
+   * Public so the route can run it in the background after sending council_complete.
    */
-  private async extractComparison(
+  async extractComparison(
     memberResults: MemberResult[],
     synthesisContent: string,
     userQuery: string,

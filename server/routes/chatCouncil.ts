@@ -468,7 +468,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       councilRunId
     );
 
-    // Update council run (including structured comparison if extracted)
+    // Update council run (comparison_json filled in background after completion event)
     const successfulCount = result.memberResults.filter((r) => r.status === 'success').length;
     const failedCount = result.memberResults.length - successfulCount;
     db.prepare(`
@@ -480,8 +480,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         total_tokens = ?,
         total_prompt_tokens = ?,
         total_completion_tokens = ?,
-        failed_members = ?,
-        comparison_json = ?
+        failed_members = ?
       WHERE id = ?
     `).run(
       assistantMsgId,
@@ -491,11 +490,10 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       result.memberResults.reduce((sum, r) => sum + r.promptTokens, 0),
       result.memberResults.reduce((sum, r) => sum + r.completionTokens, 0),
       failedCount,
-      result.synthesis.comparisonJson ?? null,
       councilRunId
     );
 
-    // Send completion event
+    // Send completion event so the client stops "synthesis in progress" immediately
     if (!clientDisconnected) {
       res.write(`data: ${JSON.stringify({
         type: 'council_complete',
@@ -510,6 +508,21 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     }
 
     res.end();
+
+    // Run comparison extraction in background; update council_run when done so next load shows tables
+    const successfulResults = result.memberResults.filter((r) => r.status === 'success' && r.content);
+    if (successfulResults.length > 0) {
+      executor.extractComparison(successfulResults, result.synthesis.content, content, synthesizerModel, undefined)
+        .then((comparisonJson) => {
+          if (comparisonJson) {
+            db.prepare('UPDATE council_runs SET comparison_json = ? WHERE id = ?').run(comparisonJson, councilRunId);
+            console.log(`   📊 Comparison extraction (background) OK`);
+          }
+        })
+        .catch((err) => {
+          console.log(`   ⚠️ Comparison extraction (background) skipped: ${err instanceof Error ? err.message : String(err)}`);
+        });
+    }
   } catch (err: unknown) {
     const errName = err instanceof Error ? err.name : '';
     if (errName === 'AbortError') {

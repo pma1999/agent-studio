@@ -4,6 +4,7 @@ import db from '../db.js';
 import { getSettingValue } from './settings.js';
 import { resolveToolsForAgent, resolveToolsFromIds, toOpenRouterTools, runTool, appendToolInstructionsIfNeeded } from '../tools/index.js';
 import { annotationsFromWebSearchResults } from '../tools/registry.js';
+import { parseReasoningToolCalls } from '../utils/parseReasoningToolCalls.js';
 import type { McpConnection } from '../mcp/index.js';
 import { AuthRequest } from '../middleware/auth.js';
 import { trackStream, untrackStream, isShuttingDown } from '../shutdown.js';
@@ -254,13 +255,13 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       db.prepare("UPDATE conversations SET updated_at = datetime('now') WHERE id = ? AND user_id = ?").run(conversation_id, userId);
     }
 
-    // Build messages array (include tool_calls, tool role, and annotations for assistant → skip re-parse PDFs)
+    // Build messages array (include tool_calls, tool role, annotations, reasoning for assistant → skip re-parse PDFs)
     const historyRows = db.prepare(`
-      SELECT role, content, tool_call_id, tool_calls, annotations
+      SELECT role, content, tool_call_id, tool_calls, annotations, reasoning_content
       FROM messages
       WHERE conversation_id = ?
       ORDER BY created_at ASC
-    `).all(conversation_id) as { role: string; content: string; tool_call_id: string | null; tool_calls: string | null; annotations: string | null }[];
+    `).all(conversation_id) as { role: string; content: string; tool_call_id: string | null; tool_calls: string | null; annotations: string | null; reasoning_content: string | null }[];
 
     const history = historyRows.map((row) => {
       if (row.role === 'tool') {
@@ -269,12 +270,13 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       if (row.role === 'assistant') {
         const tool_calls = row.tool_calls ? (JSON.parse(row.tool_calls) as { id: string; type: string; function: { name: string; arguments: string } }[]) : undefined;
         const annotations = row.annotations ? (JSON.parse(row.annotations) as unknown[]) : undefined;
-        const out: { role: 'assistant'; content: string | null; tool_calls?: unknown[]; annotations?: unknown[] } = {
+        const out: { role: 'assistant'; content: string | null; tool_calls?: unknown[]; annotations?: unknown[]; reasoning?: string } = {
           role: 'assistant',
           content: row.content || null,
         };
         if (tool_calls?.length) out.tool_calls = tool_calls;
         if (annotations?.length) out.annotations = annotations;
+        if (row.reasoning_content?.trim()) out.reasoning = row.reasoning_content;
         return out;
       }
       return { role: row.role as 'user' | 'assistant', content: row.content };
@@ -730,9 +732,11 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
 
       const finishReason = lastFinishReason;
 
+      // Tool calls: from delta (finish_reason === 'tool_calls') or parsed from reasoning (e.g. Kimi K2)
+      let toolCallsArray: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }> = [];
       if (finishReason === 'tool_calls' && resolvedTools.length > 0) {
         const indices = Object.keys(toolCallsByIndex).map(Number).sort((a, b) => a - b);
-        const toolCallsArray = indices.map((idx) => {
+        toolCallsArray = indices.map((idx) => {
           const t = toolCallsByIndex[idx];
           return {
             id: t?.id || `call_${nanoid()}`,
@@ -743,16 +747,26 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
             },
           };
         }).filter((tc) => tc.function.name);
-
-        if (toolCallsArray.length === 0) {
-          console.log('[chat] finish_reason tool_calls but no valid tool_calls collected');
-          break;
+      } else if (fullReasoning.trim() && resolvedTools.length > 0) {
+        const fromReasoning = parseReasoningToolCalls(fullReasoning);
+        if (fromReasoning.length > 0) {
+          toolCallsArray = fromReasoning.map((tc) => ({
+            id: tc.id,
+            type: 'function' as const,
+            function: { name: tc.function.name, arguments: tc.function.arguments },
+          }));
+          if (toolCallsArray.length > 0) {
+            console.log('[chat] tool calls parsed from reasoning:', toolCallsArray.map((t) => t.function.name).join(', '));
+          }
         }
+      }
 
+      if (toolCallsArray.length > 0) {
         messages.push({
           role: 'assistant',
           content: fullContent || null,
           tool_calls: toolCallsArray,
+          ...(fullReasoning.trim() ? { reasoning: fullReasoning } : {}),
         });
 
         saveAssistantMessage(fullContent, fullReasoning, JSON.stringify(toolCallsArray), []);
