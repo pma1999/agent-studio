@@ -4,7 +4,7 @@
  */
 
 import { runWebSearch, type WebSearchResult, type BraveSearchOptions } from './webSearch.js';
-import { fetchWithJinaReader, type JinaReaderOptions, type JinaRespondWith, type JinaRetainImages, type JinaRetainLinks, type JinaRespondTiming, type JinaEngine } from './jinaReader.js';
+import { runWebFetch } from './webFetch.js';
 import { getSettingValue } from '../routes/settings.js';
 
 export type ToolExecutor = (args: Record<string, unknown>, config?: unknown, userId?: string) => Promise<string>;
@@ -135,53 +135,11 @@ const executors: Record<string, ToolExecutor> = {
   },
 
   async web_fetch(args: Record<string, unknown>, _config?: unknown, userId?: string): Promise<string> {
-    const url = typeof args.url === 'string' ? args.url.trim() : '';
-    if (!url) {
-      return JSON.stringify({ error: 'url is required' });
-    }
-
-    const opt: JinaReaderOptions = {
-      url,
-      apiKey: userId ? getSettingValue(userId, 'jina_api_key') : undefined,
-    };
-
-    const respondWith = args.respond_with;
-    if (typeof respondWith === 'string' && ['content', 'markdown', 'html', 'text', 'pageshot', 'screenshot', 'vlm', 'readerlm-v2'].includes(respondWith)) {
-      opt.respondWith = respondWith as JinaRespondWith;
-    } else {
-      opt.respondWith = 'markdown';
-    }
-
-    if (typeof args.timeout_seconds === 'number' && args.timeout_seconds >= 1 && args.timeout_seconds <= 180) {
-      opt.timeout = args.timeout_seconds;
-    }
-    if (args.no_cache === true) opt.noCache = true;
-    if (typeof args.wait_for_selector === 'string' && args.wait_for_selector.trim()) opt.waitForSelector = args.wait_for_selector.trim();
-    if (typeof args.target_selector === 'string' && args.target_selector.trim()) opt.targetSelector = args.target_selector.trim();
-    if (typeof args.remove_selector === 'string' && args.remove_selector.trim()) opt.removeSelector = args.remove_selector.trim();
-    if (typeof args.user_agent === 'string' && args.user_agent.trim()) opt.userAgent = args.user_agent.trim();
-    if (typeof args.referer === 'string' && args.referer.trim()) opt.referer = args.referer.trim();
-    if (typeof args.locale === 'string' && args.locale.trim()) opt.locale = args.locale.trim();
-    if (typeof args.retain_images === 'string' && ['none', 'all', 'alt', 'all_p', 'alt_p'].includes(args.retain_images)) {
-      opt.retainImages = args.retain_images as JinaRetainImages;
-    }
-    if (typeof args.retain_links === 'string' && ['none', 'all', 'text', 'gpt-oss'].includes(args.retain_links)) {
-      opt.retainLinks = args.retain_links as JinaRetainLinks;
-    }
-    if (args.with_links_summary === true) opt.withLinksSummary = true;
-    if (args.with_images_summary === true) opt.withImagesSummary = true;
-    if (typeof args.respond_timing === 'string' && ['html', 'visible-content', 'mutation-idle', 'resource-idle', 'media-idle', 'network-idle'].includes(args.respond_timing)) {
-      opt.respondTiming = args.respond_timing as JinaRespondTiming;
-    }
-    if (typeof args.engine === 'string' && ['browser', 'direct', 'cf-browser-rendering'].includes(args.engine)) {
-      opt.engine = args.engine as JinaEngine;
-    }
-
-    const result = await fetchWithJinaReader(opt);
+    const result = await runWebFetch(args, userId);
     if (result.error) {
-      return JSON.stringify({ error: result.error, url: opt.url });
+      return JSON.stringify({ error: result.error, url: result.url });
     }
-    return JSON.stringify({ content: result.data ?? '', url: opt.url });
+    return JSON.stringify({ content: result.content, url: result.url, truncated: result.truncated });
   },
 };
 

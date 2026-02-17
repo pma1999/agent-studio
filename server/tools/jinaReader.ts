@@ -8,6 +8,8 @@ const JINA_READER_BASE = 'https://r.jina.ai/';
 const DEFAULT_TIMEOUT_MS = 45_000;
 const MIN_TIMEOUT_S = 1;
 const MAX_TIMEOUT_S = 180;
+const MAX_RETRIES = 2;
+const INITIAL_BACKOFF_MS = 1_000;
 
 /** Response format from Jina (CrawlerOptions.respondWith). */
 export type JinaRespondWith =
@@ -216,8 +218,32 @@ export function buildJinaReaderRequest(options: JinaReaderOptions): {
   return { url, headers };
 }
 
+function isRetryable(status: number, errMsg: string): boolean {
+  if (status >= 500 && status < 600) return true;
+  if (status === 429) return true;
+  if (errMsg.includes('timeout') || errMsg.includes('abort') || errMsg.includes('ECONNRESET') || errMsg.includes('fetch')) return true;
+  return false;
+}
+
 /**
- * Fetches the given URL via Jina Reader and returns the extracted content or an error.
+ * Single attempt: fetch and parse. Caller handles retries.
+ */
+async function fetchOnce(
+  url: string,
+  headers: Record<string, string>,
+  timeoutMs: number
+): Promise<{ res: Response; text: string }> {
+  const res = await fetch(url, {
+    method: 'GET',
+    headers,
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const text = await res.text();
+  return { res, text };
+}
+
+/**
+ * Fetches the given URL via Jina Reader with retries (5xx, 429, timeouts). Returns extracted content or an error.
  */
 export async function fetchWithJinaReader(options: JinaReaderOptions): Promise<JinaReaderResponse> {
   const validated = validateUrl(options.url);
@@ -229,48 +255,65 @@ export async function fetchWithJinaReader(options: JinaReaderOptions): Promise<J
   const timeoutSec = options.timeout !== undefined ? clampTimeout(options.timeout) : Math.floor(DEFAULT_TIMEOUT_MS / 1000);
   const timeoutMs = Math.min(timeoutSec * 1000, DEFAULT_TIMEOUT_MS + 5000);
 
-  try {
-    const res = await fetch(url, {
-      method: 'GET',
-      headers,
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-
-    const text = await res.text();
-    let body: { code?: number; status?: number; data?: string; meta?: unknown; message?: string };
+  let lastError: JinaReaderResponse = { error: 'Unknown error' };
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      body = JSON.parse(text) as typeof body;
-    } catch {
-      if (!res.ok) {
-        return { error: `Jina Reader error (${res.status}): ${text.slice(0, 300)}` };
+      const { res, text } = await fetchOnce(url, headers, timeoutMs);
+      let body: { code?: number; status?: number; data?: string; meta?: unknown; message?: string };
+      try {
+        body = JSON.parse(text) as typeof body;
+      } catch {
+        if (!res.ok) {
+          lastError = { error: `Jina Reader error (${res.status}): ${text.slice(0, 300)}` };
+          if (isRetryable(res.status, text) && attempt < MAX_RETRIES) {
+            await new Promise((r) => setTimeout(r, INITIAL_BACKOFF_MS * Math.pow(2, attempt)));
+            continue;
+          }
+          return lastError;
+        }
+        return { error: 'Invalid JSON response from Jina Reader' };
       }
-      return { error: 'Invalid JSON response from Jina Reader' };
-    }
 
-    if (!res.ok) {
-      const msg = body?.message ?? text?.slice(0, 200) ?? res.statusText;
-      return { error: `Jina Reader error (${res.status}): ${msg}` };
-    }
+      if (!res.ok) {
+        const msg = body?.message ?? text?.slice(0, 200) ?? res.statusText;
+        lastError = { error: `Jina Reader error (${res.status}): ${msg}` };
+        if (isRetryable(res.status, msg) && attempt < MAX_RETRIES) {
+          await new Promise((r) => setTimeout(r, INITIAL_BACKOFF_MS * Math.pow(2, attempt)));
+          continue;
+        }
+        return lastError;
+      }
 
-    if (body?.code !== 200 && body?.code !== undefined) {
+      if (body?.code !== 200 && body?.code !== undefined) {
+        lastError = {
+          error: body?.message ?? `Jina returned code ${body?.code}`,
+          code: body?.code,
+          status: body?.status,
+        };
+        if (attempt < MAX_RETRIES) {
+          await new Promise((r) => setTimeout(r, INITIAL_BACKOFF_MS * Math.pow(2, attempt)));
+          continue;
+        }
+        return lastError;
+      }
+
       return {
-        error: body?.message ?? `Jina returned code ${body?.code}`,
+        data: typeof body?.data === 'string' ? body.data : '',
         code: body?.code,
         status: body?.status,
+        meta: body?.meta,
       };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      lastError = {
+        error: msg.includes('abort') || msg.includes('timeout') ? `Request timed out after ${timeoutSec}s` : `Request failed: ${msg}`,
+      };
+      if (isRetryable(0, msg) && attempt < MAX_RETRIES) {
+        await new Promise((r) => setTimeout(r, INITIAL_BACKOFF_MS * Math.pow(2, attempt)));
+        continue;
+      }
+      return lastError;
     }
-
-    return {
-      data: typeof body?.data === 'string' ? body.data : '',
-      code: body?.code,
-      status: body?.status,
-      meta: body?.meta,
-    };
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    if (msg.includes('abort') || msg.includes('timeout')) {
-      return { error: `Request timed out after ${timeoutSec}s` };
-    }
-    return { error: `Request failed: ${msg}` };
   }
+  return lastError;
 }

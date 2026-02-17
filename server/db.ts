@@ -504,7 +504,9 @@ export function migrate() {
     }
   }
 
-  // Reassign any data still under default user (local@localhost) to the admin (e.g. after restoring a local DB)
+  // Reassign any data still under default user (local@localhost) to the admin (e.g. after restoring a local DB).
+  // IMPORTANT: Only update tools that would not duplicate (user_id, name). Admin may already have web_fetch
+  // from a previous migration run; moving (defaultUserId, 'web_fetch') would then violate UNIQUE(user_id, name).
   if (existingAdmin && defaultUserId && existingAdmin.id !== defaultUserId) {
     db.transaction(() => {
       db.prepare('UPDATE agents SET user_id = ? WHERE user_id = ?').run(existingAdmin.id, defaultUserId);
@@ -515,7 +517,6 @@ export function migrate() {
         ON CONFLICT(user_id, key) DO NOTHING
       `).run(existingAdmin.id, defaultUserId);
       db.prepare('DELETE FROM settings WHERE user_id = ?').run(defaultUserId);
-      // Only move tools that would not duplicate (user_id, name) — admin may already have web_fetch etc.
       db.prepare(`
         UPDATE tools SET user_id = ? WHERE user_id = ? AND name NOT IN (SELECT name FROM tools WHERE user_id = ?)
       `).run(existingAdmin.id, defaultUserId, existingAdmin.id);
@@ -554,7 +555,10 @@ export function migrate() {
     }
   }
 
-  // Migration: ensure every user has web_fetch builtin (runs after admin reassign so no UNIQUE conflict)
+  // Migration: ensure every user has web_fetch builtin.
+  // ORDER: Must run after the reassign blocks above. Reassign moves default user's tools to admin; if we ran
+  // web_fetch insert first we would insert (admin, 'web_fetch'), then reassign would try to create a second
+  // (admin, 'web_fetch') from (defaultUserId, 'web_fetch') → UNIQUE violation.
   const webFetchDesc = 'Fetch the main content of a web page as markdown or text via Jina Reader. Use when the user provides a URL to read, summarize, or analyze.';
   const webFetchSchema = {
     type: 'object',
