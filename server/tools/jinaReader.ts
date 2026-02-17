@@ -167,13 +167,16 @@ function clampTimeout(seconds: number): number {
 
 /**
  * Builds the request URL and headers for the Jina Reader API.
+ * Jina expects the target URL in the path: https://r.jina.ai/{encoded_target_url}
+ * with other options as query params. Using the path form avoids "Invalid URL" 400s
+ * for URLs that contain query strings.
  */
 export function buildJinaReaderRequest(options: JinaReaderOptions): {
   url: string;
   headers: Record<string, string>;
 } {
   const params = new URLSearchParams();
-  params.set('url', options.url);
+  // Do not put url in query; Jina uses path-based URL and parses it strictly.
 
   if (options.respondWith) params.set('respondWith', options.respondWith);
   if (options.base) params.set('base', options.base);
@@ -206,7 +209,10 @@ export function buildJinaReaderRequest(options: JinaReaderOptions): {
   const remove = toArray(options.removeSelector);
   if (remove?.length) params.set('removeSelector', remove.join(','));
 
-  const url = `${JINA_READER_BASE}?${params.toString()}`;
+  // Path-based URL: r.jina.ai/{encoded_target_url} — avoids 400 Invalid URL for URLs with query strings
+  const encodedTarget = encodeURIComponent(options.url);
+  const query = params.toString();
+  const url = query ? `${JINA_READER_BASE}${encodedTarget}?${query}` : `${JINA_READER_BASE}${encodedTarget}`;
 
   const headers: Record<string, string> = {
     Accept: 'application/json',
