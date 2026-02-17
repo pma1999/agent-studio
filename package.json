@@ -13,7 +13,8 @@
     "start": "node dist/server/index.js",
     "preview": "vite preview",
     "db:restore": "node scripts/restore-db-from-stdin.mjs",
-    "db:migrate-local": "node scripts/migrate-local-db.mjs"
+    "db:migrate-local": "node scripts/migrate-local-db.mjs",
+    "test:web-fetch": "node scripts/test-web-fetch.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",

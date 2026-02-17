@@ -209,8 +209,15 @@ export function buildJinaReaderRequest(options: JinaReaderOptions): {
   const remove = toArray(options.removeSelector);
   if (remove?.length) params.set('removeSelector', remove.join(','));
 
-  // Path-based URL: r.jina.ai/{encoded_target_url} — avoids 400 Invalid URL for URLs with query strings
-  const encodedTarget = encodeURIComponent(options.url);
+  // Path-based URL: r.jina.ai/{encoded_target_url}. Decode once first to avoid double-encoding
+  // (e.g. Revoluci%C3%B3n → decode → Revolución → encode → Revoluci%C3%B3n) so Jina gets the correct URL.
+  let targetForPath = options.url;
+  try {
+    targetForPath = decodeURIComponent(options.url);
+  } catch {
+    // leave as-is if decoding fails (malformed percent-encoding)
+  }
+  const encodedTarget = encodeURIComponent(targetForPath);
   const query = params.toString();
   const url = query ? `${JINA_READER_BASE}${encodedTarget}?${query}` : `${JINA_READER_BASE}${encodedTarget}`;
 
@@ -265,7 +272,13 @@ export async function fetchWithJinaReader(options: JinaReaderOptions): Promise<J
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
       const { res, text } = await fetchOnce(url, headers, timeoutMs);
-      let body: { code?: number; status?: number; data?: string; meta?: unknown; message?: string };
+      let body: {
+        code?: number;
+        status?: number;
+        data?: string | { content?: string; title?: string; url?: string; [k: string]: unknown };
+        meta?: unknown;
+        message?: string;
+      };
       try {
         body = JSON.parse(text) as typeof body;
       } catch {
@@ -303,8 +316,15 @@ export async function fetchWithJinaReader(options: JinaReaderOptions): Promise<J
         return lastError;
       }
 
+      // Jina can return data as string (legacy) or as object with .content (current envelope)
+      const content =
+        typeof body?.data === 'string'
+          ? body.data
+          : typeof body?.data === 'object' && body?.data !== null && typeof (body.data as { content?: string }).content === 'string'
+            ? (body.data as { content: string }).content
+            : '';
       return {
-        data: typeof body?.data === 'string' ? body.data : '',
+        data: content,
         code: body?.code,
         status: body?.status,
         meta: body?.meta,
