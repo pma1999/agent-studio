@@ -66,12 +66,14 @@ When the search provider is Brave you can use:
     type: 'function',
     function: {
       name: 'web_fetch',
-      description: `Fetch the main content of a web page as clean text or markdown via Jina Reader. Use when the user provides a URL to read, summarize, or analyze, or when you need to extract article/page content. Returns markdown or text suitable for LLMs.
-Optional: respond_with (content|markdown|html|text), timeout_seconds (1-180), no_cache, wait_for_selector, target_selector (extract only that element), remove_selector (strip elements), user_agent, referer, locale, retain_images (none|all|alt|all_p|alt_p), retain_links (none|all|text|gpt-oss), with_links_summary, with_images_summary, respond_timing (html|visible-content|mutation-idle|resource-idle|media-idle|network-idle), engine (browser|direct|cf-browser-rendering).`,
+      description: `Fetch the main content of a web page as clean text or markdown via Jina Reader. Use when the user provides a URL to read, summarize, or analyze. Supports pagination for long pages: use max_chars to control segment size and offset to get the next segment; the response includes outline (structure/headings), total_length, next_offset, and has_more so you can navigate. First call with url (and optional max_chars); if has_more is true, call again with the same url and max_chars and offset set to the returned next_offset.
+Optional: max_chars (1000-2000000, default 200000), offset (for pagination; use next_offset from previous response), respond_with (content|markdown|html|text), timeout_seconds (1-180), no_cache, wait_for_selector, target_selector, remove_selector, user_agent, referer, locale, retain_images, retain_links, with_links_summary, with_images_summary, respond_timing, engine (browser|direct|cf-browser-rendering).`,
       parameters: {
         type: 'object',
         properties: {
           url: { type: 'string', description: 'Full URL of the page to fetch (required)' },
+          max_chars: { type: 'number', description: 'Maximum characters to return per call (1000-2000000). Default 200000. Use with offset to paginate long pages.', default: 200000 },
+          offset: { type: 'number', description: 'Character offset for pagination. Use 0 or omit for first segment; then use the next_offset from the response for the next segment.', default: 0 },
           respond_with: { type: 'string', description: 'Output format: content, markdown, html, or text', default: 'markdown' },
           timeout_seconds: { type: 'number', description: 'Timeout in seconds (1-180)', default: 45 },
           no_cache: { type: 'boolean', description: 'Bypass cache' },
@@ -139,7 +141,17 @@ const executors: Record<string, ToolExecutor> = {
     if (result.error) {
       return JSON.stringify({ error: result.error, url: result.url });
     }
-    return JSON.stringify({ content: result.content, url: result.url, truncated: result.truncated });
+    return JSON.stringify({
+      content: result.content,
+      url: result.url,
+      truncated: result.truncated,
+      total_length: result.total_length,
+      offset: result.offset,
+      next_offset: result.next_offset,
+      has_more: result.has_more,
+      outline: result.outline,
+      navigation_hint: result.navigation_hint,
+    });
   },
 };
 
