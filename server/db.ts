@@ -283,6 +283,8 @@ export function migrate() {
       type: 'object',
       properties: {
         url: { type: 'string', description: 'Full URL of the page to fetch' },
+        max_chars: { type: 'number', description: 'Maximum characters to return per call (1000–2000000). Default 200000. Use with offset to paginate long pages.' },
+        offset: { type: 'number', description: 'Character offset for pagination. Use 0 or omit for first segment; then use the next_offset from the response for the next segment.' },
         respond_with: { type: 'string', description: 'Output format: content, markdown, html, or text', default: 'markdown' },
         timeout_seconds: { type: 'number', description: 'Timeout in seconds (1-180)', default: 45 },
         no_cache: { type: 'boolean', description: 'Bypass cache' },
@@ -564,6 +566,8 @@ export function migrate() {
     type: 'object',
     properties: {
       url: { type: 'string', description: 'Full URL of the page to fetch' },
+      max_chars: { type: 'number', description: 'Maximum characters to return per call (1000–2000000). Default 200000. Use with offset to paginate long pages.' },
+      offset: { type: 'number', description: 'Character offset for pagination. Use 0 or omit for first segment; then use the next_offset from the response for the next segment.' },
       respond_with: { type: 'string', description: 'Output format: content, markdown, html, or text', default: 'markdown' },
       timeout_seconds: { type: 'number', description: 'Timeout in seconds (1-180)', default: 45 },
       no_cache: { type: 'boolean', description: 'Bypass cache' },
@@ -593,6 +597,11 @@ export function migrate() {
     const { nanoid } = await_nanoid();
     insertWebFetchStmt.run(nanoid(), uid, webFetchDesc, JSON.stringify(webFetchSchema));
   }
+
+  // Migration: align existing web_fetch tools with pagination schema (max_chars, offset).
+  db.prepare(
+    `UPDATE tools SET parameters_schema = ? WHERE name = 'web_fetch' AND type = 'builtin'`
+  ).run(JSON.stringify(webFetchSchema));
 
   // --- Model Council migrations ---
   migrateCouncilTables();
