@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { CheckCircle, AlertCircle, ExternalLink, Zap, Coins, BarChart3, Loader2, Globe, KeyRound, Database, MessageSquare, Brain, Check, ChevronDown, Sparkles, Lightbulb, SlidersHorizontal, Wrench, Plug } from 'lucide-react';
+import { CheckCircle, AlertCircle, ExternalLink, Zap, Coins, BarChart3, Loader2, Globe, KeyRound, Database, MessageSquare, Brain, Check, ChevronDown, Sparkles, Lightbulb, SlidersHorizontal, Wrench, Plug, Link } from 'lucide-react';
 import { useStore } from '../stores/store';
 import { settingsApi, toolsApi, mcpServersApi } from '../api/client';
 import type { ReasoningEffort, Tool, McpServer } from '../types';
@@ -1333,12 +1333,15 @@ export function SettingsPanel() {
   const [searchApiKey, setSearchApiKey] = useState('');
   const [searchProvider, setSearchProvider] = useState('exa');
   const [searchSaving, setSearchSaving] = useState(false);
+  const [jinaApiKey, setJinaApiKey] = useState('');
+  const [jinaSaving, setJinaSaving] = useState(false);
 
   useEffect(() => {
     if (settingsOpen) {
       settingsApi.getAll().then((s) => {
         setSearchApiKey(s.search_api_key || '');
         setSearchProvider(s.search_provider || 'exa');
+        setJinaApiKey(s.jina_api_key || '');
       }).catch(() => {});
     }
   }, [settingsOpen]);
@@ -1350,6 +1353,15 @@ export function SettingsPanel() {
       await settingsApi.set('search_provider', searchProvider);
     } finally {
       setSearchSaving(false);
+    }
+  };
+
+  const saveJinaSettings = async () => {
+    setJinaSaving(true);
+    try {
+      await settingsApi.set('jina_api_key', jinaApiKey);
+    } finally {
+      setJinaSaving(false);
     }
   };
 
@@ -1427,6 +1439,38 @@ export function SettingsPanel() {
           </div>
           <Button variant="primary" onClick={saveSearchSettings} disabled={searchSaving}>
             {searchSaving ? 'Saving…' : 'Save search settings'}
+          </Button>
+        </div>
+
+        {/* Web Fetch (Jina Reader) */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <div style={{
+              width: '28px', height: '28px', borderRadius: 'var(--radius-sm)',
+              background: 'rgba(34, 197, 94, 0.15)', border: '1px solid rgba(34, 197, 94, 0.3)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgb(34, 197, 94)',
+            }}>
+              <Link size={15} />
+            </div>
+            <h4 style={{ fontFamily: 'var(--font-display)', fontSize: '1rem', fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>
+              Web Fetch (Jina Reader)
+            </h4>
+          </div>
+          <p style={{ fontSize: '0.8125rem', color: 'var(--text-muted)', margin: 0 }}>
+            When agents use the web_fetch tool, URLs are converted to markdown/text via Jina Reader. Optional: set a Jina API key for higher rate limits.
+          </p>
+          <div style={{ flex: '1 1 200px' }}>
+            <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '4px' }}>Jina API Key</label>
+            <Input
+              type="password"
+              value={jinaApiKey}
+              onChange={(e) => setJinaApiKey(e.target.value)}
+              placeholder="Optional — leave blank for default limits"
+              style={{ width: '100%' }}
+            />
+          </div>
+          <Button variant="primary" onClick={saveJinaSettings} disabled={jinaSaving}>
+            {jinaSaving ? 'Saving…' : 'Save Jina settings'}
           </Button>
         </div>
 

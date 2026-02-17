@@ -42,7 +42,7 @@ function prettifyToolName(name: string): string {
 
 function sourceLabel(source: ToolSource | undefined, name: string): string {
   if (source === 'mcp' || name.startsWith('mcp_')) return 'MCP';
-  if (source === 'builtin' || name === 'web_search' || name === 'get_current_time') return 'Built-in';
+  if (source === 'builtin' || name === 'web_search' || name === 'get_current_time' || name === 'web_fetch') return 'Built-in';
   if (source === 'http') return 'HTTP';
   return 'Tool';
 }

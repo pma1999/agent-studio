@@ -4,6 +4,7 @@
  */
 
 import { runWebSearch, type WebSearchResult, type BraveSearchOptions } from './webSearch.js';
+import { fetchWithJinaReader, type JinaReaderOptions, type JinaRespondWith, type JinaRetainImages, type JinaRetainLinks, type JinaRespondTiming, type JinaEngine } from './jinaReader.js';
 import { getSettingValue } from '../routes/settings.js';
 
 export type ToolExecutor = (args: Record<string, unknown>, config?: unknown, userId?: string) => Promise<string>;
@@ -61,6 +62,36 @@ When the search provider is Brave you can use:
       },
     },
   },
+  web_fetch: {
+    type: 'function',
+    function: {
+      name: 'web_fetch',
+      description: `Fetch the main content of a web page as clean text or markdown via Jina Reader. Use when the user provides a URL to read, summarize, or analyze, or when you need to extract article/page content. Returns markdown or text suitable for LLMs.
+Optional: respond_with (content|markdown|html|text), timeout_seconds (1-180), no_cache, wait_for_selector, target_selector (extract only that element), remove_selector (strip elements), user_agent, referer, locale, retain_images (none|all|alt|all_p|alt_p), retain_links (none|all|text|gpt-oss), with_links_summary, with_images_summary, respond_timing (html|visible-content|mutation-idle|resource-idle|media-idle|network-idle), engine (browser|direct|cf-browser-rendering).`,
+      parameters: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: 'Full URL of the page to fetch (required)' },
+          respond_with: { type: 'string', description: 'Output format: content, markdown, html, or text', default: 'markdown' },
+          timeout_seconds: { type: 'number', description: 'Timeout in seconds (1-180)', default: 45 },
+          no_cache: { type: 'boolean', description: 'Bypass cache' },
+          wait_for_selector: { type: 'string', description: 'CSS selector to wait for before returning' },
+          target_selector: { type: 'string', description: 'CSS selector to extract only that part of the page' },
+          remove_selector: { type: 'string', description: 'CSS selector of elements to remove (e.g. nav, ads)' },
+          user_agent: { type: 'string', description: 'Custom User-Agent string' },
+          referer: { type: 'string', description: 'Referer header' },
+          locale: { type: 'string', description: 'Browser locale (e.g. en-US)' },
+          retain_images: { type: 'string', description: 'none, all, alt, all_p, or alt_p' },
+          retain_links: { type: 'string', description: 'none, all, text, or gpt-oss' },
+          with_links_summary: { type: 'boolean', description: 'Include a summary section for links' },
+          with_images_summary: { type: 'boolean', description: 'Include a summary section for images' },
+          respond_timing: { type: 'string', description: 'When to return: html, visible-content, mutation-idle, resource-idle, media-idle, network-idle' },
+          engine: { type: 'string', description: 'Crawl engine: browser, direct, or cf-browser-rendering' },
+        },
+        required: ['url'],
+      },
+    },
+  },
 };
 
 const executors: Record<string, ToolExecutor> = {
@@ -101,6 +132,56 @@ const executors: Record<string, ToolExecutor> = {
 
   async get_current_time(_args?: Record<string, unknown>, _config?: unknown, _userId?: string): Promise<string> {
     return JSON.stringify({ iso: new Date().toISOString() });
+  },
+
+  async web_fetch(args: Record<string, unknown>, _config?: unknown, userId?: string): Promise<string> {
+    const url = typeof args.url === 'string' ? args.url.trim() : '';
+    if (!url) {
+      return JSON.stringify({ error: 'url is required' });
+    }
+
+    const opt: JinaReaderOptions = {
+      url,
+      apiKey: userId ? getSettingValue(userId, 'jina_api_key') : undefined,
+    };
+
+    const respondWith = args.respond_with;
+    if (typeof respondWith === 'string' && ['content', 'markdown', 'html', 'text', 'pageshot', 'screenshot', 'vlm', 'readerlm-v2'].includes(respondWith)) {
+      opt.respondWith = respondWith as JinaRespondWith;
+    } else {
+      opt.respondWith = 'markdown';
+    }
+
+    if (typeof args.timeout_seconds === 'number' && args.timeout_seconds >= 1 && args.timeout_seconds <= 180) {
+      opt.timeout = args.timeout_seconds;
+    }
+    if (args.no_cache === true) opt.noCache = true;
+    if (typeof args.wait_for_selector === 'string' && args.wait_for_selector.trim()) opt.waitForSelector = args.wait_for_selector.trim();
+    if (typeof args.target_selector === 'string' && args.target_selector.trim()) opt.targetSelector = args.target_selector.trim();
+    if (typeof args.remove_selector === 'string' && args.remove_selector.trim()) opt.removeSelector = args.remove_selector.trim();
+    if (typeof args.user_agent === 'string' && args.user_agent.trim()) opt.userAgent = args.user_agent.trim();
+    if (typeof args.referer === 'string' && args.referer.trim()) opt.referer = args.referer.trim();
+    if (typeof args.locale === 'string' && args.locale.trim()) opt.locale = args.locale.trim();
+    if (typeof args.retain_images === 'string' && ['none', 'all', 'alt', 'all_p', 'alt_p'].includes(args.retain_images)) {
+      opt.retainImages = args.retain_images as JinaRetainImages;
+    }
+    if (typeof args.retain_links === 'string' && ['none', 'all', 'text', 'gpt-oss'].includes(args.retain_links)) {
+      opt.retainLinks = args.retain_links as JinaRetainLinks;
+    }
+    if (args.with_links_summary === true) opt.withLinksSummary = true;
+    if (args.with_images_summary === true) opt.withImagesSummary = true;
+    if (typeof args.respond_timing === 'string' && ['html', 'visible-content', 'mutation-idle', 'resource-idle', 'media-idle', 'network-idle'].includes(args.respond_timing)) {
+      opt.respondTiming = args.respond_timing as JinaRespondTiming;
+    }
+    if (typeof args.engine === 'string' && ['browser', 'direct', 'cf-browser-rendering'].includes(args.engine)) {
+      opt.engine = args.engine as JinaEngine;
+    }
+
+    const result = await fetchWithJinaReader(opt);
+    if (result.error) {
+      return JSON.stringify({ error: result.error, url: opt.url });
+    }
+    return JSON.stringify({ content: result.data ?? '', url: opt.url });
   },
 };
 

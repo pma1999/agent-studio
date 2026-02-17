@@ -67,6 +67,7 @@ function isUsable(t: ToolRow, userId: string): boolean {
       const key = userId ? getSettingValue(userId, 'search_api_key') : '';
       return !!key?.trim();
     }
+    if (t.name === 'web_fetch') return true;
     return true;
   }
   if (t.type === 'http') {

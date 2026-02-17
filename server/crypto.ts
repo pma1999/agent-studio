@@ -8,6 +8,7 @@ const KEY_LENGTH = 32;
 export const SENSITIVE_SETTINGS_KEYS = new Set([
   'openrouter_api_key',
   'search_api_key',
+  'jina_api_key',
 ]);
 
 function getEncryptionKey(): Buffer | null {

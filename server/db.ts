@@ -253,6 +253,7 @@ export function migrate() {
   if (toolsCount.cnt === 0) {
     const webSearchId = await_nanoid().nanoid();
     const getTimeId = await_nanoid().nanoid();
+    const webFetchId = await_nanoid().nanoid();
     db.prepare(`
       INSERT INTO tools (id, name, description, parameters_schema, type, config)
       VALUES (?, 'web_search', ?, ?, 'builtin', ?)
@@ -277,6 +278,33 @@ export function migrate() {
       'Get the current date and time in ISO 8601 format. Use when the user asks for the current time, date, or timezone.',
       JSON.stringify({ type: 'object', properties: {}, required: [] })
     );
+    const webFetchDesc = 'Fetch the main content of a web page as markdown or text via Jina Reader. Use when the user provides a URL to read, summarize, or analyze.';
+    const webFetchSchema = {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'Full URL of the page to fetch' },
+        respond_with: { type: 'string', description: 'Output format: content, markdown, html, or text', default: 'markdown' },
+        timeout_seconds: { type: 'number', description: 'Timeout in seconds (1-180)', default: 45 },
+        no_cache: { type: 'boolean', description: 'Bypass cache' },
+        wait_for_selector: { type: 'string', description: 'CSS selector to wait for' },
+        target_selector: { type: 'string', description: 'CSS selector to extract only that part' },
+        remove_selector: { type: 'string', description: 'CSS selector of elements to remove' },
+        user_agent: { type: 'string', description: 'Custom User-Agent' },
+        referer: { type: 'string', description: 'Referer header' },
+        locale: { type: 'string', description: 'Browser locale (e.g. en-US)' },
+        retain_images: { type: 'string', description: 'none, all, alt, all_p, or alt_p' },
+        retain_links: { type: 'string', description: 'none, all, text, or gpt-oss' },
+        with_links_summary: { type: 'boolean', description: 'Include links summary section' },
+        with_images_summary: { type: 'boolean', description: 'Include images summary section' },
+        respond_timing: { type: 'string', description: 'html, visible-content, mutation-idle, resource-idle, media-idle, network-idle' },
+        engine: { type: 'string', description: 'browser, direct, or cf-browser-rendering' },
+      },
+      required: ['url'],
+    };
+    db.prepare(`
+      INSERT INTO tools (id, name, description, parameters_schema, type, config)
+      VALUES (?, 'web_fetch', ?, ?, 'builtin', NULL)
+    `).run(webFetchId, webFetchDesc, JSON.stringify(webFetchSchema));
   }
 
   // Migrate web_search_enabled -> agent_tools: for each agent with web_search_enabled=1, add web_search tool
@@ -402,6 +430,37 @@ export function migrate() {
     db.exec('CREATE INDEX IF NOT EXISTS idx_tools_user_id ON tools(user_id)');
   }
 
+  // Migration: allow multiple tools with same name (per user) so each user can have web_fetch
+  const toolsTableSql = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'tools'").get() as { sql: string } | undefined;
+  const hasUniqueOnName = toolsTableSql?.sql?.includes('name') && toolsTableSql?.sql?.includes('UNIQUE') && !toolsTableSql?.sql?.includes('UNIQUE(user_id, name)');
+  if (hasUniqueOnName) {
+    db.pragma('foreign_keys = OFF');
+    try {
+      db.exec(`
+        CREATE TABLE tools_new (
+          id TEXT PRIMARY KEY,
+          user_id TEXT,
+          name TEXT NOT NULL,
+          description TEXT NOT NULL,
+          parameters_schema TEXT NOT NULL,
+          type TEXT NOT NULL CHECK(type IN ('builtin', 'http')),
+          config TEXT,
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now')),
+          UNIQUE(user_id, name)
+        );
+        INSERT INTO tools_new (id, user_id, name, description, parameters_schema, type, config, created_at, updated_at)
+        SELECT id, user_id, name, description, parameters_schema, type, config, created_at, updated_at FROM tools;
+        DROP TABLE tools;
+        ALTER TABLE tools_new RENAME TO tools;
+      `);
+      db.exec('CREATE INDEX IF NOT EXISTS idx_tools_user_id ON tools(user_id)');
+      console.log('[Agent Studio] Migrated tools: name is now UNIQUE per (user_id, name)');
+    } finally {
+      db.pragma('foreign_keys = ON');
+    }
+  }
+
   const mcpCols = db.prepare("PRAGMA table_info(mcp_servers)").all() as { name: string }[];
   if (!mcpCols.some((c) => c.name === 'user_id')) {
     db.exec('ALTER TABLE mcp_servers ADD COLUMN user_id TEXT');
@@ -456,7 +515,10 @@ export function migrate() {
         ON CONFLICT(user_id, key) DO NOTHING
       `).run(existingAdmin.id, defaultUserId);
       db.prepare('DELETE FROM settings WHERE user_id = ?').run(defaultUserId);
-      db.prepare('UPDATE tools SET user_id = ? WHERE user_id = ?').run(existingAdmin.id, defaultUserId);
+      // Only move tools that would not duplicate (user_id, name) — admin may already have web_fetch etc.
+      db.prepare(`
+        UPDATE tools SET user_id = ? WHERE user_id = ? AND name NOT IN (SELECT name FROM tools WHERE user_id = ?)
+      `).run(existingAdmin.id, defaultUserId, existingAdmin.id);
       db.prepare('UPDATE mcp_servers SET user_id = ? WHERE user_id = ?').run(existingAdmin.id, defaultUserId);
     })();
   }
@@ -478,7 +540,9 @@ export function migrate() {
           ON CONFLICT(user_id, key) DO NOTHING
         `).run(newAdminId, defaultUserId);
         db.prepare('DELETE FROM settings WHERE user_id = ?').run(defaultUserId);
-        db.prepare('UPDATE tools SET user_id = ? WHERE user_id = ?').run(newAdminId, defaultUserId);
+        db.prepare(`
+          UPDATE tools SET user_id = ? WHERE user_id = ? AND name NOT IN (SELECT name FROM tools WHERE user_id = ?)
+        `).run(newAdminId, defaultUserId, newAdminId);
         db.prepare('UPDATE mcp_servers SET user_id = ? WHERE user_id = ?').run(newAdminId, defaultUserId);
       })();
       console.log('[Agent Studio] Initial admin created: ' + INITIAL_ADMIN_EMAIL);
@@ -488,6 +552,42 @@ export function migrate() {
     } catch (e) {
       console.error('[Agent Studio] Failed to create initial admin:', e);
     }
+  }
+
+  // Migration: ensure every user has web_fetch builtin (runs after admin reassign so no UNIQUE conflict)
+  const webFetchDesc = 'Fetch the main content of a web page as markdown or text via Jina Reader. Use when the user provides a URL to read, summarize, or analyze.';
+  const webFetchSchema = {
+    type: 'object',
+    properties: {
+      url: { type: 'string', description: 'Full URL of the page to fetch' },
+      respond_with: { type: 'string', description: 'Output format: content, markdown, html, or text', default: 'markdown' },
+      timeout_seconds: { type: 'number', description: 'Timeout in seconds (1-180)', default: 45 },
+      no_cache: { type: 'boolean', description: 'Bypass cache' },
+      wait_for_selector: { type: 'string', description: 'CSS selector to wait for' },
+      target_selector: { type: 'string', description: 'CSS selector to extract only that part' },
+      remove_selector: { type: 'string', description: 'CSS selector of elements to remove' },
+      user_agent: { type: 'string', description: 'Custom User-Agent' },
+      referer: { type: 'string', description: 'Referer header' },
+      locale: { type: 'string', description: 'Browser locale (e.g. en-US)' },
+      retain_images: { type: 'string', description: 'none, all, alt, all_p, or alt_p' },
+      retain_links: { type: 'string', description: 'none, all, text, or gpt-oss' },
+      with_links_summary: { type: 'boolean', description: 'Include links summary section' },
+      with_images_summary: { type: 'boolean', description: 'Include images summary section' },
+      respond_timing: { type: 'string', description: 'html, visible-content, mutation-idle, resource-idle, media-idle, network-idle' },
+      engine: { type: 'string', description: 'browser, direct, or cf-browser-rendering' },
+    },
+    required: ['url'],
+  };
+  const allUserIds = db.prepare('SELECT id FROM users').all() as { id: string }[];
+  const hasWebFetchStmt = db.prepare('SELECT 1 FROM tools WHERE user_id = ? AND name = ?');
+  const insertWebFetchStmt = db.prepare(`
+    INSERT INTO tools (id, user_id, name, description, parameters_schema, type, config)
+    VALUES (?, ?, 'web_fetch', ?, ?, 'builtin', NULL)
+  `);
+  for (const { id: uid } of allUserIds) {
+    if (hasWebFetchStmt.get(uid, 'web_fetch')) continue;
+    const { nanoid } = await_nanoid();
+    insertWebFetchStmt.run(nanoid(), uid, webFetchDesc, JSON.stringify(webFetchSchema));
   }
 
   // --- Model Council migrations ---

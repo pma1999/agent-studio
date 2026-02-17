@@ -10,6 +10,7 @@ import { useIsMobile } from '../utils/breakpoints';
 const BUILTIN_OPTIONS = [
   { value: 'web_search', label: 'Web Search', desc: 'Search the web (requires API key in Settings)' },
   { value: 'get_current_time', label: 'Current Time', desc: 'Get current date/time in ISO format' },
+  { value: 'web_fetch', label: 'Web Fetch', desc: 'Fetch URL content as markdown/text via Jina Reader (optional API key in Settings)' },
 ];
 
 const PARAM_TYPES = [
@@ -328,7 +329,7 @@ export function ToolsView() {
               </div>
             </div>
             <div style={{ display: 'flex', gap: '8px', flexShrink: 0 }}>
-              {tool.type !== 'builtin' || (tool.name !== 'web_search' && tool.name !== 'get_current_time') ? (
+              {tool.type !== 'builtin' || (tool.name !== 'web_search' && tool.name !== 'get_current_time' && tool.name !== 'web_fetch') ? (
                 <>
                   <button
                     type="button"
