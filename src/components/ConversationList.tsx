@@ -63,19 +63,20 @@ export function ConversationList() {
       key={conv.id}
       initial={{ opacity: 0, x: -10 }}
       animate={{ opacity: 1, x: 0 }}
-      transition={{ duration: 0.2, delay: index * 0.03 }}
+      transition={{ duration: 0.2, delay: index * 0.02 }}
       onClick={() => handleSelectConversation(conv.id)}
       style={{
         display: 'flex',
         alignItems: 'center',
         gap: '10px',
-        padding: '10px 12px',
+        padding: isMobile ? '12px' : '10px 12px',
+        minHeight: isMobile ? 48 : 42,
         background: activeConversationId === conv.id ? 'var(--accent-muted)' : 'transparent',
         border: 'none',
         borderRadius: 'var(--radius-sm)',
         cursor: 'pointer',
         color: activeConversationId === conv.id ? 'var(--text-primary)' : 'var(--text-secondary)',
-        fontSize: '0.8125rem',
+        fontSize: isMobile ? '0.9rem' : '0.8125rem',
         textAlign: 'left',
         width: '100%',
         fontFamily: 'var(--font-body)',
@@ -95,7 +96,7 @@ export function ConversationList() {
         }
       }}
     >
-      <MessageSquare size={14} style={{ flexShrink: 0, opacity: 0.6 }} />
+      <MessageSquare size={isMobile ? 15 : 14} style={{ flexShrink: 0, opacity: 0.65 }} />
       <span style={{
         overflow: 'hidden',
         textOverflow: 'ellipsis',
@@ -112,15 +113,15 @@ export function ConversationList() {
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          width: '20px',
-          height: '20px',
+          width: isMobile ? '24px' : '20px',
+          height: isMobile ? '24px' : '20px',
           background: 'transparent',
           border: 'none',
           color: 'var(--text-muted)',
           cursor: 'pointer',
           borderRadius: '4px',
           flexShrink: 0,
-          opacity: 0,
+          opacity: isMobile ? 0.72 : 0,
           transition: 'all var(--transition-fast)',
         }}
         className="conv-delete-btn"
