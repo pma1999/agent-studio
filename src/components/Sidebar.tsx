@@ -117,6 +117,7 @@ export function Sidebar() {
 
   const drawerTransform = isMobile && !sidebarMobileOpen ? 'translateX(-100%)' : 'translateX(0)';
   const showExpanded = isMobile || !sidebarCollapsed;
+  const mobilePanelHeaderHeight = 64;
 
   return (
     <>
@@ -174,61 +175,79 @@ export function Sidebar() {
         borderBottom: '1px solid var(--border)',
         display: 'flex',
         alignItems: 'center',
+        justifyContent: 'space-between',
         gap: 'var(--space-md)',
-        minHeight: '65px',
+        minHeight: isMobile ? `${mobilePanelHeaderHeight}px` : '65px',
+        background: isMobile ? 'linear-gradient(180deg, rgba(201,149,107,0.09), transparent)' : undefined,
       }}>
-        <div style={{
-          width: '32px',
-          height: '32px',
-          borderRadius: 'var(--radius-sm)',
-          background: 'linear-gradient(135deg, var(--accent), var(--accent-hover))',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          flexShrink: 0,
-        }}>
-          <span style={{
-            fontFamily: 'var(--font-display)',
-            fontSize: '1.15rem',
-            fontWeight: 700,
-            color: 'var(--text-inverse)',
-          }}>A</span>
-        </div>
-        {showExpanded && (
-          <motion.div
-            initial={prefersReducedMotion ? false : { opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: prefersReducedMotion ? 0 : 0.2, delay: prefersReducedMotion ? 0 : 0.05 }}
-            style={{ overflow: 'hidden' }}
-          >
-            <div style={{
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-md)', minWidth: 0 }}>
+          <div style={{
+            width: '32px',
+            height: '32px',
+            borderRadius: 'var(--radius-sm)',
+            background: 'linear-gradient(135deg, var(--accent), var(--accent-hover))',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            flexShrink: 0,
+          }}>
+            <span style={{
               fontFamily: 'var(--font-display)',
-              fontSize: '1.2rem',
-              fontWeight: 600,
-              color: 'var(--text-primary)',
-              whiteSpace: 'nowrap',
-            }}>
-              Agent Studio
-            </div>
-            <div style={{
-              fontSize: '0.6875rem',
-              color: 'var(--text-muted)',
-              fontFamily: 'var(--font-mono)',
-              whiteSpace: 'nowrap',
-            }}>
-              personal workspace
-            </div>
-          </motion.div>
+              fontSize: '1.15rem',
+              fontWeight: 700,
+              color: 'var(--text-inverse)',
+            }}>A</span>
+          </div>
+          {showExpanded && (
+            <motion.div
+              initial={prefersReducedMotion ? false : { opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: prefersReducedMotion ? 0 : 0.2, delay: prefersReducedMotion ? 0 : 0.05 }}
+              style={{ overflow: 'hidden' }}
+            >
+              <div style={{
+                fontFamily: 'var(--font-display)',
+                fontSize: '1.2rem',
+                fontWeight: 600,
+                color: 'var(--text-primary)',
+                whiteSpace: 'nowrap',
+              }}>
+                Agent Studio
+              </div>
+              <div style={{
+                fontSize: '0.6875rem',
+                color: 'var(--text-muted)',
+                fontFamily: 'var(--font-mono)',
+                whiteSpace: 'nowrap',
+              }}>
+                personal workspace
+              </div>
+            </motion.div>
+          )}
+        </div>
+        {isMobile && (
+          <button
+            type="button"
+            onClick={() => setSidebarMobileOpen(false)}
+            className="sidebar-footer-btn"
+            style={{ width: 40, minHeight: 40, justifyContent: 'center', flexShrink: 0 }}
+            aria-label="Close menu"
+          >
+            <X size={18} />
+          </button>
         )}
       </div>
 
       {/* Navigation */}
       <div style={{
-        padding: 'var(--space-md) var(--space-sm)',
+        padding: isMobile ? 'var(--space-sm) var(--space-sm)' : 'var(--space-md) var(--space-sm)',
         display: 'flex',
-        flexDirection: 'column',
+        flexDirection: isMobile ? 'row' : 'column',
+        overflowX: isMobile ? 'auto' : 'hidden',
+        scrollbarWidth: 'none',
         gap: 'var(--space-xs)',
+        borderBottom: isMobile ? '1px solid var(--border)' : undefined,
       }}>
         {navItems.map((item, index) => {
           const isActive = currentView === item.id;
@@ -239,7 +258,12 @@ export function Sidebar() {
               type="button"
               onClick={() => navClick(item.id)}
               className={`sidebar-nav-btn ${isActive ? 'sidebar-nav-btn-active' : ''}`}
-              style={{ justifyContent: showExpanded ? 'flex-start' : 'center' }}
+              style={{
+                justifyContent: showExpanded ? 'flex-start' : 'center',
+                width: isMobile ? 'auto' : '100%',
+                padding: isMobile ? '10px 14px' : undefined,
+                flexShrink: 0,
+              }}
               title={showExpanded ? undefined : item.label}
               aria-label={showExpanded ? undefined : item.label}
             >
@@ -261,23 +285,14 @@ export function Sidebar() {
       {/* Conversations list (when expanded) */}
       {showExpanded && (
         <>
-          <motion.div
-            initial={prefersReducedMotion ? false : { opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ duration: prefersReducedMotion ? 0 : 0.2, delay: prefersReducedMotion ? 0 : 0.08 }}
-            style={{
-              height: '1px',
-              background: 'var(--border)',
-              margin: 'var(--space-xs) var(--space-md)',
-            }}
-          />
-
           {/* New Chat Button */}
           <motion.div
             initial={prefersReducedMotion ? false : { opacity: 0, y: 4 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: prefersReducedMotion ? 0 : 0.2, delay: prefersReducedMotion ? 0 : 0.1 }}
-            style={{ padding: 'var(--space-sm) var(--space-md)' }}
+            style={{
+              padding: isMobile ? 'var(--space-md) var(--space-md) var(--space-sm)' : 'var(--space-sm) var(--space-md)',
+            }}
           >
             <motion.button
               onClick={() => startGeneralChat()}
@@ -324,11 +339,34 @@ export function Sidebar() {
             animate={{ opacity: 1 }}
             transition={{ duration: prefersReducedMotion ? 0 : 0.2, delay: prefersReducedMotion ? 0 : 0.14 }}
             style={{
+            borderTop: '1px solid var(--border)',
             flex: 1,
             minHeight: 0,
             overflowY: 'auto',
-            padding: 'var(--space-sm)',
+            padding: isMobile ? 'var(--space-md) var(--space-sm) var(--space-sm)' : 'var(--space-sm)',
             }}>
+            {isMobile && (
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                marginBottom: 'var(--space-sm)',
+                padding: '0 var(--space-sm)',
+              }}>
+                <span style={{
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: '0.68rem',
+                  letterSpacing: '0.14em',
+                  textTransform: 'uppercase',
+                  color: 'var(--accent-hover)',
+                }}>
+                  Recent activity
+                </span>
+                <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                  {conversations.length} chats
+                </span>
+              </div>
+            )}
             <ConversationList />
           </motion.div>
         </>
@@ -345,6 +383,8 @@ export function Sidebar() {
         display: 'flex',
         flexDirection: 'column',
         gap: 'var(--space-xs)',
+        background: isMobile ? 'rgba(12,12,12,0.85)' : undefined,
+        backdropFilter: isMobile ? 'blur(8px)' : undefined,
       }}>
         {/* Credits indicator */}
         {credits && credits.limit_remaining !== null && showExpanded && (
@@ -406,35 +446,38 @@ export function Sidebar() {
             {user.email}
           </div>
         )}
-        {user && user.email !== 'local@localhost' && (
-        <button
-          type="button"
-          onClick={() => logout()}
-          className="sidebar-footer-btn"
-          style={{ justifyContent: showExpanded ? 'flex-start' : 'center' }}
-          title={showExpanded ? undefined : 'Sign out'}
-          aria-label={showExpanded ? undefined : 'Sign out'}
-        >
-          <LogOut size={18} />
-          {showExpanded && <span>Sign out</span>}
-        </button>
-        )}
-        <button
-          type="button"
-          onClick={() => setSettingsOpen(true)}
-          className="sidebar-footer-btn"
-          style={{ justifyContent: showExpanded ? 'flex-start' : 'center' }}
-          title={showExpanded ? undefined : 'Settings'}
-          aria-label={showExpanded ? undefined : 'Settings'}
-        >
-          <Settings size={18} />
-          {showExpanded && <span>Settings</span>}
-        </button>
+        <div style={{ display: 'flex', gap: 'var(--space-xs)', flexDirection: isMobile ? 'row' : 'column' }}>
+          {user && user.email !== 'local@localhost' && (
+            <button
+              type="button"
+              onClick={() => logout()}
+              className="sidebar-footer-btn"
+              style={{ justifyContent: showExpanded ? 'flex-start' : 'center', flex: isMobile ? 1 : undefined }}
+              title={showExpanded ? undefined : 'Sign out'}
+              aria-label={showExpanded ? undefined : 'Sign out'}
+            >
+              <LogOut size={18} />
+              {showExpanded && <span>Sign out</span>}
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => setSettingsOpen(true)}
+            className="sidebar-footer-btn"
+            style={{ justifyContent: showExpanded ? 'flex-start' : 'center', flex: isMobile ? 1 : undefined }}
+            title={showExpanded ? undefined : 'Settings'}
+            aria-label={showExpanded ? undefined : 'Settings'}
+          >
+            <Settings size={18} />
+            {showExpanded && <span>Settings</span>}
+          </button>
+        </div>
 
         <button
           type="button"
           onClick={() => isMobile ? setSidebarMobileOpen(false) : setSidebarCollapsed(!sidebarCollapsed)}
           className="sidebar-footer-btn"
+          hidden={isMobile}
           style={{ justifyContent: showExpanded ? 'flex-start' : 'center' }}
           title={isMobile ? 'Close' : (sidebarCollapsed ? 'Expand' : 'Collapse')}
           aria-expanded={isMobile ? sidebarMobileOpen : !sidebarCollapsed}

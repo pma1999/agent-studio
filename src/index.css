@@ -356,11 +356,14 @@ pre code {
 
 /* Sidebar drawer width on mobile (safe area applied in component) */
 .sidebar-drawer-mobile {
-  width: min(var(--sidebar-width), 85vw) !important;
+  width: min(420px, calc(100vw - 12px)) !important;
+  max-width: calc(100vw - 12px) !important;
 }
+
 @media (max-width: 359px) {
   .sidebar-drawer-mobile {
-    width: 90vw !important;
+    width: calc(100vw - 8px) !important;
+    max-width: calc(100vw - 8px) !important;
   }
 }
 
@@ -1839,5 +1842,21 @@ button:hover .conv-delete-btn,
   .mention-dropdown-item {
     min-height: 44px;
     padding: 12px 14px !important;
+  }
+}
+
+
+.conv-delete-btn {
+  opacity: 0;
+}
+
+button:hover .conv-delete-btn,
+button:focus-visible .conv-delete-btn {
+  opacity: 1;
+}
+
+@media (max-width: 767px) {
+  .conv-delete-btn {
+    opacity: 0.72;
   }
 }
