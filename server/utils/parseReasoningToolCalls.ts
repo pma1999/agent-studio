@@ -180,10 +180,52 @@ function parseKimiTagFormat(reasoning: string): ToolCallSpec[] {
 }
 
 /**
+ * Parse XML-lite format: <tool_call><function=name><parameter=n>v</parameter>...</function></tool_call>
+ */
+function parseXmlToolCallFormat(reasoning: string): ToolCallSpec[] {
+  const results: ToolCallSpec[] = [];
+  // Match <tool_call> blocks
+  const toolCallRegex = /<tool_call>([\s\S]*?)<\/tool_call>/gi;
+  let match;
+
+  while ((match = toolCallRegex.exec(reasoning)) !== null) {
+    const block = match[1];
+
+    // Extract function name: <function=name>
+    const functionMatch = /<function=([^>]+)>/i.exec(block);
+    if (!functionMatch) continue;
+
+    const name = functionMatch[1].trim();
+
+    // Extract parameters: <parameter=name>value</parameter>
+    const paramRegex = /<parameter=([^>]+)>([\s\S]*?)<\/parameter>/gi;
+    const args: Record<string, any> = {};
+    let pMatch;
+    while ((pMatch = paramRegex.exec(block)) !== null) {
+      const pName = pMatch[1].trim();
+      const pValue = pMatch[2].trim();
+      args[pName] = pValue;
+    }
+
+    results.push({
+      id: `call_${nanoid()}`,
+      type: 'function',
+      function: {
+        name,
+        arguments: JSON.stringify(args)
+      }
+    });
+  }
+
+  return results;
+}
+
+/**
  * Extract tool calls from reasoning text. Supports:
  * - JSON array after marker (e.g. </tool_calls_section_begin/> or <|tool_calls_section_begin|>)
  *   with items like { "name": "web_search", "parameters": { ... } }
  * - Kimi/vLLM tag format: <|tool_call_begin|> name:index <|tool_call_argument_begin|> JSON <|tool_call_end|>
+ * - XML-lite format: <tool_call><function=web_search><parameter=query>...</parameter></function></tool_call>
  *
  * Returns OpenAI/OpenRouter-style ToolCallSpec[] or [] if none found / parse failed.
  */
@@ -192,11 +234,17 @@ export function parseReasoningToolCalls(reasoning: string | null | undefined): T
   const trimmed = reasoning.trim();
   if (!trimmed) return [];
 
+  const results: ToolCallSpec[] = [];
+
+  // Try all formats and accumulate results (some models might mix formats, though rare)
   const fromJson = parseJsonArrayFormat(trimmed);
-  if (fromJson.length > 0) return fromJson;
+  if (fromJson.length > 0) results.push(...fromJson);
 
   const fromKimi = parseKimiTagFormat(trimmed);
-  if (fromKimi.length > 0) return fromKimi;
+  if (fromKimi.length > 0) results.push(...fromKimi);
 
-  return [];
+  const fromXml = parseXmlToolCallFormat(trimmed);
+  if (fromXml.length > 0) results.push(...fromXml);
+
+  return results;
 }
