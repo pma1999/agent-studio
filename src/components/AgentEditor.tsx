@@ -4,6 +4,7 @@ import { useStore } from '../stores/store';
 import { agentsApi, toolsApi, mcpServersApi } from '../api/client';
 import { Modal } from './ui/Modal';
 import { ModelSelectorCore } from './ModelSelectorCore';
+import { ProviderRoutingSelector } from './ProviderRoutingSelector';
 import { Input } from './ui/Input';
 import { TextArea } from './ui/TextArea';
 import { Slider } from './ui/Slider';
@@ -22,6 +23,7 @@ const DEFAULT_FORM: AgentFormData = {
   emoji: '🤖',
   system_prompt: '',
   provider: 'openrouter',
+  provider_routing: null,
   base_url: 'https://openrouter.ai/api/v1',
   model: 'openrouter/auto',
   temperature: 0.7,
@@ -70,6 +72,7 @@ export function AgentEditor() {
         emoji: editingAgent.emoji,
         system_prompt: editingAgent.system_prompt,
         provider: editingAgent.provider || 'openrouter',
+        provider_routing: editingAgent.provider_routing ?? null,
         base_url: editingAgent.base_url,
         model: editingAgent.model,
         temperature: editingAgent.temperature,
@@ -277,8 +280,22 @@ export function AgentEditor() {
           <ModelSelectorCore
                 variant="agent"
                 value={form.model}
-                onChange={(id) => updateField('model', id ?? 'openrouter/auto')}
+                onChange={(id) => {
+                  const nextModel = id ?? 'openrouter/auto';
+                  setForm((prev) => ({
+                    ...prev,
+                    model: nextModel,
+                    provider_routing: nextModel !== prev.model ? null : prev.provider_routing,
+                  }));
+                }}
               />
+          <ProviderRoutingSelector
+            modelId={form.model}
+            value={form.provider_routing ?? null}
+            onChange={(routing) => updateField('provider_routing', routing)}
+            disabled={form.model === 'openrouter/auto'}
+            label="Provider"
+          />
 
               {/* Web Search Toggle */}
               <div style={{

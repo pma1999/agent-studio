@@ -59,6 +59,7 @@ export function migrate() {
       description TEXT DEFAULT '',
       emoji TEXT DEFAULT '🤖',
       system_prompt TEXT NOT NULL,
+      provider_routing TEXT DEFAULT NULL,
       base_url TEXT DEFAULT 'https://openrouter.ai/api/v1',
       model TEXT DEFAULT 'openrouter/auto',
       temperature REAL DEFAULT 0.6,
@@ -71,6 +72,7 @@ export function migrate() {
       id TEXT PRIMARY KEY,
       agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
       title TEXT DEFAULT 'New conversation',
+      provider_routing TEXT DEFAULT NULL,
       created_at TEXT DEFAULT (datetime('now')),
       updated_at TEXT DEFAULT (datetime('now'))
     );
@@ -80,6 +82,7 @@ export function migrate() {
       conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
       role TEXT NOT NULL CHECK(role IN ('system', 'user', 'assistant')),
       content TEXT NOT NULL,
+      provider_routing TEXT DEFAULT NULL,
       tokens_used INTEGER DEFAULT 0,
       created_at TEXT DEFAULT (datetime('now'))
     );
@@ -127,6 +130,9 @@ export function migrate() {
   }
   if (!agentColNames.has('response_healing_enabled')) {
     db.exec("ALTER TABLE agents ADD COLUMN response_healing_enabled INTEGER DEFAULT 0");
+  }
+  if (!agentColNames.has('provider_routing')) {
+    db.exec("ALTER TABLE agents ADD COLUMN provider_routing TEXT DEFAULT NULL");
   }
 
   // Migration: add cost/usage/reasoning columns to messages
@@ -211,6 +217,7 @@ export function migrate() {
         conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
         role TEXT NOT NULL CHECK(role IN ('system', 'user', 'assistant', 'tool')),
         content TEXT NOT NULL DEFAULT '',
+        provider_routing TEXT DEFAULT NULL,
         tokens_used INTEGER DEFAULT 0,
         prompt_tokens INTEGER DEFAULT 0,
         completion_tokens INTEGER DEFAULT 0,
@@ -225,10 +232,11 @@ export function migrate() {
       );
     `);
     if (hasToolCallId && hasToolCalls) {
-      db.exec(`INSERT INTO messages_new SELECT id, conversation_id, role, COALESCE(content,''), tokens_used, prompt_tokens, completion_tokens, cost, annotations, reasoning_content, reasoning_tokens, cached_tokens, tool_call_id, tool_calls, created_at FROM messages`);
+      db.exec(`INSERT INTO messages_new (id, conversation_id, role, content, provider_routing, tokens_used, prompt_tokens, completion_tokens, cost, annotations, reasoning_content, reasoning_tokens, cached_tokens, tool_call_id, tool_calls, created_at)
+        SELECT id, conversation_id, role, COALESCE(content,''), NULL, tokens_used, prompt_tokens, completion_tokens, cost, annotations, reasoning_content, reasoning_tokens, cached_tokens, tool_call_id, tool_calls, created_at FROM messages`);
     } else {
-      db.exec(`INSERT INTO messages_new (id, conversation_id, role, content, tokens_used, prompt_tokens, completion_tokens, cost, annotations, reasoning_content, reasoning_tokens, cached_tokens, tool_call_id, tool_calls, created_at)
-        SELECT id, conversation_id, role, COALESCE(content,''), tokens_used, prompt_tokens, completion_tokens, cost, annotations, reasoning_content, reasoning_tokens, cached_tokens, NULL, NULL, created_at FROM messages`);
+      db.exec(`INSERT INTO messages_new (id, conversation_id, role, content, provider_routing, tokens_used, prompt_tokens, completion_tokens, cost, annotations, reasoning_content, reasoning_tokens, cached_tokens, tool_call_id, tool_calls, created_at)
+        SELECT id, conversation_id, role, COALESCE(content,''), NULL, tokens_used, prompt_tokens, completion_tokens, cost, annotations, reasoning_content, reasoning_tokens, cached_tokens, NULL, NULL, created_at FROM messages`);
     }
     db.exec(`DROP TABLE messages`);
     db.exec(`ALTER TABLE messages_new RENAME TO messages`);
@@ -246,6 +254,9 @@ export function migrate() {
   // Migration: add model column to messages for per-message model tracking
   if (!msgColSetFinal.has('model')) {
     db.exec("ALTER TABLE messages ADD COLUMN model TEXT DEFAULT NULL");
+  }
+  if (!msgColSetFinal.has('provider_routing')) {
+    db.exec("ALTER TABLE messages ADD COLUMN provider_routing TEXT DEFAULT NULL");
   }
 
   // Seed builtin tools if none exist (each call to await_nanoid() returns a new id)
@@ -391,6 +402,9 @@ export function migrate() {
   if (!convCols.some((c) => c.name === 'model')) {
     db.exec('ALTER TABLE conversations ADD COLUMN model TEXT DEFAULT NULL');
   }
+  if (!convCols.some((c) => c.name === 'provider_routing')) {
+    db.exec('ALTER TABLE conversations ADD COLUMN provider_routing TEXT DEFAULT NULL');
+  }
 
   // Migration: make agent_id nullable in conversations for general chat support
   // SQLite doesn't support ALTER COLUMN, so we need to recreate the table
@@ -404,13 +418,14 @@ export function migrate() {
         agent_id TEXT REFERENCES agents(id) ON DELETE CASCADE,
         title TEXT DEFAULT 'New conversation',
         model TEXT DEFAULT NULL,
+        provider_routing TEXT DEFAULT NULL,
         created_at TEXT DEFAULT (datetime('now')),
         updated_at TEXT DEFAULT (datetime('now'))
       );
       CREATE INDEX idx_conversations_new_agent ON conversations_new(agent_id);
       CREATE INDEX idx_conversations_new_user_id ON conversations_new(user_id);
-      INSERT INTO conversations_new (id, user_id, agent_id, title, model, created_at, updated_at)
-        SELECT id, user_id, agent_id, title, model, created_at, updated_at FROM conversations;
+      INSERT INTO conversations_new (id, user_id, agent_id, title, model, provider_routing, created_at, updated_at)
+        SELECT id, user_id, agent_id, title, model, provider_routing, created_at, updated_at FROM conversations;
       DROP TABLE conversations;
       ALTER TABLE conversations_new RENAME TO conversations;
     `);
@@ -617,6 +632,8 @@ function migrateCouncilTables() {
       message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
       user_message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
       synthesizer_model TEXT NOT NULL DEFAULT 'anthropic/claude-3.5-sonnet',
+      synthesizer_provider_routing TEXT DEFAULT NULL,
+      member_provider_routing TEXT DEFAULT '{}',
       member_count INTEGER NOT NULL DEFAULT 3,
       system_prompt TEXT,
       status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'partial_failure', 'failed')) DEFAULT 'running',
@@ -645,7 +662,9 @@ function migrateCouncilTables() {
       name TEXT NOT NULL,
       description TEXT,
       member_models TEXT NOT NULL,
+      member_provider_routing TEXT DEFAULT '{}',
       synthesizer_model TEXT NOT NULL DEFAULT 'anthropic/claude-3.5-sonnet',
+      synthesizer_provider_routing TEXT DEFAULT NULL,
       synthesis_prompt_template TEXT,
       auto_expand_responses INTEGER DEFAULT 0,
       show_member_responses INTEGER DEFAULT 1,
@@ -664,6 +683,7 @@ function migrateCouncilTables() {
       id TEXT PRIMARY KEY,
       council_run_id TEXT NOT NULL REFERENCES council_runs(id) ON DELETE CASCADE,
       model_id TEXT NOT NULL,
+      provider_routing TEXT DEFAULT NULL,
       content TEXT NOT NULL,
       reasoning_content TEXT,
       tokens_used INTEGER DEFAULT 0,
@@ -690,6 +710,9 @@ function migrateCouncilTables() {
   if (!councilRespCols.some((c) => c.name === 'tool_results')) {
     db.exec("ALTER TABLE council_responses ADD COLUMN tool_results TEXT DEFAULT NULL");
   }
+  if (!councilRespCols.some((c) => c.name === 'provider_routing')) {
+    db.exec("ALTER TABLE council_responses ADD COLUMN provider_routing TEXT DEFAULT NULL");
+  }
 
   // Add council columns to messages table
   const msgCols = db.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
@@ -709,6 +732,20 @@ function migrateCouncilTables() {
   const runCols2 = db.prepare("PRAGMA table_info(council_runs)").all() as { name: string }[];
   if (!runCols2.some((c) => c.name === 'comparison_json')) {
     db.exec("ALTER TABLE council_runs ADD COLUMN comparison_json TEXT DEFAULT NULL");
+  }
+  if (!runCols2.some((c) => c.name === 'synthesizer_provider_routing')) {
+    db.exec("ALTER TABLE council_runs ADD COLUMN synthesizer_provider_routing TEXT DEFAULT NULL");
+  }
+  if (!runCols2.some((c) => c.name === 'member_provider_routing')) {
+    db.exec("ALTER TABLE council_runs ADD COLUMN member_provider_routing TEXT DEFAULT '{}'");
+  }
+
+  const councilMemberCols = db.prepare("PRAGMA table_info(council_members)").all() as { name: string }[];
+  if (!councilMemberCols.some((c) => c.name === 'member_provider_routing')) {
+    db.exec("ALTER TABLE council_members ADD COLUMN member_provider_routing TEXT DEFAULT '{}'");
+  }
+  if (!councilMemberCols.some((c) => c.name === 'synthesizer_provider_routing')) {
+    db.exec("ALTER TABLE council_members ADD COLUMN synthesizer_provider_routing TEXT DEFAULT NULL");
   }
 }
 

@@ -8,6 +8,14 @@ import { AuthRequest } from '../middleware/auth.js';
 import { trackStream, untrackStream } from '../shutdown.js';
 import type { McpConnection } from '../mcp/index.js';
 import type { CouncilConfig, CouncilMember } from '../types.js';
+import {
+  assertProviderRoutingCompatible,
+  parseProviderRoutingConfig,
+  parseProviderRoutingMap,
+  serializeProviderRoutingConfig,
+  serializeProviderRoutingMap,
+  type ProviderRoutingConfig,
+} from '../providerRouting.js';
 
 const router = Router();
 
@@ -18,6 +26,7 @@ interface Agent {
   provider: string;
   base_url: string;
   model: string;
+  provider_routing?: unknown;
   temperature: number;
   max_tokens: number;
   tool_choice?: string;
@@ -30,6 +39,7 @@ interface Conversation {
   agent_id: string | null;
   title: string;
   model?: string | null;
+  provider_routing?: unknown;
 }
 
 const PDF_ENGINES = ['pdf-text', 'mistral-ocr', 'native'] as const;
@@ -125,6 +135,16 @@ function buildSystemPromptWithDateTime(systemPrompt: string, userTimezone?: stri
     contextLine = `[Context: Current date and time — ${utcStr} UTC.]`;
   }
   return `${contextLine}\n\n${systemPrompt}`;
+}
+
+function normalizeCouncilConfig(config: CouncilConfig): CouncilConfig {
+  const memberProviderRouting = parseProviderRoutingMap(config.member_provider_routing);
+  const synthesizerProviderRouting = parseProviderRoutingConfig(config.synthesizer_provider_routing);
+  return {
+    ...config,
+    member_provider_routing: memberProviderRouting,
+    synthesizer_provider_routing: synthesizerProviderRouting,
+  };
 }
 
 // POST /api/chat/council - Execute council query with multi-model synthesis
@@ -230,14 +250,16 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       const rawShow = (member as unknown as { show_member_responses?: number }).show_member_responses;
       councilConfig = {
         member_models: JSON.parse(member.member_models as unknown as string),
+        member_provider_routing: parseProviderRoutingMap((member as unknown as { member_provider_routing?: unknown }).member_provider_routing),
         synthesizer_model: member.synthesizer_model,
+        synthesizer_provider_routing: parseProviderRoutingConfig((member as unknown as { synthesizer_provider_routing?: unknown }).synthesizer_provider_routing),
         synthesis_prompt_template: member.synthesis_prompt_template || undefined,
         show_member_responses: rawShow !== 0,
         tool_ids: JSON.parse((member.tool_ids || '[]') as unknown as string),
         mcp_server_ids: JSON.parse((member.mcp_server_ids || '[]') as unknown as string),
       };
     } else if (inlineConfig) {
-      councilConfig = inlineConfig;
+      councilConfig = normalizeCouncilConfig(inlineConfig);
     } else {
       res.status(400).json({ error: 'council_member_id or council_config is required' });
       return;
@@ -246,6 +268,18 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     // Validate council config
     if (!councilConfig.member_models || councilConfig.member_models.length < 2) {
       res.status(400).json({ error: 'Council must have at least 2 member models' });
+      return;
+    }
+    try {
+      for (const modelId of councilConfig.member_models) {
+        assertProviderRoutingCompatible(modelId, councilConfig.member_provider_routing?.[modelId]);
+      }
+      assertProviderRoutingCompatible(
+        councilConfig.synthesizer_model || 'anthropic/claude-3.5-sonnet',
+        councilConfig.synthesizer_provider_routing
+      );
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'Invalid provider routing' });
       return;
     }
 
@@ -334,14 +368,16 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     const showMemberResponses = councilConfig.show_member_responses !== false ? 1 : 0;
     db.prepare(`
       INSERT INTO council_runs (
-        id, user_id, conversation_id, user_message_id, synthesizer_model, member_count, system_prompt, status, started_at, show_member_responses
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'running', datetime('now'), ?)
+        id, user_id, conversation_id, user_message_id, synthesizer_model, synthesizer_provider_routing, member_provider_routing, member_count, system_prompt, status, started_at, show_member_responses
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', datetime('now'), ?)
     `).run(
       councilRunId,
       userId,
       conversation_id,
       userMsgId,
       synthesizerModel,
+      serializeProviderRoutingConfig(councilConfig.synthesizer_provider_routing),
+      serializeProviderRoutingMap(councilConfig.member_provider_routing),
       councilConfig.member_models.length,
       agent.system_prompt,
       showMemberResponses
@@ -366,6 +402,8 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       content,
       memberModels: councilConfig.member_models,
       synthesizerModel,
+      memberProviderRouting: councilConfig.member_provider_routing,
+      synthesizerProviderRouting: councilConfig.synthesizer_provider_routing,
       systemPrompt: appendToolInstructionsIfNeeded(
         buildSystemPromptWithDateTime(agent.system_prompt, bodyTimezone),
         resolvedTools
@@ -390,14 +428,15 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         const responseId = nanoid();
         db.prepare(`
           INSERT INTO council_responses (
-            id, council_run_id, model_id, content, reasoning_content,
+            id, council_run_id, model_id, provider_routing, content, reasoning_content,
             tokens_used, prompt_tokens, completion_tokens, reasoning_tokens, cached_tokens,
             cost, response_time_ms, status, error_message, display_order, tool_calls, tool_results
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           responseId,
           councilRunId,
           memberResult.modelId,
+          serializeProviderRoutingConfig(memberResult.providerRouting),
           memberResult.content || '',
           memberResult.reasoningContent || null,
           memberResult.tokensUsed,
@@ -453,8 +492,8 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     db.prepare(`
       INSERT INTO messages (
         id, conversation_id, role, content, tokens_used, prompt_tokens, completion_tokens,
-        cost, reasoning_content, model, council_run_id, is_council_synthesis
-      ) VALUES (?, ?, 'assistant', ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        cost, reasoning_content, model, provider_routing, council_run_id, is_council_synthesis
+      ) VALUES (?, ?, 'assistant', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
     `).run(
       assistantMsgId,
       conversation_id,
@@ -465,6 +504,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       result.totalCost,
       result.synthesis.reasoningContent || null,
       synthesizerModel,
+      serializeProviderRoutingConfig(result.synthesis.providerRouting),
       councilRunId
     );
 
@@ -512,7 +552,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     // Run comparison extraction in background; update council_run when done so next load shows tables
     const successfulResults = result.memberResults.filter((r) => r.status === 'success' && r.content);
     if (successfulResults.length > 0) {
-      executor.extractComparison(successfulResults, result.synthesis.content, content, synthesizerModel, undefined)
+      executor.extractComparison(successfulResults, result.synthesis.content, content, synthesizerModel, result.synthesis.providerRouting, undefined)
         .then((comparisonJson) => {
           if (comparisonJson) {
             db.prepare('UPDATE council_runs SET comparison_json = ? WHERE id = ?').run(comparisonJson, councilRunId);
@@ -556,17 +596,20 @@ function loadGeneralChatSettings(userId: string): {
   system_prompt: string;
   tool_ids: string[];
   mcp_server_ids: string[];
+  provider_routing: ProviderRoutingConfig | null;
 } {
   const defaults = {
     model: 'openrouter/auto',
     system_prompt: 'You are a helpful AI assistant.',
     tool_ids: [] as string[],
     mcp_server_ids: [] as string[],
+    provider_routing: null as ProviderRoutingConfig | null,
   };
 
   try {
     const model = getSettingValue(userId, 'general_chat_model');
     const systemPrompt = getSettingValue(userId, 'general_chat_system_prompt');
+    const providerRouting = parseProviderRoutingConfig(getSettingValue(userId, 'general_chat_provider_routing'));
 
     let tool_ids = defaults.tool_ids;
     const rawToolIds = getSettingValue(userId, 'general_chat_tool_ids');
@@ -595,6 +638,7 @@ function loadGeneralChatSettings(userId: string): {
       system_prompt: systemPrompt || defaults.system_prompt,
       tool_ids,
       mcp_server_ids,
+      provider_routing: providerRouting,
     };
   } catch {
     return defaults;
@@ -613,6 +657,7 @@ function createGeneralChatAgent(settings: ReturnType<typeof loadGeneralChatSetti
     max_tokens: 4096,
     tool_choice: 'auto',
     parallel_tool_calls: 1,
+    provider_routing: settings.provider_routing,
   };
 }
 

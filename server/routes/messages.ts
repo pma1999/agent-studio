@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import db from '../db.js';
 import { AuthRequest } from '../middleware/auth.js';
+import { parseProviderRoutingConfig } from '../providerRouting.js';
 
 const router = Router();
 
@@ -28,6 +29,7 @@ router.get('/:id/messages', (req: AuthRequest, res: Response) => {
       annotations: msg.annotations ? JSON.parse(msg.annotations as string) : null,
       tool_calls: msg.tool_calls ? JSON.parse(msg.tool_calls as string) : null,
       attachments: msg.attachments ? JSON.parse(msg.attachments as string) : null,
+      provider_routing: parseProviderRoutingConfig(msg.provider_routing),
     }));
 
     res.json(parsed);

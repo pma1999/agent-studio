@@ -5,6 +5,15 @@ export type ExportKind = 'agents' | 'tools' | 'mcp_servers' | 'all';
 
 // --- Export payload shapes (what we send) ---
 
+const providerRoutingSchema = z.union([
+  z.object({ mode: z.literal('auto') }),
+  z.object({
+    mode: z.literal('provider'),
+    provider_slug: z.string(),
+    allow_fallbacks: z.boolean(),
+  }),
+]).nullable();
+
 const agentExportSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -12,6 +21,7 @@ const agentExportSchema = z.object({
   emoji: z.string().optional().default('🤖'),
   system_prompt: z.string(),
   provider: z.string().optional().default('openrouter'),
+  provider_routing: providerRoutingSchema.optional(),
   base_url: z.string().optional().default('https://openrouter.ai/api/v1'),
   model: z.string().optional().default('openrouter/auto'),
   temperature: z.number().optional().default(0.6),

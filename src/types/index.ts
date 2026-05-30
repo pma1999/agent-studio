@@ -1,5 +1,9 @@
 export type Provider = 'openrouter';
 
+export type ProviderRoutingConfig =
+  | { mode: 'auto' }
+  | { mode: 'provider'; provider_slug: string; allow_fallbacks: boolean };
+
 export type ReasoningEffort = 'xhigh' | 'high' | 'medium' | 'low' | 'minimal' | 'none';
 
 export interface ReasoningConfig {
@@ -16,6 +20,7 @@ export interface Agent {
   emoji: string;
   system_prompt: string;
   provider: Provider;
+  provider_routing?: ProviderRoutingConfig | null;
   base_url: string;
   model: string;
   temperature: number;
@@ -67,6 +72,7 @@ export interface Conversation {
   agent_id: string | null;
   title: string;
   model?: string;
+  provider_routing?: ProviderRoutingConfig | null;
   agent_name?: string;
   agent_emoji?: string;
   is_general?: boolean;
@@ -104,6 +110,7 @@ export interface Message {
   tool_call_id?: string;
   tool_calls?: ToolCallSpec[];
   model?: string;
+  provider_routing?: ProviderRoutingConfig | null;
   processed_by_agent_id?: string | null;
   processed_by_agent_name?: string | null;
   council_run_id?: string | null;
@@ -190,6 +197,7 @@ export interface AgentFormData {
   emoji: string;
   system_prompt: string;
   provider: Provider;
+  provider_routing?: ProviderRoutingConfig | null;
   base_url: string;
   model: string;
   temperature: number;
@@ -209,6 +217,7 @@ export interface AgentFormData {
 
 export interface GeneralChatSettings {
   model: string;
+  provider_routing?: ProviderRoutingConfig | null;
   system_prompt: string;
   emoji?: string;
   tool_ids?: string[];
@@ -245,6 +254,18 @@ export interface OpenRouterModel {
   pricing: { prompt: string; completion: string };
 }
 
+export interface OpenRouterEndpoint {
+  tag: string;
+  name: string;
+  provider_name: string;
+  context_length: number;
+  max_completion_tokens: number | null;
+  pricing: { prompt: string; completion: string };
+  quantization: string | null;
+  supported_parameters: string[];
+  status: number | null;
+}
+
 // ===== Model Council Types =====
 
 export interface CouncilMember {
@@ -253,7 +274,9 @@ export interface CouncilMember {
   name: string;
   description?: string;
   member_models: string[];
+  member_provider_routing?: Record<string, ProviderRoutingConfig>;
   synthesizer_model: string;
+  synthesizer_provider_routing?: ProviderRoutingConfig | null;
   synthesis_prompt_template?: string;
   auto_expand_responses: boolean;
   show_member_responses: boolean;
@@ -270,6 +293,8 @@ export interface CouncilRun {
   message_id?: string;
   user_message_id: string;
   synthesizer_model: string;
+  synthesizer_provider_routing?: ProviderRoutingConfig | null;
+  member_provider_routing?: Record<string, ProviderRoutingConfig>;
   member_count: number;
   system_prompt?: string;
   status: 'running' | 'completed' | 'partial_failure' | 'failed';
@@ -289,6 +314,7 @@ export interface CouncilResponse {
   id: string;
   council_run_id: string;
   model_id: string;
+  provider_routing?: ProviderRoutingConfig | null;
   content: string;
   reasoning_content?: string;
   tokens_used: number;
@@ -334,7 +360,9 @@ export interface CouncilRunDetail extends CouncilRun {
 
 export interface CouncilConfig {
   member_models: string[];
+  member_provider_routing?: Record<string, ProviderRoutingConfig>;
   synthesizer_model: string;
+  synthesizer_provider_routing?: ProviderRoutingConfig | null;
   synthesis_prompt_template?: string;
   show_member_responses?: boolean;
   tool_ids?: string[];
@@ -347,6 +375,8 @@ export interface CouncilExecutionOptions {
   content: string;
   memberModels: string[];
   synthesizerModel: string;
+  memberProviderRouting?: Record<string, ProviderRoutingConfig>;
+  synthesizerProviderRouting?: ProviderRoutingConfig | null;
   systemPrompt: string;
   messageHistory: Array<{ role: string; content: string }>;
   attachments?: ChatAttachmentInput[];
@@ -362,6 +392,7 @@ export interface CouncilExecutionOptions {
 
 export interface MemberResult {
   modelId: string;
+  providerRouting?: ProviderRoutingConfig;
   content: string;
   reasoningContent?: string;
   tokensUsed: number;
@@ -377,6 +408,7 @@ export interface MemberResult {
 
 export interface SynthesisResult {
   content: string;
+  providerRouting?: ProviderRoutingConfig;
   reasoningContent?: string;
   tokensUsed: number;
   promptTokens: number;

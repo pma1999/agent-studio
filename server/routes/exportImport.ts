@@ -11,6 +11,7 @@ import {
   type McpServerExport,
   type ExportPayload,
 } from '../schemas/exportImport.js';
+import { parseProviderRoutingConfig, serializeProviderRoutingConfig } from '../providerRouting.js';
 
 const exportRouter = Router();
 const importRouter = Router();
@@ -57,6 +58,7 @@ function getAgentsForExport(userId: string, agentIds?: string[]): AgentExport[] 
     out.parallel_tool_calls = (a.parallel_tool_calls as number) ?? 1;
     out.structured_output_enabled = (a.structured_output_enabled as number) ? 1 : 0;
     out.response_healing_enabled = (a.response_healing_enabled as number) ? 1 : 0;
+    out.provider_routing = parseProviderRoutingConfig(a.provider_routing);
     return out as AgentExport;
   });
 }
@@ -231,8 +233,8 @@ importRouter.post('/', (req: AuthRequest, res: Response) => {
           const structuredVal = a.structured_output_enabled ? 1 : 0;
           const responseHealingVal = a.response_healing_enabled ? 1 : 0;
           db.prepare(`
-            INSERT INTO agents (id, user_id, name, description, emoji, system_prompt, provider, base_url, model, temperature, max_tokens, web_search_enabled, reasoning_enabled, reasoning_effort, reasoning_max_tokens, tool_choice, parallel_tool_calls, structured_output_enabled, structured_output_schema, response_healing_enabled)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO agents (id, user_id, name, description, emoji, system_prompt, provider, provider_routing, base_url, model, temperature, max_tokens, web_search_enabled, reasoning_enabled, reasoning_effort, reasoning_max_tokens, tool_choice, parallel_tool_calls, structured_output_enabled, structured_output_schema, response_healing_enabled)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `).run(
             newId,
             userId,
@@ -241,6 +243,7 @@ importRouter.post('/', (req: AuthRequest, res: Response) => {
             a.emoji ?? '🤖',
             a.system_prompt,
             a.provider ?? 'openrouter',
+            serializeProviderRoutingConfig(a.provider_routing),
             a.base_url ?? 'https://openrouter.ai/api/v1',
             a.model ?? 'openrouter/auto',
             a.temperature ?? 0.6,

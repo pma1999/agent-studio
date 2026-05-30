@@ -9,6 +9,13 @@ import type {
 } from '../types.js';
 import { runTool, toOpenRouterTools } from '../tools/index.js';
 import { parseReasoningToolCalls } from '../utils/parseReasoningToolCalls.js';
+import {
+  assertProviderRoutingCompatible,
+  buildOpenRouterProviderPreference,
+  parseProviderRoutingConfig,
+  resolveProviderRouting,
+  type ProviderRoutingConfig,
+} from '../providerRouting.js';
 
 const MEMBER_TIMEOUT_MS = 240000; // 4 minutes per member
 const SYNTHESIS_TIMEOUT_MS = 240000; // 4 minutes for synthesis
@@ -139,6 +146,9 @@ export class CouncilExecutor {
         console.log(`   ❌ Member ${index + 1} FAILED: ${options.memberModels[index].split('/').pop()} - ${errorMsg}`);
         return {
           modelId: options.memberModels[index],
+          providerRouting: resolveProviderRouting(
+            parseProviderRoutingConfig(options.memberProviderRouting?.[options.memberModels[index]])
+          ),
           content: '',
           tokensUsed: 0,
           promptTokens: 0,
@@ -223,6 +233,9 @@ export class CouncilExecutor {
   ): Promise<MemberResult> {
     const startTime = Date.now();
     const modelName = modelId.split('/').pop() || modelId;
+    const requestedProviderRouting = resolveProviderRouting(
+      parseProviderRoutingConfig(options.memberProviderRouting?.[modelId])
+    );
 
     console.log(`   🚀 [${index + 1}/${options.memberModels.length}] Starting: ${modelName}`);
 
@@ -263,6 +276,7 @@ export class CouncilExecutor {
     const responseTimeMs = Date.now() - startTime;
     const failedResult: MemberResult = {
       modelId,
+      providerRouting: requestedProviderRouting,
       content: '',
       tokensUsed: 0,
       promptTokens: 0,
@@ -326,6 +340,14 @@ export class CouncilExecutor {
       max_tokens: 4096,
       stream: true,
     };
+    const providerRouting = resolveProviderRouting(
+      parseProviderRoutingConfig(options.memberProviderRouting?.[modelId])
+    );
+    assertProviderRoutingCompatible(modelId, providerRouting);
+    const providerPreference = buildOpenRouterProviderPreference(providerRouting);
+    if (providerPreference) {
+      requestBody.provider = providerPreference;
+    }
 
     if (openRouterTools.length > 0) {
       requestBody.tools = openRouterTools;
@@ -517,6 +539,7 @@ export class CouncilExecutor {
 
     return {
       modelId,
+      providerRouting,
       content: fullContent,
       reasoningContent: fullReasoning || undefined,
       tokensUsed: totalTokens,
@@ -554,7 +577,11 @@ export class CouncilExecutor {
       'X-Title': 'Agent Studio',
     };
 
-    const requestBody = {
+    const providerRouting = resolveProviderRouting(
+      parseProviderRoutingConfig(options.synthesizerProviderRouting)
+    );
+    assertProviderRoutingCompatible(synthesizerModel, providerRouting);
+    const requestBody: Record<string, unknown> = {
       model: synthesizerModel,
       messages: [
         { role: 'system', content: 'You are a synthesis expert. Your task is to analyze multiple AI model responses and create a unified, comprehensive answer.' },
@@ -564,6 +591,10 @@ export class CouncilExecutor {
       max_tokens: 4096,
       stream: true,
     };
+    const providerPreference = buildOpenRouterProviderPreference(providerRouting);
+    if (providerPreference) {
+      requestBody.provider = providerPreference;
+    }
 
     // Notify synthesis start
     console.log(`\n🧠 SYNTHESIS STARTED`);
@@ -672,6 +703,7 @@ export class CouncilExecutor {
       completionTokens,
       cost,
       responseTimeMs,
+      providerRouting,
     };
   }
 
@@ -683,8 +715,10 @@ export class CouncilExecutor {
     messages: Array<{ role: string; content: string }>,
     maxTokens: number,
     synthesizerModel: string,
+    providerRouting?: ProviderRoutingConfig | null,
     signal?: AbortSignal
   ): Promise<string> {
+    const providerPreference = buildOpenRouterProviderPreference(providerRouting);
     const timeoutPromise = new Promise<never>((_, reject) => {
       setTimeout(() => reject(new Error('Comparison extraction timeout')), COMPARISON_EXTRACTION_TIMEOUT_MS);
     });
@@ -703,6 +737,7 @@ export class CouncilExecutor {
         temperature: 0.3,
         max_tokens: maxTokens,
         stream: false,
+        ...(providerPreference ? { provider: providerPreference } : {}),
         response_format: {
           type: 'json_schema',
           json_schema: COUNCIL_COMPARISON_JSON_SCHEMA,
@@ -755,8 +790,11 @@ export class CouncilExecutor {
     synthesisContent: string,
     userQuery: string,
     synthesizerModel: string,
+    providerRouting?: ProviderRoutingConfig | null,
     signal?: AbortSignal
   ): Promise<string | null> {
+    const normalizedProviderRouting = resolveProviderRouting(parseProviderRoutingConfig(providerRouting));
+    assertProviderRoutingCompatible(synthesizerModel, normalizedProviderRouting);
     const truncatedResponses = memberResults.map((r) => ({
       model_id: r.modelId,
       content: r.content.length > MAX_MEMBER_CONTENT_FOR_COMPARISON
@@ -791,6 +829,7 @@ Output only the JSON object that matches the schema. Use the exact model_id valu
         [{ role: 'user', content: prompt }],
         COMPARISON_EXTRACTION_MAX_TOKENS,
         synthesizerModel,
+        normalizedProviderRouting,
         signal
       );
     } catch (requestError) {
@@ -818,6 +857,7 @@ Output only the JSON object that matches the schema. Use the exact model_id valu
           repairMessages,
           COMPARISON_EXTRACTION_MAX_TOKENS,
           synthesizerModel,
+          normalizedProviderRouting,
           signal
         );
         const result = this.parseComparisonJson(repairRaw);

@@ -2,8 +2,29 @@ import { Router, Response } from 'express';
 import { nanoid } from 'nanoid';
 import db from '../db.js';
 import { AuthRequest } from '../middleware/auth.js';
+import {
+  assertProviderRoutingCompatible,
+  normalizeProviderRoutingConfig,
+  parseProviderRoutingConfig,
+  serializeProviderRoutingConfig,
+  type ProviderRoutingConfig,
+} from '../providerRouting.js';
 
 const router = Router();
+
+function normalizeProviderRoutingBody(value: unknown): { config: ProviderRoutingConfig | null; error?: string } {
+  if (value === undefined || value === null) return { config: null };
+  const config = normalizeProviderRoutingConfig(value);
+  if (!config) return { config: null, error: 'provider_routing is invalid' };
+  return { config };
+}
+
+function withParsedProviderRouting<T extends Record<string, unknown>>(row: T): T & { provider_routing: ProviderRoutingConfig | null } {
+  return {
+    ...row,
+    provider_routing: parseProviderRoutingConfig(row.provider_routing),
+  };
+}
 
 // GET /api/agents - List all agents (with tool_ids and mcp_server_ids)
 router.get('/', (req: AuthRequest, res: Response) => {
@@ -29,7 +50,7 @@ router.get('/', (req: AuthRequest, res: Response) => {
       mcpByAgent.get(l.agent_id)!.push(l.mcp_server_id);
     }
     const result = agents.map((a) => ({
-      ...a,
+      ...withParsedProviderRouting(a),
       tool_ids: toolByAgent.get(a.id as string) || [],
       mcp_server_ids: mcpByAgent.get(a.id as string) || [],
     }));
@@ -105,7 +126,7 @@ router.get('/:id', (req: AuthRequest, res: Response) => {
       }));
     }
     res.json({
-      ...agent,
+      ...withParsedProviderRouting(agent),
       tool_ids: toolIds,
       tools: toolsParsed,
       mcp_server_ids: mcpServerIds,
@@ -122,7 +143,7 @@ router.post('/', (req: AuthRequest, res: Response) => {
   try {
     const userId = req.userId;
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
-    const { name, description, emoji, system_prompt, base_url, model, temperature, max_tokens, web_search_enabled, reasoning_enabled, reasoning_effort, reasoning_max_tokens, tool_ids, mcp_server_ids, tool_choice, parallel_tool_calls, structured_output_enabled, structured_output_schema, response_healing_enabled } = req.body;
+    const { name, description, emoji, system_prompt, base_url, model, provider_routing, temperature, max_tokens, web_search_enabled, reasoning_enabled, reasoning_effort, reasoning_max_tokens, tool_ids, mcp_server_ids, tool_choice, parallel_tool_calls, structured_output_enabled, structured_output_schema, response_healing_enabled } = req.body;
 
     if (!name || !system_prompt) {
       return res.status(400).json({ error: 'Name and system_prompt are required' });
@@ -130,6 +151,16 @@ router.post('/', (req: AuthRequest, res: Response) => {
 
     const defaultBaseUrl = 'https://openrouter.ai/api/v1';
     const defaultModel = 'openrouter/auto';
+    const finalModel = model || defaultModel;
+    const routingInput = normalizeProviderRoutingBody(provider_routing);
+    if (routingInput.error) {
+      return res.status(400).json({ error: routingInput.error });
+    }
+    try {
+      assertProviderRoutingCompatible(finalModel, routingInput.config);
+    } catch (err) {
+      return res.status(400).json({ error: err instanceof Error ? err.message : 'Invalid provider routing' });
+    }
 
     let finalToolIds: string[] = Array.isArray(tool_ids) ? [...tool_ids] : [];
     const webSearchTool = db.prepare("SELECT id FROM tools WHERE name = 'web_search' AND user_id = ?").get(userId) as { id: string } | undefined;
@@ -147,8 +178,8 @@ router.post('/', (req: AuthRequest, res: Response) => {
     const responseHealingVal = response_healing_enabled ? 1 : 0;
     const schemaVal = typeof structured_output_schema === 'string' && structured_output_schema.trim() ? structured_output_schema.trim() : null;
     db.prepare(`
-      INSERT INTO agents (id, user_id, name, description, emoji, system_prompt, provider, base_url, model, temperature, max_tokens, web_search_enabled, reasoning_enabled, reasoning_effort, reasoning_max_tokens, tool_choice, parallel_tool_calls, structured_output_enabled, structured_output_schema, response_healing_enabled)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO agents (id, user_id, name, description, emoji, system_prompt, provider, provider_routing, base_url, model, temperature, max_tokens, web_search_enabled, reasoning_enabled, reasoning_effort, reasoning_max_tokens, tool_choice, parallel_tool_calls, structured_output_enabled, structured_output_schema, response_healing_enabled)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       userId,
@@ -157,8 +188,9 @@ router.post('/', (req: AuthRequest, res: Response) => {
       emoji || '🤖',
       system_prompt,
       'openrouter',
+      serializeProviderRoutingConfig(routingInput.config),
       base_url || defaultBaseUrl,
-      model || defaultModel,
+      finalModel,
       temperature ?? 0.6,
       max_tokens ?? 8192,
       web_search_enabled ? 1 : 0,
@@ -183,7 +215,7 @@ router.post('/', (req: AuthRequest, res: Response) => {
       }
     }
 
-    const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(id) as Record<string, unknown>;
+    const agent = withParsedProviderRouting(db.prepare('SELECT * FROM agents WHERE id = ?').get(id) as Record<string, unknown>);
     const toolLinks = db.prepare('SELECT tool_id FROM agent_tools WHERE agent_id = ?').all(id) as { tool_id: string }[];
     const mcpLinks = db.prepare('SELECT mcp_server_id FROM agent_mcp_servers WHERE agent_id = ?').all(id) as { mcp_server_id: string }[];
     (agent as Record<string, unknown>).tool_ids = toolLinks.map((l) => l.tool_id);
@@ -205,7 +237,7 @@ router.put('/:id', (req: AuthRequest, res: Response) => {
       return res.status(404).json({ error: 'Agent not found' });
     }
 
-    const { name, description, emoji, system_prompt, base_url, model, temperature, max_tokens, web_search_enabled, reasoning_enabled, reasoning_effort, reasoning_max_tokens, tool_ids, mcp_server_ids, tool_choice, parallel_tool_calls, structured_output_enabled, structured_output_schema, response_healing_enabled } = req.body;
+    const { name, description, emoji, system_prompt, base_url, model, provider_routing, temperature, max_tokens, web_search_enabled, reasoning_enabled, reasoning_effort, reasoning_max_tokens, tool_ids, mcp_server_ids, tool_choice, parallel_tool_calls, structured_output_enabled, structured_output_schema, response_healing_enabled } = req.body;
 
     let finalToolIds: string[] | null = null;
     if (Array.isArray(tool_ids)) {
@@ -224,6 +256,21 @@ router.put('/:id', (req: AuthRequest, res: Response) => {
     const structuredOutputVal = structured_output_enabled !== undefined ? (structured_output_enabled ? 1 : 0) : null;
     const responseHealingVal = response_healing_enabled !== undefined ? (response_healing_enabled ? 1 : 0) : null;
     const schemaVal = structured_output_schema !== undefined ? (typeof structured_output_schema === 'string' && structured_output_schema.trim() ? structured_output_schema.trim() : null) : null;
+    const routingInput = provider_routing !== undefined
+      ? normalizeProviderRoutingBody(provider_routing)
+      : { config: parseProviderRoutingConfig(existing.provider_routing) };
+    if (routingInput.error) {
+      return res.status(400).json({ error: routingInput.error });
+    }
+    const nextModel = model ?? existing.model as string;
+    const nextProviderRouting = provider_routing === undefined && model !== undefined && model !== existing.model
+      ? null
+      : routingInput.config;
+    try {
+      assertProviderRoutingCompatible(nextModel, nextProviderRouting);
+    } catch (err) {
+      return res.status(400).json({ error: err instanceof Error ? err.message : 'Invalid provider routing' });
+    }
     db.prepare(`
       UPDATE agents SET
         name = COALESCE(?, name),
@@ -231,6 +278,7 @@ router.put('/:id', (req: AuthRequest, res: Response) => {
         emoji = COALESCE(?, emoji),
         system_prompt = COALESCE(?, system_prompt),
         provider = COALESCE(?, provider),
+        provider_routing = ?,
         base_url = COALESCE(?, base_url),
         model = COALESCE(?, model),
         temperature = COALESCE(?, temperature),
@@ -252,6 +300,7 @@ router.put('/:id', (req: AuthRequest, res: Response) => {
       emoji ?? null,
       system_prompt ?? null,
       'openrouter',
+      serializeProviderRoutingConfig(nextProviderRouting),
       base_url ?? null,
       model ?? null,
       temperature ?? null,
@@ -284,7 +333,7 @@ router.put('/:id', (req: AuthRequest, res: Response) => {
       }
     }
 
-    const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(req.params.id) as Record<string, unknown>;
+    const agent = withParsedProviderRouting(db.prepare('SELECT * FROM agents WHERE id = ?').get(req.params.id) as Record<string, unknown>);
     const toolLinks = db.prepare('SELECT tool_id FROM agent_tools WHERE agent_id = ?').all(req.params.id) as { tool_id: string }[];
     const mcpLinks = db.prepare('SELECT mcp_server_id FROM agent_mcp_servers WHERE agent_id = ?').all(req.params.id) as { mcp_server_id: string }[];
     (agent as Record<string, unknown>).tool_ids = toolLinks.map((l) => l.tool_id);

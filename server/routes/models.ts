@@ -1,11 +1,15 @@
 import { Router, Response } from 'express';
 import { AuthRequest } from '../middleware/auth.js';
+import { getSettingValue } from './settings.js';
+import { normalizeOpenRouterEndpoints } from '../providerRouting.js';
 
 const router = Router();
 
 // In-memory cache for OpenRouter models
 let modelsCache: { data: any[]; timestamp: number } | null = null;
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const ENDPOINTS_CACHE_TTL = 60 * 1000; // 1 minute
+const endpointsCache = new Map<string, { data: unknown[]; timestamp: number }>();
 
 // GET /api/models/openrouter - Fetch available OpenRouter models (cached)
 router.get('/openrouter', async (_req: AuthRequest, res: Response) => {
@@ -50,6 +54,65 @@ router.get('/openrouter', async (_req: AuthRequest, res: Response) => {
       return res.json({ data: modelsCache.data });
     }
     res.status(500).json({ error: 'Failed to fetch OpenRouter models' });
+  }
+});
+
+// GET /api/models/openrouter/endpoints?model=author/slug - Fetch OpenRouter endpoints for a concrete model
+router.get('/openrouter/endpoints', async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.userId;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const model = typeof req.query.model === 'string' ? req.query.model.trim() : '';
+    if (!model) {
+      return res.status(400).json({ error: 'model query parameter is required' });
+    }
+    if (model === 'openrouter/auto') {
+      return res.status(400).json({ error: 'Endpoint selection requires a concrete model' });
+    }
+
+    const slash = model.indexOf('/');
+    if (slash <= 0 || slash === model.length - 1) {
+      return res.status(400).json({ error: 'model must be an OpenRouter id like author/slug' });
+    }
+
+    const apiKey = getSettingValue(userId, 'openrouter_api_key');
+    if (!apiKey?.trim()) {
+      return res.status(400).json({ error: 'OpenRouter API key not configured' });
+    }
+
+    const cacheKey = `${userId}:${model}`;
+    const cached = endpointsCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < ENDPOINTS_CACHE_TTL) {
+      return res.json({ data: cached.data });
+    }
+
+    const author = model.slice(0, slash);
+    const slug = model.slice(slash + 1);
+    const response = await fetch(
+      `https://openrouter.ai/api/v1/models/${encodeURIComponent(author)}/${encodeURIComponent(slug)}/endpoints`,
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+        },
+      }
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => '');
+      return res.status(response.status).json({
+        error: errorText || `Failed to fetch OpenRouter endpoints: ${response.statusText}`,
+      });
+    }
+
+    const json = await response.json();
+    const endpoints = normalizeOpenRouterEndpoints(json);
+    endpointsCache.set(cacheKey, { data: endpoints, timestamp: Date.now() });
+    res.json({ data: endpoints });
+  } catch (err) {
+    console.error('Error fetching OpenRouter endpoints:', err);
+    res.status(500).json({ error: 'Failed to fetch OpenRouter endpoints' });
   }
 });
 

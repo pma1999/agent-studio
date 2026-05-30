@@ -7,7 +7,7 @@ import { ToolCallTimeline } from './ToolCallTimeline';
 import { CouncilMessageView } from './CouncilMessageView';
 import { formatModelId, getModelAuthor, getAuthorColor, formatAuthor } from '../utils/modelUtils';
 import { getCouncilRun } from '../api/councilClient';
-import type { Message, Annotation, ToolExecution, StreamingActivityEvent, CouncilRunDetail } from '../types';
+import type { Message, Annotation, ToolExecution, StreamingActivityEvent, CouncilRunDetail, ProviderRoutingConfig } from '../types';
 
 /** Compact pill showing which model generated the message; provider color and full id in tooltip. */
 function MessageModelBadge({ modelId, title }: { modelId: string; title?: string }) {
@@ -29,6 +29,26 @@ function MessageModelBadge({ modelId, title }: { modelId: string; title?: string
       }}
     >
       {displayName}
+    </span>
+  );
+}
+
+function ProviderRoutingBadge({ routing }: { routing: ProviderRoutingConfig }) {
+  const label = routing.mode === 'auto' ? 'Auto route' : routing.provider_slug;
+  const title = routing.mode === 'auto'
+    ? 'OpenRouter automatic provider routing'
+    : `Requested provider endpoint: ${routing.provider_slug}${routing.allow_fallbacks ? ' with fallbacks' : ' without fallbacks'}`;
+  return (
+    <span
+      className="message-bubble-model-pill"
+      title={title}
+      style={{
+        color: 'var(--text-muted)',
+        borderColor: 'var(--border)',
+        background: 'var(--bg-elevated)',
+      }}
+    >
+      {label}
     </span>
   );
 }
@@ -173,6 +193,7 @@ interface MessageBubbleProps {
   toolActivityLive?: boolean;
   /** Model used for this message when streaming (before message.model is set). */
   streamingModel?: string;
+  streamingProviderRouting?: ProviderRoutingConfig | null;
 }
 
 function formatCost(cost: number): string {
@@ -412,6 +433,7 @@ export function MessageBubble({
   toolExecutions,
   toolActivityLive,
   streamingModel,
+  streamingProviderRouting,
 }: MessageBubbleProps) {
   const [copied, setCopied] = React.useState(false);
   const [councilRun, setCouncilRun] = React.useState<CouncilRunDetail | null>(null);
@@ -494,6 +516,9 @@ export function MessageBubble({
             )}
             {!isUser && (message.model ?? (isStreaming && streamingModel ? streamingModel : null)) && (
               <MessageModelBadge modelId={message.model ?? streamingModel!} />
+            )}
+            {!isUser && (message.provider_routing ?? (isStreaming ? streamingProviderRouting : null)) && (
+              <ProviderRoutingBadge routing={(message.provider_routing ?? streamingProviderRouting)!} />
             )}
             {!isUser && message.is_council_synthesis && (
               <span

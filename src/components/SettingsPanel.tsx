@@ -3,11 +3,12 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { CheckCircle, AlertCircle, ExternalLink, Zap, Coins, BarChart3, Loader2, Globe, KeyRound, Database, MessageSquare, Brain, Check, ChevronDown, Sparkles, Lightbulb, SlidersHorizontal, Wrench, Plug, Link } from 'lucide-react';
 import { useStore } from '../stores/store';
 import { settingsApi, toolsApi, mcpServersApi } from '../api/client';
-import type { ReasoningEffort, Tool, McpServer } from '../types';
+import type { ProviderRoutingConfig, ReasoningEffort, Tool, McpServer } from '../types';
 import { Modal } from './ui/Modal';
 import { Input } from './ui/Input';
 import { Button } from './ui/Button';
 import { ModelSelectorCore } from './ModelSelectorCore';
+import { ProviderRoutingSelector } from './ProviderRoutingSelector';
 import { PremiumToggle } from './ui/PremiumToggle';
 import { PremiumEmojiPicker } from './ui/PremiumEmojiPicker';
 import { PremiumSelect } from './ui/PremiumSelect';
@@ -263,6 +264,7 @@ function GeneralChatSettingsSection() {
 
   // Local state for editing
   const [localModel, setLocalModel] = useState('openrouter/auto');
+  const [localProviderRouting, setLocalProviderRouting] = useState<ProviderRoutingConfig | null>(null);
   const [localSystemPrompt, setLocalSystemPrompt] = useState('');
   const [localReasoningEnabled, setLocalReasoningEnabled] = useState(false);
   const [localReasoningEffort, setLocalReasoningEffort] = useState<ReasoningEffort>('medium');
@@ -291,6 +293,7 @@ function GeneralChatSettingsSection() {
   useEffect(() => {
     if (generalChatSettings) {
       setLocalModel(generalChatSettings.model);
+      setLocalProviderRouting(generalChatSettings.provider_routing ?? null);
       setLocalSystemPrompt(generalChatSettings.system_prompt);
       setLocalReasoningEnabled(generalChatSettings.reasoning_enabled || false);
       setLocalReasoningEffort(generalChatSettings.reasoning_effort || 'medium');
@@ -307,6 +310,7 @@ function GeneralChatSettingsSection() {
     try {
       await saveGeneralChatSettings({
         model: localModel,
+        provider_routing: localProviderRouting,
         system_prompt: localSystemPrompt,
         reasoning_enabled: localReasoningEnabled,
         reasoning_effort: localReasoningEffort,
@@ -330,6 +334,7 @@ function GeneralChatSettingsSection() {
 
   const hasChanges = generalChatSettings && (
     localModel !== generalChatSettings.model ||
+    JSON.stringify(localProviderRouting) !== JSON.stringify(generalChatSettings.provider_routing ?? null) ||
     localSystemPrompt !== generalChatSettings.system_prompt ||
     localReasoningEnabled !== (generalChatSettings.reasoning_enabled || false) ||
     localReasoningEffort !== (generalChatSettings.reasoning_effort || 'medium') ||
@@ -397,8 +402,17 @@ function GeneralChatSettingsSection() {
         <ModelSelectorCore
           variant="settings"
           value={localModel}
-          onChange={(id) => setLocalModel(id ?? 'openrouter/auto')}
+          onChange={(id) => {
+            setLocalModel(id ?? 'openrouter/auto');
+            setLocalProviderRouting(null);
+          }}
           label=""
+        />
+        <ProviderRoutingSelector
+          modelId={localModel}
+          value={localProviderRouting}
+          onChange={setLocalProviderRouting}
+          disabled={localModel === 'openrouter/auto'}
         />
       </div>
 
@@ -714,6 +728,7 @@ function GeneralChatSettingsSection() {
             onClick={() => {
               if (generalChatSettings) {
                 setLocalModel(generalChatSettings.model);
+                setLocalProviderRouting(generalChatSettings.provider_routing ?? null);
                 setLocalSystemPrompt(generalChatSettings.system_prompt);
                 setLocalReasoningEnabled(generalChatSettings.reasoning_enabled || false);
                 setLocalReasoningEffort(generalChatSettings.reasoning_effort || 'medium');

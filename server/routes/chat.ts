@@ -8,6 +8,15 @@ import { parseReasoningToolCalls } from '../utils/parseReasoningToolCalls.js';
 import type { McpConnection } from '../mcp/index.js';
 import { AuthRequest } from '../middleware/auth.js';
 import { trackStream, untrackStream, isShuttingDown } from '../shutdown.js';
+import {
+  assertProviderRoutingCompatible,
+  buildOpenRouterProviderPreference,
+  normalizeProviderRoutingConfig,
+  parseProviderRoutingConfig,
+  resolveProviderRouting,
+  serializeProviderRoutingConfig,
+  type ProviderRoutingConfig,
+} from '../providerRouting.js';
 
 const router = Router();
 
@@ -18,6 +27,7 @@ interface Agent {
   provider: string;
   base_url: string;
   model: string;
+  provider_routing?: unknown;
   temperature: number;
   max_tokens: number;
   web_search_enabled: number; // SQLite boolean
@@ -38,6 +48,7 @@ interface Conversation {
   title: string;
   /** Per-conversation model override (from conversations.model column). */
   model?: string | null;
+  provider_routing?: unknown;
 }
 
 interface Annotation {
@@ -179,8 +190,8 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       res.status(401).json({ error: 'Unauthorized' });
       return;
     }
-    const body = req.body as { conversation_id?: string; content?: string; reasoning?: unknown; attachments?: unknown; pdf_engine?: string; model?: string; invoke_agent_id?: string; timezone?: string };
-    const { conversation_id, content, reasoning, attachments: attachmentsRaw, pdf_engine: pdfEngineRaw, model: messageModel, invoke_agent_id, timezone: bodyTimezone } = body;
+    const body = req.body as { conversation_id?: string; content?: string; reasoning?: unknown; attachments?: unknown; pdf_engine?: string; model?: string; provider_routing?: unknown; invoke_agent_id?: string; timezone?: string };
+    const { conversation_id, content, reasoning, attachments: attachmentsRaw, pdf_engine: pdfEngineRaw, model: messageModel, provider_routing: messageProviderRoutingRaw, invoke_agent_id, timezone: bodyTimezone } = body;
 
     if (!conversation_id || !content) {
       res.status(400).json({ error: 'conversation_id and content are required' });
@@ -236,6 +247,30 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       res.status(400).json({ error: 'OpenRouter API key not configured. Please set your API key in Settings.' });
       return;
     }
+
+    const messageProviderRouting = messageProviderRoutingRaw === undefined
+      ? null
+      : normalizeProviderRoutingConfig(messageProviderRoutingRaw);
+    if (messageProviderRoutingRaw !== undefined && messageProviderRoutingRaw !== null && !messageProviderRouting) {
+      res.status(400).json({ error: 'provider_routing is invalid' });
+      return;
+    }
+
+    // Hierarchy: message override > conversation override > agent/general default > auto
+    const effectiveModel = messageModel || conversation.model || agent.model;
+    const effectiveProviderRouting = resolveProviderRouting(
+      messageProviderRouting,
+      parseProviderRoutingConfig(conversation.provider_routing),
+      parseProviderRoutingConfig(agent.provider_routing)
+    );
+    try {
+      assertProviderRoutingCompatible(effectiveModel, effectiveProviderRouting);
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'Invalid provider routing' });
+      return;
+    }
+    const openRouterProviderPreference = buildOpenRouterProviderPreference(effectiveProviderRouting);
+    const effectiveProviderRoutingJson = serializeProviderRoutingConfig(effectiveProviderRouting);
 
     // Save user message (content + optional attachments metadata for UI)
     const userMsgId = nanoid();
@@ -347,8 +382,6 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       'X-Title': 'Agent Studio',
     };
 
-    // Hierarchy: message override > conversation override > agent default
-    const effectiveModel = messageModel || conversation.model || agent.model;
     let actualModelFromResponse: string | null = null;
 
     const requestBody: Record<string, unknown> = {
@@ -358,6 +391,9 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       max_tokens: agent.max_tokens,
       stream: true,
     };
+    if (openRouterProviderPreference) {
+      requestBody.provider = openRouterProviderPreference;
+    }
     if (openRouterTools.length > 0) {
       requestBody.tools = openRouterTools;
       requestBody.tool_choice = agent.tool_choice === 'none' ? 'none' : 'auto';
@@ -454,12 +490,13 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     const saveAssistantMessage = (content: string, reasoning: string, toolCallsJson: string | null, anns: unknown[]) => {
       const assistantMsgId = nanoid();
       db.prepare(`
-        INSERT INTO messages (id, conversation_id, role, content, tokens_used, prompt_tokens, completion_tokens, cost, annotations, reasoning_content, reasoning_tokens, cached_tokens, tool_calls, model, processed_by_agent_id)
-        VALUES (?, ?, 'assistant', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO messages (id, conversation_id, role, content, provider_routing, tokens_used, prompt_tokens, completion_tokens, cost, annotations, reasoning_content, reasoning_tokens, cached_tokens, tool_calls, model, processed_by_agent_id)
+        VALUES (?, ?, 'assistant', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         assistantMsgId,
         conversation_id,
         content || '',
+        effectiveProviderRoutingJson,
         totalTokens,
         promptTokens,
         completionTokens,
@@ -875,6 +912,7 @@ function loadGeneralChatSettings(userId: string): {
   mcp_server_ids: string[];
   tool_choice: string;
   parallel_tool_calls: number;
+  provider_routing: ProviderRoutingConfig | null;
 } {
   const defaults = {
     model: 'openrouter/auto',
@@ -886,6 +924,7 @@ function loadGeneralChatSettings(userId: string): {
     mcp_server_ids: [] as string[],
     tool_choice: 'auto',
     parallel_tool_calls: 1,
+    provider_routing: null as ProviderRoutingConfig | null,
   };
 
   try {
@@ -896,6 +935,7 @@ function loadGeneralChatSettings(userId: string): {
     const reasoningMaxTokens = getSettingValue(userId, 'general_chat_reasoning_max_tokens');
     const toolChoice = getSettingValue(userId, 'general_chat_tool_choice');
     const parallelToolCallsRaw = getSettingValue(userId, 'general_chat_parallel_tool_calls');
+    const providerRouting = parseProviderRoutingConfig(getSettingValue(userId, 'general_chat_provider_routing'));
 
     let tool_ids = defaults.tool_ids;
     const rawToolIds = getSettingValue(userId, 'general_chat_tool_ids');
@@ -931,6 +971,7 @@ function loadGeneralChatSettings(userId: string): {
       mcp_server_ids,
       tool_choice: toolChoice === 'none' ? 'none' : 'auto',
       parallel_tool_calls,
+      provider_routing: providerRouting,
     };
   } catch {
     return defaults;
@@ -954,6 +995,7 @@ function createGeneralChatAgent(settings: ReturnType<typeof loadGeneralChatSetti
     reasoning_max_tokens: settings.reasoning_max_tokens,
     tool_choice: settings.tool_choice,
     parallel_tool_calls: settings.parallel_tool_calls,
+    provider_routing: settings.provider_routing,
     structured_output_enabled: 0,
     structured_output_schema: null,
     response_healing_enabled: 0,

@@ -8,8 +8,9 @@ import { Input } from './ui/Input';
 import { TextArea } from './ui/TextArea';
 import { Modal } from './ui/Modal';
 import { ModelSelectorCore } from './ModelSelectorCore';
+import { ProviderRoutingSelector } from './ProviderRoutingSelector';
 import { useOpenRouterModels } from '../hooks/useOpenRouterModels';
-import type { CouncilMember } from '../types';
+import type { CouncilMember, ProviderRoutingConfig } from '../types';
 
 const DEFAULT_SYNTHESIS_TEMPLATE = `You are a synthesis expert. Your task is to analyze multiple AI model responses to the same query and create a unified, comprehensive answer.
 
@@ -51,7 +52,9 @@ interface CouncilFormData {
   name: string;
   description: string;
   member_models: string[];
+  member_provider_routing: Record<string, ProviderRoutingConfig>;
   synthesizer_model: string;
+  synthesizer_provider_routing: ProviderRoutingConfig | null;
   synthesis_prompt_template: string;
   auto_expand_responses: boolean;
   show_member_responses: boolean;
@@ -72,7 +75,9 @@ export function CouncilEditor() {
     name: '',
     description: '',
     member_models: [],
+    member_provider_routing: {},
     synthesizer_model: '',
+    synthesizer_provider_routing: null,
     synthesis_prompt_template: '',
     auto_expand_responses: false,
     show_member_responses: true,
@@ -115,7 +120,9 @@ export function CouncilEditor() {
         name: editingCouncil.name,
         description: editingCouncil.description || '',
         member_models: editingCouncil.member_models,
+        member_provider_routing: editingCouncil.member_provider_routing || {},
         synthesizer_model: editingCouncil.synthesizer_model,
+        synthesizer_provider_routing: editingCouncil.synthesizer_provider_routing ?? null,
         synthesis_prompt_template: editingCouncil.synthesis_prompt_template || '',
         auto_expand_responses: editingCouncil.auto_expand_responses,
         show_member_responses: editingCouncil.show_member_responses,
@@ -127,7 +134,9 @@ export function CouncilEditor() {
         name: '',
         description: '',
         member_models: [],
+        member_provider_routing: {},
         synthesizer_model: '',
+        synthesizer_provider_routing: null,
         synthesis_prompt_template: '',
         auto_expand_responses: false,
         show_member_responses: true,
@@ -171,7 +180,9 @@ export function CouncilEditor() {
         name: form.name.trim(),
         description: form.description.trim() || undefined,
         member_models: form.member_models,
+        member_provider_routing: form.member_provider_routing,
         synthesizer_model: form.synthesizer_model,
+        synthesizer_provider_routing: form.synthesizer_provider_routing,
         synthesis_prompt_template: form.synthesis_prompt_template.trim() || undefined,
         auto_expand_responses: form.auto_expand_responses,
         show_member_responses: form.show_member_responses,
@@ -204,7 +215,8 @@ export function CouncilEditor() {
     setForm(prev => {
       const exists = prev.member_models.includes(modelId);
       if (exists) {
-        return { ...prev, member_models: prev.member_models.filter(m => m !== modelId) };
+        const { [modelId]: _removed, ...member_provider_routing } = prev.member_provider_routing;
+        return { ...prev, member_models: prev.member_models.filter(m => m !== modelId), member_provider_routing };
       }
       if (prev.member_models.length >= 10) {
         return prev; // Max 10 models
@@ -218,6 +230,15 @@ export function CouncilEditor() {
     setForm((prev) => {
       if (prev.member_models.includes(modelId) || prev.member_models.length >= 10) return prev;
       return { ...prev, member_models: [...prev.member_models, modelId] };
+    });
+  };
+
+  const updateMemberProviderRouting = (modelId: string, routing: ProviderRoutingConfig | null) => {
+    setForm((prev) => {
+      const nextRouting = { ...prev.member_provider_routing };
+      if (routing) nextRouting[modelId] = routing;
+      else delete nextRouting[modelId];
+      return { ...prev, member_provider_routing: nextRouting };
     });
   };
 
@@ -319,17 +340,17 @@ export function CouncilEditor() {
 
           {/* Selected Models Chips */}
           {form.member_models.length > 0 && (
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
               {form.member_models.map((modelId) => {
                 const model = availableModelMap.get(modelId);
                 return (
-                  <span
+                  <div
                     key={modelId}
                     style={{
-                      display: 'inline-flex',
+                      display: 'flex',
                       alignItems: 'center',
-                      gap: '4px',
-                      padding: '4px 8px',
+                      gap: '8px',
+                      padding: '6px 8px',
                       background: 'rgba(74, 168, 125, 0.1)',
                       border: '1px solid rgba(74, 168, 125, 0.2)',
                       borderRadius: 'var(--radius-sm)',
@@ -337,7 +358,15 @@ export function CouncilEditor() {
                       color: '#4aa87d',
                     }}
                   >
-                    {model?.name?.slice(0, 25) || modelId.slice(0, 25)}
+                    <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {model?.name?.slice(0, 32) || modelId.slice(0, 32)}
+                    </span>
+                    <ProviderRoutingSelector
+                      modelId={modelId}
+                      value={form.member_provider_routing[modelId] ?? null}
+                      onChange={(routing) => updateMemberProviderRouting(modelId, routing)}
+                      compact
+                    />
                     <button
                       onClick={() => toggleModel(modelId)}
                       style={{
@@ -351,7 +380,7 @@ export function CouncilEditor() {
                     >
                       <X size={12} />
                     </button>
-                  </span>
+                  </div>
                 );
               })}
             </div>
@@ -392,10 +421,20 @@ export function CouncilEditor() {
 
           <ModelSelectorCore
             value={form.synthesizer_model || null}
-            onChange={(modelId) => setForm({ ...form, synthesizer_model: modelId ?? '' })}
+            onChange={(modelId) => setForm({
+              ...form,
+              synthesizer_model: modelId ?? '',
+              synthesizer_provider_routing: null,
+            })}
             variant="council"
             disabled={loadingModels}
             label="Synthesizer model"
+          />
+          <ProviderRoutingSelector
+            modelId={form.synthesizer_model || null}
+            value={form.synthesizer_provider_routing}
+            onChange={(routing) => setForm({ ...form, synthesizer_provider_routing: routing })}
+            disabled={!form.synthesizer_model}
           />
 
           <div style={{ fontSize: '0.6875rem', color: 'var(--text-muted)' }}>

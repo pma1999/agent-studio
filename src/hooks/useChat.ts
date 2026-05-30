@@ -3,12 +3,13 @@ import { useStore } from '../stores/store';
 import { streamChat } from '../api/client';
 import { conversationsApi } from '../api/client';
 import { streamCouncilChat } from '../api/councilClient';
-import type { Message, ChatAttachmentInput, PDFEngine, CouncilConfig } from '../types';
+import type { Message, ChatAttachmentInput, PDFEngine, CouncilConfig, ProviderRoutingConfig } from '../types';
 
 export interface SendMessageOptions {
   attachments?: ChatAttachmentInput[];
   pdf_engine?: PDFEngine;
   model?: string;
+  providerRouting?: ProviderRoutingConfig | null;
   invokeAgentId?: string;
   councilConfig?: CouncilConfig;
   /** When set, server loads full council config (including tool_ids) from DB instead of using councilConfig inline */
@@ -190,6 +191,7 @@ export function useChat() {
     const attachments = options?.attachments;
     const pdf_engine = options?.pdf_engine;
     const model = options?.model;
+    const providerRouting = options?.providerRouting;
     const invokeAgentId = options?.invokeAgentId;
 
     // Add user message to local state immediately
@@ -268,6 +270,7 @@ export function useChat() {
       attachments,
       pdf_engine,
       model,
+      providerRouting,
       invokeAgentId,
     );
   }, [activeConversationId, isStreaming, addMessage, setIsStreaming, setStreamingContent, appendStreamingContent, appendStreamingContentEvent, setAbortController, setStreamStartTime, setReasoningContent, appendReasoningContent, appendStreamingReasoningEvent, reasoningOverride, upsertStreamingToolCall, completeStreamingToolCall, resetStreamingActivityEvents, loadMessages, loadConversations, selectedAgentId]);

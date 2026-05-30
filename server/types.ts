@@ -1,5 +1,6 @@
 // Server-side type definitions for Council feature
 // These mirror the client types but are defined here to avoid cross-rootDir imports
+import type { ProviderRoutingConfig } from './providerRouting.js';
 
 export interface Tool {
   id: string;
@@ -21,6 +22,8 @@ export interface ToolCallSpec {
 export interface CouncilConfig {
   member_models: string[];
   synthesizer_model: string;
+  member_provider_routing?: Record<string, ProviderRoutingConfig>;
+  synthesizer_provider_routing?: ProviderRoutingConfig | null;
   synthesis_prompt_template?: string;
   show_member_responses?: boolean;
   tool_ids?: string[];
@@ -35,6 +38,7 @@ export interface ToolResultRecord {
 
 export interface MemberResult {
   modelId: string;
+  providerRouting?: ProviderRoutingConfig;
   content: string;
   reasoningContent?: string;
   tokensUsed: number;
@@ -72,6 +76,7 @@ export interface CouncilComparison {
 
 export interface SynthesisResult {
   content: string;
+  providerRouting?: ProviderRoutingConfig;
   reasoningContent?: string;
   tokensUsed: number;
   promptTokens: number;
@@ -110,6 +115,8 @@ export interface CouncilExecutionOptions {
   content: string;
   memberModels: string[];
   synthesizerModel: string;
+  memberProviderRouting?: Record<string, ProviderRoutingConfig>;
+  synthesizerProviderRouting?: ProviderRoutingConfig | null;
   systemPrompt: string;
   messageHistory: Array<{ role: string; content: string }>;
   attachments?: Array<{ filename: string; file_data?: string; url?: string }>;
@@ -129,7 +136,9 @@ export interface CouncilMember {
   name: string;
   description?: string;
   member_models: string[];
+  member_provider_routing?: Record<string, ProviderRoutingConfig>;
   synthesizer_model: string;
+  synthesizer_provider_routing?: ProviderRoutingConfig | null;
   synthesis_prompt_template?: string;
   auto_expand_responses: boolean;
   show_member_responses: boolean;
@@ -146,6 +155,8 @@ export interface CouncilRun {
   message_id?: string;
   user_message_id: string;
   synthesizer_model: string;
+  synthesizer_provider_routing?: ProviderRoutingConfig | null;
+  member_provider_routing?: Record<string, ProviderRoutingConfig>;
   member_count: number;
   system_prompt?: string;
   status: 'running' | 'completed' | 'partial_failure' | 'failed';
@@ -173,6 +184,7 @@ export interface CouncilRunDetail extends CouncilRun {
     tokens_used: number;
     cost: number;
     model: string;
+    provider_routing?: ProviderRoutingConfig | null;
     council_run_id: string;
     created_at: string;
   };
@@ -182,6 +194,7 @@ export interface CouncilResponse {
   id: string;
   council_run_id: string;
   model_id: string;
+  provider_routing?: ProviderRoutingConfig | null;
   content: string;
   reasoning_content?: string;
   tokens_used: number;

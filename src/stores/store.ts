@@ -14,6 +14,7 @@ import type {
   ReasoningEffort,
   CouncilMember,
   CouncilConfig,
+  ProviderRoutingConfig,
 } from '../types';
 import type { AuthUser } from '../api/client';
 import { agentsApi, conversationsApi, messagesApi, settingsApi, creditsApi, usageApi, authApi } from '../api/client';
@@ -80,6 +81,9 @@ interface AppState {
   conversationModelOverrides: Record<string, string | null>;
   setConversationModelOverride: (conversationId: string, model: string | null) => void;
   getConversationModelOverride: (conversationId: string) => string | null;
+  conversationProviderRoutingOverrides: Record<string, ProviderRoutingConfig | null>;
+  setConversationProviderRoutingOverride: (conversationId: string, providerRouting: ProviderRoutingConfig | null) => void;
+  getConversationProviderRoutingOverride: (conversationId: string) => ProviderRoutingConfig | null;
 
   // Ordered live activity timeline (text/thinking/tool) for current streaming message
   streamingActivityEvents: StreamingActivityEvent[];
@@ -291,6 +295,17 @@ export const useStore = create<AppState>((set, get) => ({
   getConversationModelOverride: (conversationId) => {
     return get().conversationModelOverrides[conversationId] ?? null;
   },
+  conversationProviderRoutingOverrides: {},
+  setConversationProviderRoutingOverride: (conversationId, providerRouting) =>
+    set((state) => ({
+      conversationProviderRoutingOverrides: {
+        ...state.conversationProviderRoutingOverrides,
+        [conversationId]: providerRouting,
+      },
+    })),
+  getConversationProviderRoutingOverride: (conversationId) => {
+    return get().conversationProviderRoutingOverrides[conversationId] ?? null;
+  },
 
   // Ordered streaming activity timeline (append by arrival order)
   streamingActivityEvents: [],
@@ -499,9 +514,28 @@ export const useStore = create<AppState>((set, get) => ({
       const tool_choice = toolChoiceRaw === 'none' ? 'none' : 'auto';
       const parallelRaw = settings['general_chat_parallel_tool_calls'];
       const parallel_tool_calls = parallelRaw === '0' ? 0 : 1;
+      let provider_routing: ProviderRoutingConfig | null = null;
+      try {
+        const raw = settings['general_chat_provider_routing'];
+        if (raw && typeof raw === 'string') {
+          const parsed = JSON.parse(raw) as Record<string, unknown>;
+          if (parsed?.mode === 'auto') {
+            provider_routing = { mode: 'auto' };
+          } else if (parsed?.mode === 'provider' && typeof parsed.provider_slug === 'string' && parsed.provider_slug.trim()) {
+            provider_routing = {
+              mode: 'provider',
+              provider_slug: parsed.provider_slug.trim(),
+              allow_fallbacks: parsed.allow_fallbacks !== false,
+            };
+          }
+        }
+      } catch {
+        // keep null
+      }
 
       const generalSettings: GeneralChatSettings = {
         model: settings['general_chat_model'] || 'openrouter/auto',
+        provider_routing,
         system_prompt: settings['general_chat_system_prompt'] || 'You are a helpful AI assistant. You provide thoughtful, well-structured responses.',
         emoji: settings['general_chat_emoji'] || '💬',
         tool_ids,
@@ -524,6 +558,7 @@ export const useStore = create<AppState>((set, get) => ({
     try {
       await Promise.all([
         settingsApi.set('general_chat_model', settings.model),
+        settingsApi.set('general_chat_provider_routing', settings.provider_routing ? JSON.stringify(settings.provider_routing) : ''),
         settingsApi.set('general_chat_system_prompt', settings.system_prompt),
         settingsApi.set('general_chat_emoji', settings.emoji || '💬'),
         settingsApi.set('general_chat_tool_ids', JSON.stringify(settings.tool_ids ?? [])),

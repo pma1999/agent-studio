@@ -3,6 +3,13 @@ import { nanoid } from 'nanoid';
 import db from '../db.js';
 import { AuthRequest } from '../middleware/auth.js';
 import type { CouncilMember, CouncilRun, CouncilResponse, CouncilRunDetail, CouncilComparison, ToolResultRecord, ToolCallSpec } from '../types.js';
+import {
+  assertProviderRoutingCompatible,
+  parseProviderRoutingConfig,
+  parseProviderRoutingMap,
+  serializeProviderRoutingConfig,
+  serializeProviderRoutingMap,
+} from '../providerRouting.js';
 
 const router = Router();
 
@@ -87,7 +94,8 @@ router.get('/runs/:id', (req: AuthRequest, res: Response) => {
         m.content as synthesis_content,
         m.reasoning_content as synthesis_reasoning,
         m.tokens_used as synthesis_tokens,
-        m.cost as synthesis_cost
+        m.cost as synthesis_cost,
+        m.provider_routing as synthesis_provider_routing
       FROM council_runs cr
       LEFT JOIN messages m ON cr.message_id = m.id
       WHERE cr.id = ? AND cr.user_id = ?
@@ -96,6 +104,7 @@ router.get('/runs/:id', (req: AuthRequest, res: Response) => {
       synthesis_reasoning?: string;
       synthesis_tokens?: number;
       synthesis_cost?: number;
+      synthesis_provider_routing?: unknown;
       comparison_json?: string | null;
     }) | undefined;
 
@@ -107,6 +116,7 @@ router.get('/runs/:id', (req: AuthRequest, res: Response) => {
     type RawRow = Omit<CouncilResponse, 'tool_calls' | 'tool_results'> & {
       tool_calls?: string | ToolCallSpec[];
       tool_results?: string;
+      provider_routing?: unknown;
     };
     const rawResponses = db.prepare(`
       SELECT * FROM council_responses
@@ -136,7 +146,12 @@ router.get('/runs/:id', (req: AuthRequest, res: Response) => {
           tool_results = undefined;
         }
       }
-      return { ...rest, tool_calls, tool_results };
+      return {
+        ...rest,
+        provider_routing: parseProviderRoutingConfig(rest.provider_routing),
+        tool_calls,
+        tool_results,
+      };
     });
 
     const rawShow = (run as { show_member_responses?: number }).show_member_responses;
@@ -154,6 +169,8 @@ router.get('/runs/:id', (req: AuthRequest, res: Response) => {
       show_member_responses: rawShow !== 0,
       responses,
       comparison,
+      synthesizer_provider_routing: parseProviderRoutingConfig((run as unknown as { synthesizer_provider_routing?: unknown }).synthesizer_provider_routing),
+      member_provider_routing: parseProviderRoutingMap((run as unknown as { member_provider_routing?: unknown }).member_provider_routing),
       synthesis_message: run.synthesis_content
         ? {
             id: run.message_id || '',
@@ -164,6 +181,7 @@ router.get('/runs/:id', (req: AuthRequest, res: Response) => {
             tokens_used: run.synthesis_tokens || 0,
             cost: run.synthesis_cost || 0,
             model: run.synthesizer_model,
+            provider_routing: parseProviderRoutingConfig(run.synthesis_provider_routing),
             council_run_id: run.id,
             created_at: run.completed_at || run.started_at,
           }
@@ -196,6 +214,8 @@ router.get('/members', (req: AuthRequest, res: Response) => {
     const parsed = members.map((m) => ({
       ...m,
       member_models: JSON.parse(m.member_models as unknown as string),
+      member_provider_routing: parseProviderRoutingMap((m as unknown as { member_provider_routing?: unknown }).member_provider_routing),
+      synthesizer_provider_routing: parseProviderRoutingConfig((m as unknown as { synthesizer_provider_routing?: unknown }).synthesizer_provider_routing),
       tool_ids: JSON.parse((m.tool_ids as unknown as string) || '[]'),
       mcp_server_ids: JSON.parse((m.mcp_server_ids as unknown as string) || '[]'),
     }));
@@ -220,7 +240,9 @@ router.post('/members', (req: AuthRequest, res: Response) => {
       name,
       description,
       member_models,
+      member_provider_routing,
       synthesizer_model,
+      synthesizer_provider_routing,
       synthesis_prompt_template,
       auto_expand_responses,
       show_member_responses,
@@ -244,22 +266,39 @@ router.post('/members', (req: AuthRequest, res: Response) => {
       return;
     }
 
+    const parsedMemberProviderRouting = parseProviderRoutingMap(member_provider_routing);
+    const parsedSynthesizerProviderRouting = parseProviderRoutingConfig(synthesizer_provider_routing);
+    try {
+      for (const modelId of member_models) {
+        assertProviderRoutingCompatible(modelId, parsedMemberProviderRouting[modelId]);
+      }
+      assertProviderRoutingCompatible(
+        synthesizer_model || 'anthropic/claude-3.5-sonnet',
+        parsedSynthesizerProviderRouting
+      );
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'Invalid provider routing' });
+      return;
+    }
+
     const id = nanoid();
     const now = new Date().toISOString();
 
     db.prepare(`
       INSERT INTO council_members (
-        id, user_id, name, description, member_models, synthesizer_model,
-        synthesis_prompt_template, auto_expand_responses, show_member_responses,
+        id, user_id, name, description, member_models, member_provider_routing, synthesizer_model,
+        synthesizer_provider_routing, synthesis_prompt_template, auto_expand_responses, show_member_responses,
         tool_ids, mcp_server_ids, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       userId,
       name.trim(),
       description || null,
       JSON.stringify(member_models),
+      serializeProviderRoutingMap(parsedMemberProviderRouting),
       synthesizer_model || 'anthropic/claude-3.5-sonnet',
+      serializeProviderRoutingConfig(parsedSynthesizerProviderRouting),
       synthesis_prompt_template || null,
       auto_expand_responses ? 1 : 0,
       show_member_responses !== false ? 1 : 0,
@@ -273,6 +312,8 @@ router.post('/members', (req: AuthRequest, res: Response) => {
     res.status(201).json({
       ...created,
       member_models: JSON.parse(created.member_models as unknown as string),
+      member_provider_routing: parseProviderRoutingMap((created as unknown as { member_provider_routing?: unknown }).member_provider_routing),
+      synthesizer_provider_routing: parseProviderRoutingConfig((created as unknown as { synthesizer_provider_routing?: unknown }).synthesizer_provider_routing),
       tool_ids: JSON.parse((created.tool_ids as unknown as string) || '[]'),
       mcp_server_ids: JSON.parse((created.mcp_server_ids as unknown as string) || '[]'),
     });
@@ -294,7 +335,7 @@ router.put('/members/:id', (req: AuthRequest, res: Response) => {
     const { id } = req.params;
 
     // Verify ownership
-    const existing = db.prepare('SELECT id FROM council_members WHERE id = ? AND user_id = ?').get(id, userId);
+    const existing = db.prepare('SELECT * FROM council_members WHERE id = ? AND user_id = ?').get(id, userId) as CouncilMember | undefined;
     if (!existing) {
       res.status(404).json({ error: 'Council configuration not found' });
       return;
@@ -304,7 +345,9 @@ router.put('/members/:id', (req: AuthRequest, res: Response) => {
       name,
       description,
       member_models,
+      member_provider_routing,
       synthesizer_model,
+      synthesizer_provider_routing,
       synthesis_prompt_template,
       auto_expand_responses,
       show_member_responses,
@@ -324,6 +367,25 @@ router.put('/members/:id', (req: AuthRequest, res: Response) => {
       }
     }
 
+    const nextMemberModels = member_models ?? JSON.parse(existing.member_models as unknown as string) as string[];
+    const nextMemberProviderRouting = member_provider_routing !== undefined
+      ? parseProviderRoutingMap(member_provider_routing)
+      : parseProviderRoutingMap((existing as unknown as { member_provider_routing?: unknown }).member_provider_routing);
+    const nextSynthesizerModel = synthesizer_model ?? existing.synthesizer_model;
+    const nextSynthesizerProviderRouting = synthesizer_provider_routing !== undefined
+      ? parseProviderRoutingConfig(synthesizer_provider_routing)
+      : parseProviderRoutingConfig((existing as unknown as { synthesizer_provider_routing?: unknown }).synthesizer_provider_routing);
+
+    try {
+      for (const modelId of nextMemberModels) {
+        assertProviderRoutingCompatible(modelId, nextMemberProviderRouting[modelId]);
+      }
+      assertProviderRoutingCompatible(nextSynthesizerModel, nextSynthesizerProviderRouting);
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'Invalid provider routing' });
+      return;
+    }
+
     const updates: string[] = [];
     const values: unknown[] = [];
 
@@ -339,9 +401,17 @@ router.put('/members/:id', (req: AuthRequest, res: Response) => {
       updates.push('member_models = ?');
       values.push(JSON.stringify(member_models));
     }
+    if (member_provider_routing !== undefined) {
+      updates.push('member_provider_routing = ?');
+      values.push(serializeProviderRoutingMap(nextMemberProviderRouting));
+    }
     if (synthesizer_model !== undefined) {
       updates.push('synthesizer_model = ?');
       values.push(synthesizer_model);
+    }
+    if (synthesizer_provider_routing !== undefined) {
+      updates.push('synthesizer_provider_routing = ?');
+      values.push(serializeProviderRoutingConfig(nextSynthesizerProviderRouting));
     }
     if (synthesis_prompt_template !== undefined) {
       updates.push('synthesis_prompt_template = ?');
@@ -384,6 +454,8 @@ router.put('/members/:id', (req: AuthRequest, res: Response) => {
     res.json({
       ...updated,
       member_models: JSON.parse(updated.member_models as unknown as string),
+      member_provider_routing: parseProviderRoutingMap((updated as unknown as { member_provider_routing?: unknown }).member_provider_routing),
+      synthesizer_provider_routing: parseProviderRoutingConfig((updated as unknown as { synthesizer_provider_routing?: unknown }).synthesizer_provider_routing),
       tool_ids: JSON.parse((updated.tool_ids as unknown as string) || '[]'),
       mcp_server_ids: JSON.parse((updated.mcp_server_ids as unknown as string) || '[]'),
     });

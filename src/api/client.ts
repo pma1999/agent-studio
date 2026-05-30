@@ -4,6 +4,7 @@ import type {
   Conversation,
   Message,
   OpenRouterModel,
+  OpenRouterEndpoint,
   UsageStats,
   OpenRouterCredits,
   Annotation,
@@ -19,6 +20,7 @@ import type {
   CouncilRun,
   CouncilRunDetail,
   CouncilConfig,
+  ProviderRoutingConfig,
 } from '../types';
 
 /** In production (Vercel), set VITE_API_URL to your Railway API URL (e.g. https://your-app.railway.app). No trailing slash. */
@@ -127,6 +129,10 @@ export const conversationsApi = {
   updateModel: (id: string, model: string | null) => request<Conversation>(`/conversations/${id}/model`, {
     method: 'PUT',
     body: JSON.stringify({ model }),
+  }),
+  updateProviderRouting: (id: string, provider_routing: ProviderRoutingConfig | null) => request<Conversation>(`/conversations/${id}/provider-routing`, {
+    method: 'PUT',
+    body: JSON.stringify({ provider_routing }),
   }),
   delete: (id: string) => request<{ success: boolean }>(`/conversations/${id}`, {
     method: 'DELETE',
@@ -241,6 +247,7 @@ export async function streamChat(
   attachments?: ChatAttachmentInput[],
   pdf_engine?: PDFEngine,
   model?: string,
+  providerRouting?: ProviderRoutingConfig | null,
   invokeAgentId?: string,
 ): Promise<void> {
   try {
@@ -276,6 +283,9 @@ export async function streamChat(
     }
     if (model) {
       body.model = model;
+    }
+    if (providerRouting) {
+      body.provider_routing = providerRouting;
     }
 
     // Retry loop for 503 (server restarting during deploy)
@@ -374,6 +384,9 @@ export async function streamChat(
 // Models
 export const modelsApi = {
   openrouter: () => request<{ data: OpenRouterModel[] }>('/models/openrouter'),
+  openrouterEndpoints: (model: string) => request<{ data: OpenRouterEndpoint[] }>(
+    `/models/openrouter/endpoints?model=${encodeURIComponent(model)}`
+  ),
 };
 
 // Settings
@@ -438,7 +451,9 @@ export const councilsApi = {
     name: string;
     description?: string;
     member_models: string[];
+    member_provider_routing?: Record<string, ProviderRoutingConfig>;
     synthesizer_model: string;
+    synthesizer_provider_routing?: ProviderRoutingConfig | null;
     synthesis_prompt_template?: string;
     auto_expand_responses?: boolean;
     show_member_responses?: boolean;
@@ -452,7 +467,9 @@ export const councilsApi = {
     name: string;
     description?: string;
     member_models: string[];
+    member_provider_routing?: Record<string, ProviderRoutingConfig>;
     synthesizer_model: string;
+    synthesizer_provider_routing?: ProviderRoutingConfig | null;
     synthesis_prompt_template?: string;
     auto_expand_responses?: boolean;
     show_member_responses?: boolean;
