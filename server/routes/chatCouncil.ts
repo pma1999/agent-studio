@@ -5,6 +5,7 @@ import { getSettingValue } from './settings.js';
 import { resolveToolsForAgent, resolveToolsFromIds, toOpenRouterTools, appendToolInstructionsIfNeeded } from '../tools/index.js';
 import { CouncilExecutor } from '../services/councilExecutor.js';
 import { getProviderConfig, resolveProviderId, type ProviderId } from '../providers/index.js';
+import { buildDateTimeContext } from '../dateTimeContext.js';
 import { AuthRequest } from '../middleware/auth.js';
 import { trackStream, untrackStream } from '../shutdown.js';
 import type { McpConnection } from '../mcp/index.js';
@@ -100,43 +101,6 @@ function validateAttachments(attachments: unknown): { valid: ChatAttachmentInput
   return { valid };
 }
 
-function buildSystemPromptWithDateTime(systemPrompt: string, userTimezone?: string | null): string {
-  const now = new Date();
-  const utcStr = now.toLocaleString('en-GB', {
-    weekday: 'long',
-    day: 'numeric',
-    month: 'long',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-    timeZone: 'UTC',
-  });
-
-  let contextLine: string;
-  if (userTimezone) {
-    try {
-      const localStr = now.toLocaleString('en-GB', {
-        weekday: 'long',
-        day: 'numeric',
-        month: 'long',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-        hour12: false,
-        timeZone: userTimezone,
-      });
-      contextLine = `[Context: Current date and time (user's local time) — ${localStr} (${userTimezone}). UTC: ${utcStr}.]`;
-    } catch {
-      contextLine = `[Context: Current date and time — ${utcStr} UTC.]`;
-    }
-  } else {
-    contextLine = `[Context: Current date and time — ${utcStr} UTC.]`;
-  }
-  return `${contextLine}\n\n${systemPrompt}`;
-}
 
 function normalizeCouncilConfig(config: CouncilConfig): CouncilConfig {
   const memberProviderRouting = parseProviderRoutingMap(config.member_provider_routing);
@@ -414,10 +378,9 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       synthesizerModel,
       memberProviderRouting: councilConfig.member_provider_routing,
       synthesizerProviderRouting: councilConfig.synthesizer_provider_routing,
-      systemPrompt: appendToolInstructionsIfNeeded(
-        buildSystemPromptWithDateTime(agent.system_prompt, bodyTimezone),
-        resolvedTools
-      ),
+      // System prompt stays static (cacheable prefix); date/time goes on the current turn.
+      systemPrompt: appendToolInstructionsIfNeeded(agent.system_prompt, resolvedTools),
+      dateTimeContext: buildDateTimeContext(bodyTimezone),
       messageHistory: history as Array<{ role: string; content: string }>,
       attachments: attachments.length > 0 ? attachments : undefined,
       pdfEngine: pdf_engine,

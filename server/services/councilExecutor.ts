@@ -24,6 +24,7 @@ import {
   type ProviderConfig,
   type ProviderId,
 } from '../providers/index.js';
+import { injectDateTimeIntoCurrentTurn } from '../dateTimeContext.js';
 
 const MEMBER_TIMEOUT_MS = 240000; // 4 minutes per member
 const SYNTHESIS_TIMEOUT_MS = 240000; // 4 minutes for synthesis
@@ -350,6 +351,12 @@ export class CouncilExecutor {
         }));
         (messages[lastIdx] as Record<string, unknown>).content = [textPart, ...fileParts];
       }
+    }
+
+    // Append the (volatile) date/time to the current user turn so the system prompt +
+    // history stay a cacheable prefix (matters for DeepSeek context caching across turns).
+    if (options.dateTimeContext) {
+      injectDateTimeIntoCurrentTurn(messages, options.dateTimeContext);
     }
 
     // Resolve tools

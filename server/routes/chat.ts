@@ -25,6 +25,7 @@ import {
   computeDeepSeekCost,
   deepSeekCachedTokens,
 } from '../providers/index.js';
+import { buildDateTimeContext, injectDateTimeIntoCurrentTurn } from '../dateTimeContext.js';
 
 const router = Router();
 
@@ -125,46 +126,6 @@ function validateAttachments(attachments: unknown): { valid: ChatAttachmentInput
     });
   }
   return { valid };
-}
-
-/** Returns true if the string is a valid IANA timezone (e.g. Europe/Madrid, America/New_York). */
-function isValidTimezone(tz: string): boolean {
-  if (typeof tz !== 'string' || !tz.trim()) return false;
-  const s = tz.trim();
-  if (s.length < 2 || s.length > 40) return false;
-  if (!/^[A-Za-z0-9_+\-/]+$/.test(s)) return false;
-  try {
-    Intl.DateTimeFormat(undefined, { timeZone: s });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-const DATE_TIME_OPTS: Intl.DateTimeFormatOptions = {
-  weekday: 'long',
-  day: 'numeric',
-  month: 'long',
-  year: 'numeric',
-  hour: '2-digit',
-  minute: '2-digit',
-  second: '2-digit',
-  hour12: false,
-};
-
-/** Prepends current date/time context to the system prompt so the model knows "now" in the user's timezone. */
-function buildSystemPromptWithDateTime(systemPrompt: string, userTimezone?: string | null): string {
-  const now = new Date();
-  const utcStr = now.toLocaleString('en-GB', { ...DATE_TIME_OPTS, timeZone: 'UTC' });
-
-  let contextLine: string;
-  if (userTimezone && isValidTimezone(userTimezone)) {
-    const localStr = now.toLocaleString('en-GB', { ...DATE_TIME_OPTS, timeZone: userTimezone });
-    contextLine = `[Context: Current date and time (user's local time) — ${localStr} (${userTimezone}). UTC: ${utcStr}. Use this for time-sensitive answers.]`;
-  } else {
-    contextLine = `[Context: Current date and time — ${utcStr} UTC. Use this for time-sensitive answers.]`;
-  }
-  return `${contextLine}\n\n${systemPrompt}`;
 }
 
 // POST /api/chat - Send message and stream response
@@ -352,8 +313,9 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       getSettingValue(userId, 'user_timezone') ||
       null;
 
+    // System prompt is kept STATIC (no volatile timestamp) so it stays a cacheable prefix.
     let messages: Array<{ role: string; content?: string | unknown[] | null; tool_call_id?: string; tool_calls?: unknown[]; annotations?: unknown[] }> = [
-      { role: 'system', content: buildSystemPromptWithDateTime(agent.system_prompt, userTimezone) },
+      { role: 'system', content: agent.system_prompt },
       ...history,
     ];
 
@@ -370,6 +332,10 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       }));
       (messages[lastIdx] as Record<string, unknown>).content = [textPart, ...fileParts];
     }
+
+    // Inject the (volatile, per-second) date/time into the CURRENT user turn — never the
+    // system prompt — so system + history remain a stable, cacheable prefix (DeepSeek/Anthropic/OpenAI).
+    injectDateTimeIntoCurrentTurn(messages, buildDateTimeContext(userTimezone));
 
     // Resolve tools for this agent (with user context for settings)
     const resolved = agent.id === 'general' && generalSettings

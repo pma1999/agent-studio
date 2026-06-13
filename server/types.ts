@@ -118,6 +118,8 @@ export interface CouncilExecutionOptions {
   memberProviderRouting?: Record<string, ProviderRoutingConfig>;
   synthesizerProviderRouting?: ProviderRoutingConfig | null;
   systemPrompt: string;
+  /** Ephemeral date/time context appended to the current user turn (kept out of the cacheable prefix). */
+  dateTimeContext?: string;
   messageHistory: Array<{ role: string; content: string }>;
   attachments?: Array<{ filename: string; file_data?: string; url?: string }>;
   pdfEngine?: string;
