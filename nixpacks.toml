@@ -9,4 +9,4 @@ cmds = ["npm ci"]
 cmds = ["npm run build:server"]
 
 [start]
-cmd = "npm run start"
+cmd = "node dist/server/index.js"
