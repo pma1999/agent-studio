@@ -178,8 +178,8 @@ export function AgentList() {
                 left: 0,
                 right: 0,
                 height: '3px',
-                background: 'linear-gradient(90deg, #8b5cf6, #a78bfa)',
-                opacity: 0.6,
+                background: 'var(--accent)',
+                opacity: 0.5,
               }} />
 
               {/* Emoji + Name */}

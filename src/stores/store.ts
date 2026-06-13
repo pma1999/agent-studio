@@ -218,10 +218,14 @@ export const useStore = create<AppState>((set, get) => ({
   // Conversations
   conversations: [],
   conversationsLoading: false,
-  loadConversations: async (agentId?: string) => {
+  loadConversations: async (_agentId?: string) => {
     set({ conversationsLoading: true });
     try {
-      const conversations = await conversationsApi.list(agentId);
+      // Always load the FULL conversation list. The redesigned sidebar shows a
+      // single unified, agent-labeled "Recents" list; scoping/recovery is done
+      // client-side via search. The agentId param is kept for signature
+      // compatibility with existing callers but no longer filters the fetch.
+      const conversations = await conversationsApi.list();
       set({ conversations, conversationsLoading: false });
     } catch (err) {
       console.error('Failed to load conversations:', err);

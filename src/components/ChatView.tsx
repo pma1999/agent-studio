@@ -704,9 +704,9 @@ export function ChatView() {
                       height: '32px',
                       padding: '0 10px',
                       borderRadius: 'var(--radius-md)',
-                      background: reasoningActive ? 'rgba(212, 160, 48, 0.12)' : 'var(--bg-surface)',
-                      border: `1px solid ${reasoningActive ? 'rgba(212, 160, 48, 0.3)' : 'var(--border)'}`,
-                      color: reasoningActive ? '#d4a030' : 'var(--text-muted)',
+                      background: reasoningActive ? 'var(--accent-soft)' : 'var(--bg-surface)',
+                      border: `1px solid ${reasoningActive ? 'var(--border-accent)' : 'var(--border)'}`,
+                      color: reasoningActive ? 'var(--accent)' : 'var(--text-muted)',
                       cursor: 'pointer',
                       display: 'flex',
                       alignItems: 'center',
@@ -721,8 +721,8 @@ export function ChatView() {
                         e.currentTarget.style.background = 'var(--bg-hover)';
                         e.currentTarget.style.borderColor = 'var(--border-light)';
                       } else {
-                        e.currentTarget.style.background = 'rgba(212, 160, 48, 0.18)';
-                        e.currentTarget.style.boxShadow = '0 0 12px rgba(212, 160, 48, 0.12)';
+                        e.currentTarget.style.background = 'var(--accent-soft)';
+                        e.currentTarget.style.boxShadow = '0 0 12px var(--accent-soft)';
                       }
                     }}
                     onMouseLeave={(e) => {
@@ -730,7 +730,7 @@ export function ChatView() {
                         e.currentTarget.style.background = 'var(--bg-surface)';
                         e.currentTarget.style.borderColor = 'var(--border)';
                       } else {
-                        e.currentTarget.style.background = 'rgba(212, 160, 48, 0.12)';
+                        e.currentTarget.style.background = 'var(--accent-soft)';
                         e.currentTarget.style.boxShadow = 'none';
                       }
                     }}
@@ -746,8 +746,8 @@ export function ChatView() {
                         width: '5px',
                         height: '5px',
                         borderRadius: '50%',
-                        background: '#d4a030',
-                        boxShadow: '0 0 6px rgba(212, 160, 48, 0.6)',
+                        background: 'var(--accent)',
+                        boxShadow: '0 0 6px rgb(var(--copper-rgb) / 0.6)',
                       }} />
                     )}
                   </button>
@@ -788,7 +788,7 @@ export function ChatView() {
                             alignItems: 'center',
                             gap: '8px',
                           }}>
-                            <Brain size={14} style={{ color: reasoningActive ? '#d4a030' : 'var(--text-muted)' }} />
+                            <Brain size={14} style={{ color: reasoningActive ? 'var(--accent)' : 'var(--text-muted)' }} />
                             <span style={{
                               fontSize: '0.8125rem',
                               fontWeight: 600,
@@ -805,8 +805,8 @@ export function ChatView() {
                               width: '34px',
                               height: '18px',
                               borderRadius: '9px',
-                              background: reasoningActive ? '#d4a030' : 'var(--bg-base)',
-                              border: `1px solid ${reasoningActive ? '#d4a030' : 'var(--border)'}`,
+                              background: reasoningActive ? 'var(--accent)' : 'var(--bg-base)',
+                              border: `1px solid ${reasoningActive ? 'var(--accent)' : 'var(--border)'}`,
                               position: 'relative',
                               cursor: 'pointer',
                               transition: 'all 0.2s ease',
@@ -863,8 +863,8 @@ export function ChatView() {
                                       borderRadius: 'calc(var(--radius-sm) - 2px)',
                                       cursor: 'pointer',
                                       transition: 'all 0.12s ease',
-                                      background: isActive ? 'rgba(212, 160, 48, 0.18)' : 'transparent',
-                                      color: isActive ? '#d4a030' : 'var(--text-muted)',
+                                      background: isActive ? 'var(--accent-soft)' : 'transparent',
+                                      color: isActive ? 'var(--accent)' : 'var(--text-muted)',
                                     }}
                                   >
                                     {opt.short}
@@ -1211,7 +1211,7 @@ export function ChatView() {
                 <>
                   {isMobile ? 'Enter to send' : 'Enter to send · Shift+Enter for new line'}
                   {reasoningActive && (
-                    <span style={{ color: '#d4a030', marginLeft: '8px' }}>
+                    <span style={{ color: 'var(--accent)', marginLeft: '8px' }}>
                       · Thinking: {currentEffort}
                     </span>
                   )}

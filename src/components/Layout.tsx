@@ -1,6 +1,7 @@
 import React from 'react';
 import { Menu } from 'lucide-react';
 import { Sidebar } from './Sidebar';
+import { IconButton } from './ui/IconButton';
 import { useIsMobile } from '../utils/breakpoints';
 import { useStore } from '../stores/store';
 
@@ -40,38 +41,16 @@ export function Layout({ children }: LayoutProps) {
             background: 'var(--bg-base)',
             minHeight: 44,
           }}>
-            <button
-              type="button"
-              onClick={() => setSidebarMobileOpen(true)}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                width: 44,
-                height: 44,
-                margin: -8,
-                marginLeft: -4,
-                background: 'transparent',
-                border: 'none',
-                borderRadius: 'var(--radius-sm)',
-                color: 'var(--text-secondary)',
-                cursor: 'pointer',
-                transition: 'all var(--transition-fast)',
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.background = 'var(--bg-hover)';
-                e.currentTarget.style.color = 'var(--text-primary)';
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = 'transparent';
-                e.currentTarget.style.color = 'var(--text-secondary)';
-              }}
+            <IconButton
               id="sidebar-open-menu-btn"
-              aria-label="Open menu"
+              label="Open menu"
+              size="lg"
+              onClick={() => setSidebarMobileOpen(true)}
               aria-expanded={menuOpen}
+              style={{ marginLeft: -6 }}
             >
               <Menu size={22} />
-            </button>
+            </IconButton>
           </div>
         )}
         {children}

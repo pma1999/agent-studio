@@ -93,10 +93,10 @@ function JsonContentView({ content }: { content: string }) {
 
   return (
     <div style={{
-      border: '1px solid rgba(99, 102, 241, 0.2)',
+      border: '1px solid var(--border-subtle)',
       borderRadius: 'var(--radius-sm)',
       overflow: 'hidden',
-      background: 'rgba(99, 102, 241, 0.03)',
+      background: 'var(--surface-2)',
     }}>
       <div style={{
         display: 'flex',
@@ -123,7 +123,7 @@ function JsonContentView({ content }: { content: string }) {
             fontFamily: 'var(--font-body)',
           }}
         >
-          <Braces size={12} style={{ color: '#6366f1' }} />
+          <Braces size={12} style={{ color: 'var(--accent)' }} />
           JSON
           {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
         </button>
@@ -141,8 +141,8 @@ function JsonContentView({ content }: { content: string }) {
                 border: 'none',
                 borderRadius: 'var(--radius-sm)',
                 cursor: 'pointer',
-                background: view === v ? 'rgba(99, 102, 241, 0.15)' : 'transparent',
-                color: view === v ? '#6366f1' : 'var(--text-muted)',
+                background: view === v ? 'var(--accent-soft)' : 'transparent',
+                color: view === v ? 'var(--accent)' : 'var(--text-muted)',
                 textTransform: 'capitalize',
                 transition: 'all 0.15s ease',
               }}
@@ -257,8 +257,8 @@ function ReasoningBlock({
     <div style={{
       marginBottom: '10px',
       borderRadius: 'var(--radius-sm)',
-      border: '1px solid rgba(139, 92, 246, 0.15)',
-      background: 'rgba(139, 92, 246, 0.04)',
+      border: '1px solid var(--border-subtle)',
+      background: 'var(--surface-2)',
       overflow: 'hidden',
     }}>
       {/* Header */}
@@ -273,7 +273,7 @@ function ReasoningBlock({
           background: 'transparent',
           border: 'none',
           cursor: 'pointer',
-          color: '#a78bfa',
+          color: 'var(--text-accent)',
           fontSize: '0.75rem',
           fontWeight: 600,
           fontFamily: 'var(--font-body)',
@@ -355,8 +355,8 @@ function CitationLinks({ annotations }: { annotations: Annotation[] }) {
     <div style={{
       marginTop: '10px',
       padding: '8px 12px',
-      background: 'rgba(139, 92, 246, 0.04)',
-      border: '1px solid rgba(139, 92, 246, 0.12)',
+      background: 'var(--accent-ghost)',
+      border: '1px solid var(--border-accent)',
       borderRadius: 'var(--radius-sm)',
       display: 'flex',
       flexDirection: 'column',
@@ -387,31 +387,6 @@ function CitationLinks({ annotations }: { annotations: Annotation[] }) {
             target="_blank"
             rel="noopener noreferrer"
             className="message-citation-link"
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: '4px',
-              padding: '3px 8px',
-              fontSize: '0.6875rem',
-              fontFamily: 'var(--font-mono)',
-              color: '#a78bfa',
-              background: 'rgba(139, 92, 246, 0.08)',
-              border: '1px solid rgba(139, 92, 246, 0.15)',
-              borderRadius: '4px',
-              textDecoration: 'none',
-              transition: 'all 0.15s ease',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.background = 'rgba(139, 92, 246, 0.15)';
-              e.currentTarget.style.borderColor = 'rgba(139, 92, 246, 0.3)';
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.background = 'rgba(139, 92, 246, 0.08)';
-              e.currentTarget.style.borderColor = 'rgba(139, 92, 246, 0.15)';
-            }}
           >
             <span style={{ flexShrink: 0, opacity: 0.7 }}>[{i + 1}]</span>
             {ann.title || (ann.url ? extractDomain(ann.url) : '')}
@@ -525,9 +500,9 @@ export function MessageBubble({
                 className="message-bubble-model-pill"
                 title="This response was synthesized from multiple AI models"
                 style={{
-                  color: '#4aa87d',
-                  borderColor: '#4aa87d',
-                  background: 'rgba(74, 168, 125, 0.14)',
+                  color: 'var(--accent)',
+                  borderColor: 'var(--border-accent)',
+                  background: 'var(--accent-ghost)',
                   display: 'inline-flex',
                   alignItems: 'center',
                   gap: '4px',

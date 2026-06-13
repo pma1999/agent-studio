@@ -311,7 +311,7 @@ export function McpView() {
               width: '40px',
               height: '40px',
               borderRadius: 'var(--radius-sm)',
-              background: server.transport === 'url' ? 'rgba(34, 197, 94, 0.12)' : 'rgba(139, 92, 246, 0.12)',
+              background: server.transport === 'url' ? 'var(--state-success-soft)' : 'var(--accent-soft)',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',

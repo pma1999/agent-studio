@@ -351,11 +351,11 @@ export function CouncilEditor() {
                       alignItems: 'center',
                       gap: '8px',
                       padding: '6px 8px',
-                      background: 'rgba(74, 168, 125, 0.1)',
-                      border: '1px solid rgba(74, 168, 125, 0.2)',
+                      background: 'var(--accent-ghost)',
+                      border: '1px solid var(--border-accent)',
                       borderRadius: 'var(--radius-sm)',
                       fontSize: '0.75rem',
-                      color: '#4aa87d',
+                      color: 'var(--text-accent)',
                     }}
                   >
                     <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>

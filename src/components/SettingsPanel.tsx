@@ -417,12 +417,12 @@ function GeneralChatSettingsSection() {
             width: '40px',
             height: '40px',
             borderRadius: 'var(--radius-lg)',
-            background: 'linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%)',
+            background: 'var(--accent)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
             color: '#fff',
-            boxShadow: '0 4px 14px rgba(59, 130, 246, 0.4)',
+            boxShadow: '0 4px 14px rgb(var(--copper-rgb) / 0.4)',
           }}
         >
           <MessageSquare size={20} />
@@ -551,7 +551,7 @@ function GeneralChatSettingsSection() {
             label="Enable Extended Thinking"
             description="Show the model's reasoning process before the final response"
             size="md"
-            color="#d4a030"
+            color="var(--accent)"
           />
         </div>
 
@@ -590,9 +590,9 @@ function GeneralChatSettingsSection() {
                       style={{
                         padding: '8px 14px',
                         borderRadius: 'var(--radius-md)',
-                        border: `1.5px solid ${localReasoningEffort === option.value ? '#d4a030' : 'var(--border)'}`,
+                        border: `1.5px solid ${localReasoningEffort === option.value ? 'var(--accent)' : 'var(--border)'}`,
                         background: localReasoningEffort === option.value
-                          ? 'rgba(212, 160, 48, 0.12)'
+                          ? 'var(--accent-soft)'
                           : 'var(--bg-elevated)',
                         cursor: 'pointer',
                         transition: 'all 0.15s ease',
@@ -601,7 +601,7 @@ function GeneralChatSettingsSection() {
                       <div style={{
                         fontSize: '0.8125rem',
                         fontWeight: localReasoningEffort === option.value ? 600 : 500,
-                        color: localReasoningEffort === option.value ? '#d4a030' : 'var(--text-primary)',
+                        color: localReasoningEffort === option.value ? 'var(--accent)' : 'var(--text-primary)',
                         textTransform: 'capitalize',
                       }}>
                         {option.label}
@@ -819,7 +819,7 @@ function GeneralChatSettingsSection() {
             borderRadius: 'var(--radius-md)',
             border: 'none',
             background: hasChanges
-              ? 'linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%)'
+              ? 'var(--accent)'
               : 'var(--bg-elevated)',
             color: hasChanges ? '#fff' : 'var(--text-muted)',
             fontSize: '0.875rem',
@@ -828,7 +828,7 @@ function GeneralChatSettingsSection() {
             display: 'flex',
             alignItems: 'center',
             gap: '8px',
-            boxShadow: hasChanges ? '0 4px 14px rgba(59, 130, 246, 0.4)' : 'none',
+            boxShadow: hasChanges ? '0 4px 14px rgb(var(--copper-rgb) / 0.4)' : 'none',
             transition: 'all 0.2s ease',
           }}
         >
@@ -1150,7 +1150,7 @@ function CreditsDashboard() {
         alignItems: 'center',
         gap: '8px',
       }}>
-        <Coins size={15} style={{ color: '#8b5cf6' }} />
+        <Coins size={15} style={{ color: 'var(--accent)' }} />
         <span style={{
           fontSize: '0.8125rem',
           fontWeight: 600,
@@ -1475,7 +1475,7 @@ export function SettingsPanel() {
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
             <div style={{
               width: '28px', height: '28px', borderRadius: 'var(--radius-sm)',
-              background: 'rgba(139, 92, 246, 0.15)', border: '1px solid rgba(139, 92, 246, 0.3)',
+              background: 'var(--accent-soft)', border: '1px solid var(--border-accent)',
               display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--accent)',
             }}>
               <Globe size={15} />
@@ -1524,8 +1524,8 @@ export function SettingsPanel() {
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
             <div style={{
               width: '28px', height: '28px', borderRadius: 'var(--radius-sm)',
-              background: 'rgba(34, 197, 94, 0.15)', border: '1px solid rgba(34, 197, 94, 0.3)',
-              display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgb(34, 197, 94)',
+              background: 'var(--state-success-soft)', border: '1px solid rgb(var(--green-rgb) / 0.3)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--state-success)',
             }}>
               <Link size={15} />
             </div>

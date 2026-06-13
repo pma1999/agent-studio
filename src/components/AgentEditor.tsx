@@ -303,8 +303,8 @@ export function AgentEditor() {
                 alignItems: 'center',
                 justifyContent: 'space-between',
                 padding: '10px 12px',
-                background: form.web_search_enabled ? 'rgba(139, 92, 246, 0.06)' : 'var(--bg-base)',
-                border: `1px solid ${form.web_search_enabled ? 'rgba(139, 92, 246, 0.2)' : 'var(--border)'}`,
+                background: form.web_search_enabled ? 'var(--accent-ghost)' : 'var(--bg-base)',
+                border: `1px solid ${form.web_search_enabled ? 'var(--border-accent)' : 'var(--border)'}`,
                 borderRadius: 'var(--radius-sm)',
                 cursor: 'pointer',
                 transition: 'all 0.15s ease',
@@ -321,7 +321,7 @@ export function AgentEditor() {
                 }}
               >
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <Globe size={14} style={{ color: form.web_search_enabled ? '#a78bfa' : 'var(--text-muted)' }} />
+                  <Globe size={14} style={{ color: form.web_search_enabled ? 'var(--accent)' : 'var(--text-muted)' }} />
                   <div>
                     <div style={{
                       fontSize: '0.8125rem',
@@ -343,8 +343,8 @@ export function AgentEditor() {
                   width: '36px',
                   height: '20px',
                   borderRadius: '10px',
-                  background: form.web_search_enabled ? '#8b5cf6' : 'var(--bg-elevated)',
-                  border: `1px solid ${form.web_search_enabled ? '#8b5cf6' : 'var(--border)'}`,
+                  background: form.web_search_enabled ? 'var(--accent)' : 'var(--bg-elevated)',
+                  border: `1px solid ${form.web_search_enabled ? 'var(--accent)' : 'var(--border)'}`,
                   position: 'relative',
                   transition: 'all 0.2s ease',
                   flexShrink: 0,
@@ -519,7 +519,7 @@ export function AgentEditor() {
                 display: 'flex',
                 flexDirection: 'column',
                 gap: '0',
-                border: `1px solid ${form.reasoning_enabled ? 'rgba(212, 160, 48, 0.25)' : 'var(--border)'}`,
+                border: `1px solid ${form.reasoning_enabled ? 'var(--border-accent)' : 'var(--border)'}`,
                 borderRadius: 'var(--radius-sm)',
                 overflow: 'hidden',
                 transition: 'all 0.2s ease',
@@ -531,14 +531,14 @@ export function AgentEditor() {
                     alignItems: 'center',
                     justifyContent: 'space-between',
                     padding: '10px 12px',
-                    background: form.reasoning_enabled ? 'rgba(212, 160, 48, 0.06)' : 'var(--bg-base)',
+                    background: form.reasoning_enabled ? 'var(--accent-ghost)' : 'var(--bg-base)',
                     cursor: 'pointer',
                     transition: 'all 0.15s ease',
                   }}
                   onClick={() => updateField('reasoning_enabled', !form.reasoning_enabled)}
                 >
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <Brain size={14} style={{ color: form.reasoning_enabled ? '#d4a030' : 'var(--text-muted)' }} />
+                    <Brain size={14} style={{ color: form.reasoning_enabled ? 'var(--accent)' : 'var(--text-muted)' }} />
                     <div>
                       <div style={{
                         fontSize: '0.8125rem',
@@ -560,8 +560,8 @@ export function AgentEditor() {
                     width: '36px',
                     height: '20px',
                     borderRadius: '10px',
-                    background: form.reasoning_enabled ? '#d4a030' : 'var(--bg-elevated)',
-                    border: `1px solid ${form.reasoning_enabled ? '#d4a030' : 'var(--border)'}`,
+                    background: form.reasoning_enabled ? 'var(--accent)' : 'var(--bg-elevated)',
+                    border: `1px solid ${form.reasoning_enabled ? 'var(--accent)' : 'var(--border)'}`,
                     position: 'relative',
                     transition: 'all 0.2s ease',
                     flexShrink: 0,
@@ -625,8 +625,8 @@ export function AgentEditor() {
                                 borderRadius: 'calc(var(--radius-sm) - 2px)',
                                 cursor: 'pointer',
                                 transition: 'all 0.15s ease',
-                                background: isActive ? 'rgba(212, 160, 48, 0.2)' : 'transparent',
-                                color: isActive ? '#d4a030' : 'var(--text-muted)',
+                                background: isActive ? 'var(--accent-soft)' : 'transparent',
+                                color: isActive ? 'var(--accent)' : 'var(--text-muted)',
                                 letterSpacing: '0.01em',
                               }}
                             >
@@ -675,7 +675,7 @@ export function AgentEditor() {
                             outline: 'none',
                             transition: 'border-color var(--transition-fast)',
                           }}
-                          onFocus={(e) => { e.currentTarget.style.borderColor = '#d4a030'; }}
+                          onFocus={(e) => { e.currentTarget.style.borderColor = 'var(--accent)'; }}
                           onBlur={(e) => { e.currentTarget.style.borderColor = 'var(--border)'; }}
                         />
                         <span style={{
@@ -722,7 +722,7 @@ export function AgentEditor() {
                   onClick={() => updateField('structured_output_enabled', !form.structured_output_enabled)}
                 >
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <Braces size={14} style={{ color: form.structured_output_enabled ? '#6366f1' : 'var(--text-muted)' }} />
+                    <Braces size={14} style={{ color: form.structured_output_enabled ? 'var(--accent)' : 'var(--text-muted)' }} />
                     <div>
                       <div style={{
                         fontSize: '0.8125rem',
@@ -740,8 +740,8 @@ export function AgentEditor() {
                     width: '36px',
                     height: '20px',
                     borderRadius: '10px',
-                    background: form.structured_output_enabled ? '#6366f1' : 'var(--bg-elevated)',
-                    border: `1px solid ${form.structured_output_enabled ? '#6366f1' : 'var(--border)'}`,
+                    background: form.structured_output_enabled ? 'var(--accent)' : 'var(--bg-elevated)',
+                    border: `1px solid ${form.structured_output_enabled ? 'var(--accent)' : 'var(--border)'}`,
                     position: 'relative',
                     transition: 'all 0.2s ease',
                     flexShrink: 0,
@@ -795,7 +795,7 @@ export function AgentEditor() {
                           resize: 'vertical',
                           transition: 'border-color var(--transition-fast)',
                         }}
-                        onFocus={(e) => { e.currentTarget.style.borderColor = '#6366f1'; }}
+                        onFocus={(e) => { e.currentTarget.style.borderColor = 'var(--accent)'; }}
                         onBlur={(e) => { e.currentTarget.style.borderColor = 'var(--border)'; }}
                       />
                       <p style={{
@@ -809,7 +809,7 @@ export function AgentEditor() {
                           href="https://openrouter.ai/docs/guides/features/structured-outputs"
                           target="_blank"
                           rel="noopener noreferrer"
-                          style={{ color: '#6366f1', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 2 }}
+                          style={{ color: 'var(--accent)', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 2 }}
                         >
                           Docs <ExternalLink size={10} />
                         </a>
@@ -827,7 +827,7 @@ export function AgentEditor() {
                         type="checkbox"
                         checked={form.response_healing_enabled ?? false}
                         onChange={(e) => updateField('response_healing_enabled', e.target.checked)}
-                        style={{ width: '16px', height: '16px', marginTop: 2, accentColor: '#6366f1' }}
+                        style={{ width: '16px', height: '16px', marginTop: 2, accentColor: 'var(--accent)' }}
                       />
                       <span>
                         <strong>Response Healing</strong> — Repair malformed JSON; uses non-streaming for this request.{' '}
@@ -835,7 +835,7 @@ export function AgentEditor() {
                           href="https://openrouter.ai/docs/guides/features/plugins/response-healing"
                           target="_blank"
                           rel="noopener noreferrer"
-                          style={{ color: '#6366f1', textDecoration: 'none' }}
+                          style={{ color: 'var(--accent)', textDecoration: 'none' }}
                         >
                           Learn more
                         </a>

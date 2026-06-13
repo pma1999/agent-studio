@@ -170,81 +170,40 @@ function App() {
     );
   }
 
+  const viewMotion = {
+    initial: { opacity: 0, x: -20 },
+    animate: { opacity: 1, x: 0 },
+    exit: { opacity: 0, x: 20 },
+    transition: { duration: 0.25, ease: [0.4, 0, 0.2, 1] as [number, number, number, number] },
+  };
+  const viewStyle: React.CSSProperties = { height: '100%', overflow: 'hidden' };
+
   return (
     <Layout>
       <AnimatePresence mode="wait">
         {currentView === 'agents' && (
-          <motion.div
-            key="agents"
-            initial={{ opacity: 0, x: -20 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: 20 }}
-            transition={{ duration: 0.25, ease: [0.4, 0, 0.2, 1] }}
-            style={{ height: '100%', overflow: 'hidden' }}
-          >
+          <motion.div key="agents" {...viewMotion} style={viewStyle}>
             <AgentList />
           </motion.div>
         )}
         {currentView === 'tools' && (
-          <motion.div
-            key="tools"
-            initial={{ opacity: 0, x: -20 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: 20 }}
-            transition={{ duration: 0.25, ease: [0.4, 0, 0.2, 1] }}
-            style={{ height: '100%', overflow: 'hidden' }}
-          >
+          <motion.div key="tools" {...viewMotion} style={viewStyle}>
             <ToolsView />
           </motion.div>
         )}
         {currentView === 'mcp' && (
-          <motion.div
-            key="mcp"
-            initial={{ opacity: 0, x: -20 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: 20 }}
-            transition={{ duration: 0.25, ease: [0.4, 0, 0.2, 1] }}
-            style={{ height: '100%', overflow: 'hidden' }}
-          >
+          <motion.div key="mcp" {...viewMotion} style={viewStyle}>
             <McpView />
           </motion.div>
         )}
         {currentView === 'councils' && (
-          <motion.div
-            key="councils"
-            initial={{ opacity: 0, x: -20 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: 20 }}
-            transition={{ duration: 0.25, ease: [0.4, 0, 0.2, 1] }}
-            style={{ height: '100%', overflow: 'hidden' }}
-          >
+          <motion.div key="councils" {...viewMotion} style={viewStyle}>
             <CouncilManager />
           </motion.div>
         )}
         {currentView === 'chat' && (
-          <motion.div
-            key="chat"
-            initial={{ opacity: 0, x: -20 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: 20 }}
-            transition={{ duration: 0.25, ease: [0.4, 0, 0.2, 1] }}
-            style={{ height: '100%', overflow: 'hidden' }}
-          >
+          <motion.div key="chat" {...viewMotion} style={viewStyle}>
             <ChatView />
-          </motion.div>
-        )}
-        {currentView === 'settings' && (
-          <motion.div
-            key="settings"
-            initial={{ opacity: 0, x: -20 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: 20 }}
-            transition={{ duration: 0.25, ease: [0.4, 0, 0.2, 1] }}
-            style={{ height: '100%', overflow: 'hidden' }}
-          >
-            <div style={{ padding: '32px', textAlign: 'center', color: 'var(--text-muted)' }}>
-              Settings are accessible via the sidebar gear icon
-            </div>
           </motion.div>
         )}
       </AnimatePresence>

@@ -9,28 +9,30 @@ interface ModelAvatarProps {
 }
 
 const PROVIDER_CONFIG: Record<string, { color: string; icon: React.ReactNode; name: string }> = {
+  // Monochrome copper discs — provider identity is encoded by ICON + name,
+  // not hue. Status is encoded by the ring (see getStatusStyles).
   anthropic: {
-    color: '#d4a557',
+    color: '#c9956b',
     icon: <Sparkles size={16} />,
     name: 'Anthropic',
   },
   openai: {
-    color: '#7ab88f',
+    color: '#c9956b',
     icon: <Zap size={16} />,
     name: 'OpenAI',
   },
   google: {
-    color: '#6b9dc9',
+    color: '#c9956b',
     icon: <Brain size={16} />,
     name: 'Google',
   },
   'meta-llama': {
-    color: '#a78bfa',
+    color: '#c9956b',
     icon: <Bot size={16} />,
     name: 'Meta',
   },
   meta: {
-    color: '#a78bfa',
+    color: '#c9956b',
     icon: <Bot size={16} />,
     name: 'Meta',
   },

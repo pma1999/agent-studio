@@ -1,10 +1,9 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { motion } from 'framer-motion';
-import { MessageSquare, Trash2, Plus } from 'lucide-react';
+import { Trash2, Search } from 'lucide-react';
 import { useStore } from '../stores/store';
-import { useIsMobile } from '../utils/breakpoints';
+import { useIsMobile, usePrefersReducedMotion } from '../utils/breakpoints';
 import { conversationsApi } from '../api/client';
-import { useChat } from '../hooks/useChat';
 
 export function ConversationList() {
   const {
@@ -15,20 +14,26 @@ export function ConversationList() {
     setSidebarMobileOpen,
     loadConversations,
     loadMessages,
-    selectedAgentId,
     agents,
     generalChatSettings,
   } = useStore();
   const isMobile = useIsMobile();
-  const { startNewChat, startGeneralChat } = useChat();
+  const prefersReducedMotion = usePrefersReducedMotion();
+  const [query, setQuery] = useState('');
 
-  const agent = agents.find((a) => a.id === selectedAgentId);
+  const agentFor = (agentId?: string | null) =>
+    agentId ? agents.find((a) => a.id === agentId) : undefined;
 
-  // Group conversations by type
-  const generalConversations = conversations.filter((c) => !c.agent_id);
-  const agentConversations = selectedAgentId
-    ? conversations.filter((c) => c.agent_id === selectedAgentId)
-    : conversations.filter((c) => c.agent_id);
+  const q = query.trim().toLowerCase();
+  const filtered = q
+    ? conversations.filter((c) => {
+        const ag = agentFor(c.agent_id);
+        return (
+          c.title.toLowerCase().includes(q) ||
+          (ag ? ag.name.toLowerCase().includes(q) : 'general'.includes(q))
+        );
+      })
+    : conversations;
 
   const handleSelectConversation = async (id: string) => {
     setActiveConversationId(id);
@@ -50,231 +55,69 @@ export function ConversationList() {
     }
   };
 
-  const handleNewChat = () => {
-    if (selectedAgentId) {
-      startNewChat(selectedAgentId);
-    } else {
-      startGeneralChat();
-    }
-  };
-
-  const renderConversationItem = (conv: typeof conversations[0], index: number) => (
-    <motion.button
-      key={conv.id}
-      initial={{ opacity: 0, x: -10 }}
-      animate={{ opacity: 1, x: 0 }}
-      transition={{ duration: 0.2, delay: index * 0.02 }}
-      onClick={() => handleSelectConversation(conv.id)}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: '10px',
-        padding: isMobile ? '12px' : '10px 12px',
-        minHeight: isMobile ? 48 : 42,
-        background: activeConversationId === conv.id ? 'var(--accent-muted)' : 'transparent',
-        border: 'none',
-        borderRadius: 'var(--radius-sm)',
-        cursor: 'pointer',
-        color: activeConversationId === conv.id ? 'var(--text-primary)' : 'var(--text-secondary)',
-        fontSize: isMobile ? '0.9rem' : '0.8125rem',
-        textAlign: 'left',
-        width: '100%',
-        fontFamily: 'var(--font-body)',
-        transition: 'all var(--transition-fast)',
-        borderLeft: activeConversationId === conv.id ? '2px solid var(--accent)' : '2px solid transparent',
-      }}
-      onMouseEnter={(e) => {
-        if (activeConversationId !== conv.id) {
-          e.currentTarget.style.background = 'var(--bg-hover)';
-          e.currentTarget.style.color = 'var(--text-primary)';
-        }
-      }}
-      onMouseLeave={(e) => {
-        if (activeConversationId !== conv.id) {
-          e.currentTarget.style.background = 'transparent';
-          e.currentTarget.style.color = 'var(--text-secondary)';
-        }
-      }}
-    >
-      <MessageSquare size={isMobile ? 15 : 14} style={{ flexShrink: 0, opacity: 0.65 }} />
-      <span style={{
-        overflow: 'hidden',
-        textOverflow: 'ellipsis',
-        whiteSpace: 'nowrap',
-        flex: 1,
-      }}>
-        {conv.title}
-      </span>
-      <span
-        onClick={(e) => handleDeleteConversation(e as any, conv.id)}
-        role="button"
-        tabIndex={-1}
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          width: isMobile ? '24px' : '20px',
-          height: isMobile ? '24px' : '20px',
-          background: 'transparent',
-          border: 'none',
-          color: 'var(--text-muted)',
-          cursor: 'pointer',
-          borderRadius: '4px',
-          flexShrink: 0,
-          opacity: isMobile ? 0.72 : 0,
-          transition: 'all var(--transition-fast)',
-        }}
-        className="conv-delete-btn"
-        title="Delete conversation"
-        onMouseEnter={(e) => {
-          e.currentTarget.style.color = 'var(--error)';
-        }}
-        onMouseLeave={(e) => {
-          e.currentTarget.style.color = 'var(--text-muted)';
-        }}
-      >
-        <Trash2 size={12} />
-      </span>
-    </motion.button>
-  );
+  const showSearch = conversations.length > 5;
 
   return (
-    <div style={{
-      display: 'flex',
-      flexDirection: 'column',
-      gap: '2px',
-      flex: 1,
-      overflowY: 'auto',
-    }}>
-      {/* General Chats Section */}
-      {!selectedAgentId && generalConversations.length > 0 && (
-        <>
-          <div style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            padding: '0 12px',
-            marginBottom: '8px',
-          }}>
-            <span style={{
-              fontSize: '0.6875rem',
-              fontWeight: 600,
-              color: 'var(--text-muted)',
-              textTransform: 'uppercase',
-              letterSpacing: '0.08em',
-            }}>
-              {generalChatSettings?.emoji || '💬'} General Chats
-            </span>
-            <button
-              onClick={handleNewChat}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                width: '24px',
-                height: '24px',
-                background: 'transparent',
-                border: 'none',
-                borderRadius: 'var(--radius-sm)',
-                color: 'var(--text-muted)',
-                cursor: 'pointer',
-                transition: 'all var(--transition-fast)',
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.background = 'var(--bg-hover)';
-                e.currentTarget.style.color = 'var(--accent)';
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = 'transparent';
-                e.currentTarget.style.color = 'var(--text-muted)';
-              }}
-              title="New general chat"
-            >
-              <Plus size={14} />
-            </button>
-          </div>
-          {generalConversations.map((conv, i) => renderConversationItem(conv, i))}
-        </>
-      )}
-
-      {/* Agent Conversations Section */}
-      {(selectedAgentId || agentConversations.length > 0) && (
-        <>
-          <div style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            padding: '0 12px',
-            marginBottom: '8px',
-            marginTop: generalConversations.length > 0 ? '16px' : '0',
-          }}>
-            <span style={{
-              fontSize: '0.6875rem',
-              fontWeight: 600,
-              color: 'var(--text-muted)',
-              textTransform: 'uppercase',
-              letterSpacing: '0.08em',
-            }}>
-              {agent ? `${agent.emoji} ${agent.name}` : 'Agent Chats'}
-            </span>
-            {selectedAgentId && (
-              <button
-                onClick={handleNewChat}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  width: '24px',
-                  height: '24px',
-                  background: 'transparent',
-                  border: 'none',
-                  borderRadius: 'var(--radius-sm)',
-                  color: 'var(--text-muted)',
-                  cursor: 'pointer',
-                  transition: 'all var(--transition-fast)',
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = 'var(--bg-hover)';
-                  e.currentTarget.style.color = 'var(--accent)';
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = 'transparent';
-                  e.currentTarget.style.color = 'var(--text-muted)';
-                }}
-                title="New chat with agent"
-              >
-                <Plus size={14} />
-              </button>
-            )}
-          </div>
-          {agentConversations.length === 0 ? (
-            <div style={{
-              padding: '16px 12px',
-              color: 'var(--text-muted)',
-              fontSize: '0.8125rem',
-              textAlign: 'center',
-            }}>
-              No conversations with this agent yet
-            </div>
-          ) : (
-            agentConversations.map((conv, i) => renderConversationItem(conv, i))
-          )}
-        </>
-      )}
-
-      {/* Empty State - No conversations at all */}
-      {conversations.length === 0 && (
-        <div style={{
-          padding: '16px 12px',
-          color: 'var(--text-muted)',
-          fontSize: '0.8125rem',
-          textAlign: 'center',
-        }}>
-          No conversations yet.
-          <br />
-          Start a new chat to begin!
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', flex: 1, minHeight: 0 }}>
+      {showSearch && (
+        <div className="recents-search">
+          <Search size={14} />
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search chats…"
+            aria-label="Search conversations"
+          />
         </div>
       )}
+
+      <div className="recents-list">
+        {conversations.length === 0 ? (
+          <div className="recents-empty">
+            No conversations yet.
+            <br />
+            Start a new chat to begin.
+          </div>
+        ) : filtered.length === 0 ? (
+          <div className="recents-empty">No chats match “{query}”.</div>
+        ) : (
+          filtered.map((conv, index) => {
+            const ag = agentFor(conv.agent_id);
+            const label = ag ? ag.name : 'General';
+            const emoji = ag ? ag.emoji || '🤖' : generalChatSettings?.emoji || '💬';
+            const active = activeConversationId === conv.id;
+            return (
+              <motion.button
+                key={conv.id}
+                type="button"
+                initial={prefersReducedMotion ? false : { opacity: 0, x: -8 }}
+                animate={{ opacity: 1, x: 0 }}
+                transition={{ duration: prefersReducedMotion ? 0 : 0.2, delay: prefersReducedMotion ? 0 : Math.min(index, 8) * 0.02 }}
+                onClick={() => handleSelectConversation(conv.id)}
+                className={`recents-item ${active ? 'recents-item-active' : ''}`}
+                title={`${conv.title} · ${label}`}
+              >
+                <span className="recents-item-avatar" aria-hidden="true">{emoji}</span>
+                <span className="recents-item-main">
+                  <span className="recents-item-title">{conv.title}</span>
+                  <span className="recents-item-meta">{label}</span>
+                </span>
+                <span
+                  onClick={(e) => handleDeleteConversation(e, conv.id)}
+                  role="button"
+                  tabIndex={-1}
+                  className="conv-delete-btn"
+                  title="Delete conversation"
+                  aria-label="Delete conversation"
+                >
+                  <Trash2 size={12} />
+                </span>
+              </motion.button>
+            );
+          })
+        )}
+      </div>
     </div>
   );
 }

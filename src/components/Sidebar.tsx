@@ -1,10 +1,11 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Bot, MessageSquare, Wrench, Plug, Settings, ChevronLeft, ChevronRight, Coins, X, LogOut, Plus, Users } from 'lucide-react';
+import { Bot, MessageSquare, Wrench, Plug, Settings, ChevronLeft, ChevronRight, ChevronDown, Coins, X, LogOut, Plus, Users, Search } from 'lucide-react';
 import { useStore } from '../stores/store';
 import { useChat } from '../hooks/useChat';
 import { useIsMobile, usePrefersReducedMotion } from '../utils/breakpoints';
 import { ConversationList } from './ConversationList';
+import { IconButton } from './ui/IconButton';
 
 const navItems = [
   { id: 'chat' as const, label: 'Chat', icon: MessageSquare },
@@ -38,12 +39,16 @@ export function Sidebar() {
     setSelectedAgentId,
     setActiveConversationId,
     generalChatSettings,
+    agents,
   } = useStore();
-  const { startGeneralChat } = useChat();
+  const { startGeneralChat, startNewChat } = useChat();
   const isMobile = useIsMobile();
   const prefersReducedMotion = usePrefersReducedMotion();
   const asideRef = useRef<HTMLElement>(null);
   const previousMobileOpenRef = useRef(sidebarMobileOpen);
+  const [agentPickerOpen, setAgentPickerOpen] = useState(false);
+  const [agentQuery, setAgentQuery] = useState('');
+  const newChatRef = useRef<HTMLDivElement>(null);
 
   // Load credits on mount if OpenRouter key exists
   useEffect(() => {
@@ -109,6 +114,34 @@ export function Sidebar() {
     el.addEventListener('keydown', onKeyDown);
     return () => el.removeEventListener('keydown', onKeyDown);
   }, [isMobile, sidebarMobileOpen]);
+
+  // Close the agent picker whenever the view changes
+  useEffect(() => {
+    setAgentPickerOpen(false);
+  }, [currentView]);
+
+  // Close the agent picker on outside click / Escape
+  useEffect(() => {
+    if (!agentPickerOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (newChatRef.current && !newChatRef.current.contains(e.target as Node)) {
+        setAgentPickerOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setAgentPickerOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [agentPickerOpen]);
+
+  const filteredAgents = agentQuery.trim()
+    ? agents.filter((a) => a.name.toLowerCase().includes(agentQuery.trim().toLowerCase()))
+    : agents;
 
   const navClick = (view: 'agents' | 'chat' | 'tools' | 'mcp' | 'councils') => {
     setCurrentView(view);
@@ -178,14 +211,13 @@ export function Sidebar() {
         justifyContent: 'space-between',
         gap: 'var(--space-md)',
         minHeight: isMobile ? `${mobilePanelHeaderHeight}px` : '65px',
-        background: isMobile ? 'linear-gradient(180deg, rgba(201,149,107,0.09), transparent)' : undefined,
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-md)', minWidth: 0 }}>
           <div style={{
             width: '32px',
             height: '32px',
             borderRadius: 'var(--radius-sm)',
-            background: 'linear-gradient(135deg, var(--accent), var(--accent-hover))',
+            background: 'var(--accent)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
@@ -282,55 +314,120 @@ export function Sidebar() {
         })}
       </div>
 
+      {/* New chat (collapsed rail) */}
+      {!showExpanded && (
+        <div style={{ padding: 'var(--space-sm)', display: 'flex', justifyContent: 'center' }}>
+          <IconButton
+            label="New chat"
+            size="lg"
+            variant="primary"
+            onClick={() => startGeneralChat()}
+          >
+            <Plus size={18} />
+          </IconButton>
+        </div>
+      )}
+
       {/* Conversations list (when expanded) */}
       {showExpanded && (
         <>
-          {/* New Chat Button */}
+          {/* New chat — split button (general chat + agent picker) */}
           <motion.div
+            ref={newChatRef}
             initial={prefersReducedMotion ? false : { opacity: 0, y: 4 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: prefersReducedMotion ? 0 : 0.2, delay: prefersReducedMotion ? 0 : 0.1 }}
             style={{
               padding: isMobile ? 'var(--space-md) var(--space-md) var(--space-sm)' : 'var(--space-sm) var(--space-md)',
+              position: 'relative',
             }}
           >
-            <motion.button
-              onClick={() => startGeneralChat()}
-              whileHover={prefersReducedMotion ? undefined : { scale: 1.02 }}
-              whileTap={prefersReducedMotion ? undefined : { scale: 0.98 }}
-              style={{
-                width: '100%',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: 'var(--space-sm)',
-                padding: 'var(--space-md) var(--space-md)',
-                background: 'linear-gradient(135deg, var(--accent) 0%, var(--accent-hover) 100%)',
-                color: 'var(--text-inverse)',
-                border: 'none',
-                borderRadius: 'var(--radius-md)',
-                fontSize: '0.875rem',
-                fontWeight: 600,
-                cursor: 'pointer',
-                boxShadow: 'var(--shadow-accent-button)',
-                position: 'relative',
-                overflow: 'hidden',
-              }}
-            >
-              {!prefersReducedMotion && (
-                <div style={{
-                  position: 'absolute',
-                  top: 0,
-                  left: '-100%',
-                  width: '100%',
-                  height: '100%',
-                  background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent)',
-                  animation: 'shine 3s infinite',
-                }} />
+            <div className="new-chat-split">
+              <button
+                type="button"
+                className="new-chat-main"
+                onClick={() => {
+                  setAgentPickerOpen(false);
+                  startGeneralChat();
+                }}
+              >
+                <Plus size={18} />
+                New chat
+              </button>
+              <button
+                type="button"
+                className="new-chat-caret"
+                aria-haspopup="menu"
+                aria-expanded={agentPickerOpen}
+                aria-label="Start a chat with an agent"
+                onClick={() => setAgentPickerOpen((o) => !o)}
+              >
+                <ChevronDown size={16} />
+              </button>
+            </div>
+
+            <AnimatePresence>
+              {agentPickerOpen && (
+                <motion.div
+                  className="agent-picker"
+                  role="menu"
+                  initial={prefersReducedMotion ? false : { opacity: 0, y: -4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: -4 }}
+                  transition={{ duration: prefersReducedMotion ? 0 : 0.16 }}
+                >
+                  <div className="agent-picker-search">
+                    <Search size={14} />
+                    <input
+                      type="text"
+                      value={agentQuery}
+                      onChange={(e) => setAgentQuery(e.target.value)}
+                      placeholder="Search agents…"
+                      aria-label="Search agents"
+                      autoFocus
+                    />
+                  </div>
+                  <div className="agent-picker-list">
+                    {filteredAgents.length === 0 ? (
+                      <div className="agent-picker-empty">
+                        {agents.length === 0 ? 'No agents yet' : 'No agents match'}
+                      </div>
+                    ) : (
+                      filteredAgents.map((a) => (
+                        <button
+                          key={a.id}
+                          type="button"
+                          role="menuitem"
+                          className="menu-item"
+                          onClick={() => {
+                            startNewChat(a.id);
+                            setAgentPickerOpen(false);
+                            setAgentQuery('');
+                            if (isMobile) setSidebarMobileOpen(false);
+                          }}
+                        >
+                          <span className="agent-emoji">{a.emoji || '🤖'}</span>
+                          <span className="truncate">{a.name}</span>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="menu-item agent-picker-manage"
+                    onClick={() => {
+                      setCurrentView('agents');
+                      setAgentPickerOpen(false);
+                      if (isMobile) setSidebarMobileOpen(false);
+                    }}
+                  >
+                    <Bot size={15} />
+                    Manage agents
+                  </button>
+                </motion.div>
               )}
-              <Plus size={18} />
-              New Chat
-            </motion.button>
+            </AnimatePresence>
           </motion.div>
 
           {/* Conversations */}
