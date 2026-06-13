@@ -27,9 +27,11 @@ import {
 } from '../utils/modelUtils';
 import type { OpenRouterModel as OpenRouterModelType } from '../types';
 import { useOpenRouterModels } from '../hooks/useOpenRouterModels';
+import { useDeepSeekModels } from '../hooks/useDeepSeekModels';
 import { useFavoriteModels } from '../hooks/useFavoriteModels';
 import { useRecentModels } from '../hooks/useRecentModels';
 import { useIsMobile } from '../utils/breakpoints';
+import { DEEPSEEK_DIRECT_GROUP } from '../utils/providers';
 
 const ICON_MAP = { sparkles: Sparkles, zap: Zap, eye: Eye, brain: Brain };
 
@@ -77,14 +79,21 @@ export function ModelSelectorCore({
 }: ModelSelectorCoreProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [search, setSearch] = useState('');
-  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set(['openai', 'anthropic']));
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set([DEEPSEEK_DIRECT_GROUP, 'openai', 'anthropic']));
   const dropdownRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const isMobile = useIsMobile();
 
-  const { models: rawModels, loading } = useOpenRouterModels();
+  const { models: openRouterModels, loading } = useOpenRouterModels();
+  const { models: deepSeekModels } = useDeepSeekModels();
   const { favorites, toggleFavorite } = useFavoriteModels();
   const { recent, addRecent } = useRecentModels();
+
+  // DeepSeek-direct models lead the list so their group sorts to the top.
+  const rawModels = useMemo(
+    () => [...deepSeekModels, ...openRouterModels],
+    [deepSeekModels, openRouterModels]
+  );
 
   const models = useMemo(() => {
     if (variant === 'settings' || variant === 'agent') {

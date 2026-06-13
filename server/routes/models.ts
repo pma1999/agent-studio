@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { AuthRequest } from '../middleware/auth.js';
 import { getSettingValue } from './settings.js';
 import { normalizeOpenRouterEndpoints } from '../providerRouting.js';
+import { DEEPSEEK_BASE_URL, DEEPSEEK_CATALOG } from '../providers/index.js';
 
 const router = Router();
 
@@ -113,6 +114,54 @@ router.get('/openrouter/endpoints', async (req: AuthRequest, res: Response) => {
   } catch (err) {
     console.error('Error fetching OpenRouter endpoints:', err);
     res.status(500).json({ error: 'Failed to fetch OpenRouter endpoints' });
+  }
+});
+
+// GET /api/models/deepseek - Curated DeepSeek-direct catalog (static; no key needed)
+router.get('/deepseek', (_req: AuthRequest, res: Response) => {
+  res.json({ data: DEEPSEEK_CATALOG });
+});
+
+// GET /api/models/deepseek/validate - Verify the saved DeepSeek key and report balance
+router.get('/deepseek/validate', async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.userId;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const apiKey = getSettingValue(userId, 'deepseek_api_key');
+    if (!apiKey?.trim()) {
+      return res.status(400).json({ error: 'DeepSeek API key not configured' });
+    }
+
+    const response = await fetch(`${DEEPSEEK_BASE_URL}/user/balance`, {
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => '');
+      const status = response.status === 401 || response.status === 403 ? 401 : response.status;
+      return res.status(status).json({
+        ok: false,
+        error: status === 401 ? 'Invalid DeepSeek API key' : errorText || `DeepSeek error (${response.status})`,
+      });
+    }
+
+    const json = (await response.json().catch(() => ({}))) as {
+      is_available?: boolean;
+      balance_infos?: Array<{ currency?: string; total_balance?: string }>;
+    };
+    const info = json.balance_infos?.[0];
+    res.json({
+      ok: true,
+      is_available: json.is_available ?? true,
+      ...(info?.total_balance != null ? { balance: info.total_balance, currency: info.currency ?? 'USD' } : {}),
+    });
+  } catch (err) {
+    console.error('Error validating DeepSeek key:', err);
+    res.status(500).json({ ok: false, error: 'Failed to reach DeepSeek' });
   }
 });
 

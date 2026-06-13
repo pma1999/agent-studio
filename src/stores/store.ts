@@ -96,6 +96,8 @@ interface AppState {
   // Settings
   openRouterApiKey: string;
   setOpenRouterApiKey: (key: string) => void;
+  deepSeekApiKey: string;
+  setDeepSeekApiKey: (key: string) => void;
   loadSettings: () => Promise<void>;
 
   // OAuth PKCE callback feedback
@@ -441,10 +443,15 @@ export const useStore = create<AppState>((set, get) => ({
   // Settings
   openRouterApiKey: '',
   setOpenRouterApiKey: (key) => set({ openRouterApiKey: key }),
+  deepSeekApiKey: '',
+  setDeepSeekApiKey: (key) => set({ deepSeekApiKey: key }),
   loadSettings: async () => {
     try {
       const data = await settingsApi.getAll();
-      set({ openRouterApiKey: data.openrouter_api_key ?? '' });
+      set({
+        openRouterApiKey: data.openrouter_api_key ?? '',
+        deepSeekApiKey: data.deepseek_api_key ?? '',
+      });
     } catch (err) {
       console.error('Failed to load settings:', err);
     }

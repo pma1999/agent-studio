@@ -1,3 +1,5 @@
+import { resolveProviderId } from './providers/index.js';
+
 export type ProviderRoutingConfig =
   | { mode: 'auto' }
   | { mode: 'provider'; provider_slug: string; allow_fallbacks: boolean };
@@ -125,7 +127,12 @@ export function assertProviderRoutingCompatible(
   config: ProviderRoutingConfig | null | undefined
 ): void {
   const normalized = normalizeProviderRoutingConfig(config);
-  if (normalized?.mode === 'provider' && modelId === 'openrouter/auto') {
+  if (normalized?.mode !== 'provider') return;
+  // Provider routing is an OpenRouter-only concept.
+  if (resolveProviderId(modelId) !== 'openrouter') {
+    throw new Error('Provider routing is only available for OpenRouter models.');
+  }
+  if (modelId === 'openrouter/auto') {
     throw new Error('Provider routing requires a concrete model. Select a model instead of openrouter/auto.');
   }
 }

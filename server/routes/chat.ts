@@ -17,6 +17,14 @@ import {
   serializeProviderRoutingConfig,
   type ProviderRoutingConfig,
 } from '../providerRouting.js';
+import {
+  getProviderForModel,
+  toUpstreamModelId,
+  assistantReasoningField,
+  buildDeepSeekThinking,
+  computeDeepSeekCost,
+  deepSeekCachedTokens,
+} from '../providers/index.js';
 
 const router = Router();
 
@@ -241,13 +249,6 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       agent = createGeneralChatAgent(generalSettings);
     }
 
-    // OpenRouter only: get API key from settings (decrypted server-side)
-    const apiKey = getSettingValue(userId, 'openrouter_api_key');
-    if (!apiKey?.trim()) {
-      res.status(400).json({ error: 'OpenRouter API key not configured. Please set your API key in Settings.' });
-      return;
-    }
-
     const messageProviderRouting = messageProviderRoutingRaw === undefined
       ? null
       : normalizeProviderRoutingConfig(messageProviderRoutingRaw);
@@ -258,19 +259,46 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
 
     // Hierarchy: message override > conversation override > agent/general default > auto
     const effectiveModel = messageModel || conversation.model || agent.model;
-    const effectiveProviderRouting = resolveProviderRouting(
-      messageProviderRouting,
-      parseProviderRoutingConfig(conversation.provider_routing),
-      parseProviderRoutingConfig(agent.provider_routing)
-    );
-    try {
-      assertProviderRoutingCompatible(effectiveModel, effectiveProviderRouting);
-    } catch (err) {
-      res.status(400).json({ error: err instanceof Error ? err.message : 'Invalid provider routing' });
+
+    // Resolve the upstream provider from the (namespaced) model id.
+    const provider = getProviderForModel(effectiveModel);
+    const upstreamModel = toUpstreamModelId(effectiveModel);
+
+    // API key for the resolved provider (decrypted server-side).
+    const apiKey = getSettingValue(userId, provider.apiKeySetting);
+    if (!apiKey?.trim()) {
+      res.status(400).json({ error: `${provider.label} API key not configured. Please set your API key in Settings.` });
       return;
     }
-    const openRouterProviderPreference = buildOpenRouterProviderPreference(effectiveProviderRouting);
-    const effectiveProviderRoutingJson = serializeProviderRoutingConfig(effectiveProviderRouting);
+
+    // PDF attachments rely on OpenRouter's file-parser plugin; other providers reject `file` parts.
+    if (attachments.length > 0 && !provider.supportsPlugins) {
+      res.status(400).json({ error: `PDF attachments are currently supported only with OpenRouter models, not ${provider.label}.` });
+      return;
+    }
+
+    // Provider routing is an OpenRouter concept; resolve+validate only when supported.
+    const effectiveProviderRouting: ProviderRoutingConfig = provider.supportsProviderRouting
+      ? resolveProviderRouting(
+          messageProviderRouting,
+          parseProviderRoutingConfig(conversation.provider_routing),
+          parseProviderRoutingConfig(agent.provider_routing)
+        )
+      : { mode: 'auto' };
+    if (provider.supportsProviderRouting) {
+      try {
+        assertProviderRoutingCompatible(effectiveModel, effectiveProviderRouting);
+      } catch (err) {
+        res.status(400).json({ error: err instanceof Error ? err.message : 'Invalid provider routing' });
+        return;
+      }
+    }
+    const openRouterProviderPreference = provider.supportsProviderRouting
+      ? buildOpenRouterProviderPreference(effectiveProviderRouting)
+      : undefined;
+    const effectiveProviderRoutingJson = provider.supportsProviderRouting
+      ? serializeProviderRoutingConfig(effectiveProviderRouting)
+      : null;
 
     // Save user message (content + optional attachments metadata for UI)
     const userMsgId = nanoid();
@@ -304,13 +332,15 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       if (row.role === 'assistant') {
         const tool_calls = row.tool_calls ? (JSON.parse(row.tool_calls) as { id: string; type: string; function: { name: string; arguments: string } }[]) : undefined;
         const annotations = row.annotations ? (JSON.parse(row.annotations) as unknown[]) : undefined;
-        const out: { role: 'assistant'; content: string | null; tool_calls?: unknown[]; annotations?: unknown[]; reasoning?: string } = {
+        const out: { role: 'assistant'; content: string | null; tool_calls?: unknown[]; annotations?: unknown[]; reasoning?: string; reasoning_content?: string } = {
           role: 'assistant',
           content: row.content || null,
         };
         if (tool_calls?.length) out.tool_calls = tool_calls;
         if (annotations?.length) out.annotations = annotations;
-        if (row.reasoning_content?.trim()) out.reasoning = row.reasoning_content;
+        // DeepSeek thinking mode requires reasoning_content on tool-call turns (else HTTP 400);
+        // OpenRouter uses `reasoning`. Field name follows the resolved provider.
+        if (row.reasoning_content?.trim()) out[assistantReasoningField(provider.id)] = row.reasoning_content;
         return out;
       }
       return { role: row.role as 'user' | 'assistant', content: row.content };
@@ -373,19 +403,14 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     // Register this SSE connection for graceful shutdown draining.
     trackStream(res);
 
-    const apiUrl = 'https://openrouter.ai/api/v1/chat/completions';
+    const apiUrl = provider.chatCompletionsUrl;
 
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`,
-      'HTTP-Referer': 'http://localhost:5173',
-      'X-Title': 'Agent Studio',
-    };
+    const headers: Record<string, string> = provider.buildHeaders(apiKey);
 
     let actualModelFromResponse: string | null = null;
 
     const requestBody: Record<string, unknown> = {
-      model: effectiveModel,
+      model: upstreamModel,
       messages,
       temperature: agent.temperature,
       max_tokens: agent.max_tokens,
@@ -399,7 +424,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       requestBody.tool_choice = agent.tool_choice === 'none' ? 'none' : 'auto';
       requestBody.parallel_tool_calls = agent.parallel_tool_calls === 0 ? false : true;
     }
-    if (attachments.length > 0) {
+    if (attachments.length > 0 && provider.supportsPlugins) {
       requestBody.plugins = [{ id: 'file-parser', pdf: { engine: pdf_engine } }];
     }
 
@@ -415,21 +440,27 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       if (reasoningOverride.max_tokens !== undefined) reasoningMaxTokens = reasoningOverride.max_tokens;
     }
 
-    if (reasoningEnabled) {
-      const reasoningParam: Record<string, unknown> = {};
-      if (reasoningEffort && reasoningEffort !== 'none') {
-        reasoningParam.effort = reasoningEffort;
-      } else if (reasoningEffort === 'none') {
-        reasoningParam.effort = 'none';
+    if (provider.supportsReasoningParam) {
+      if (reasoningEnabled) {
+        const reasoningParam: Record<string, unknown> = {};
+        if (reasoningEffort && reasoningEffort !== 'none') {
+          reasoningParam.effort = reasoningEffort;
+        } else if (reasoningEffort === 'none') {
+          reasoningParam.effort = 'none';
+        }
+        if (reasoningMaxTokens && reasoningMaxTokens > 0) {
+          reasoningParam.max_tokens = reasoningMaxTokens;
+        }
+        if (Object.keys(reasoningParam).length === 0) {
+          reasoningParam.enabled = true;
+        }
+        requestBody.reasoning = reasoningParam;
+        console.log(`[chat] Reasoning enabled:`, JSON.stringify(reasoningParam));
       }
-      if (reasoningMaxTokens && reasoningMaxTokens > 0) {
-        reasoningParam.max_tokens = reasoningMaxTokens;
-      }
-      if (Object.keys(reasoningParam).length === 0) {
-        reasoningParam.enabled = true;
-      }
-      requestBody.reasoning = reasoningParam;
-      console.log(`[chat] Reasoning enabled:`, JSON.stringify(reasoningParam));
+    } else if (provider.id === 'deepseek') {
+      // DeepSeek toggles thinking mode via top-level `thinking` (+ optional reasoning_effort),
+      // driven by the app's Reasoning switch. Default off → non-thinking (fast/cheap).
+      Object.assign(requestBody, buildDeepSeekThinking(reasoningEnabled, reasoningEffort));
     }
 
     // Structured outputs (OpenRouter JSON Schema)
@@ -437,7 +468,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     const structuredEnabled = !!agent.structured_output_enabled;
     const schemaRaw = agent.structured_output_schema;
     let responseFormat: { type: 'json_schema'; json_schema: { name: string; strict: boolean; schema: Record<string, unknown> } } | undefined;
-    if (structuredEnabled && schemaRaw && typeof schemaRaw === 'string' && schemaRaw.trim()) {
+    if (provider.supportsJsonSchema && structuredEnabled && schemaRaw && typeof schemaRaw === 'string' && schemaRaw.trim()) {
       try {
         const parsed = JSON.parse(schemaRaw.trim()) as {
           type?: string;
@@ -506,7 +537,9 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         reasoningTokens,
         cachedTokens,
         toolCallsJson,
-        actualModelFromResponse ?? effectiveModel,
+        // Keep the namespaced id for DeepSeek so history/UI shows DeepSeek-direct
+        // (the upstream response reports the bare upstream model name).
+        provider.id === 'deepseek' ? effectiveModel : (actualModelFromResponse ?? effectiveModel),
         processedByAgentId
       );
     };
@@ -592,6 +625,10 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         if (details?.reasoning_tokens) reasoningTokens = details.reasoning_tokens;
         const promptDetails = u.prompt_tokens_details as { cached_tokens?: number } | undefined;
         if (promptDetails?.cached_tokens !== undefined) cachedTokens = promptDetails.cached_tokens;
+        if (provider.id === 'deepseek') {
+          cachedTokens = deepSeekCachedTokens(u);
+          if (u.cost === undefined) cost = computeDeepSeekCost(u, upstreamModel);
+        }
       }
       const dataWithModel = data as { model?: string };
       if (dataWithModel.model && typeof dataWithModel.model === 'string' && dataWithModel.model.trim()) {
@@ -747,6 +784,10 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
                 if (usage.cost !== undefined) cost = usage.cost;
                 if (usage.completion_tokens_details?.reasoning_tokens) reasoningTokens = usage.completion_tokens_details.reasoning_tokens;
                 if (usage.prompt_tokens_details?.cached_tokens !== undefined) cachedTokens = usage.prompt_tokens_details.cached_tokens;
+                if (provider.id === 'deepseek') {
+                  cachedTokens = deepSeekCachedTokens(usage);
+                  if (usage.cost === undefined) cost = computeDeepSeekCost(usage, upstreamModel);
+                }
               }
 
               // Capture file (and other) annotations from stream for PDF skip-reparse on follow-ups
@@ -802,7 +843,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
           role: 'assistant',
           content: fullContent || null,
           tool_calls: toolCallsArray,
-          ...(fullReasoning.trim() ? { reasoning: fullReasoning } : {}),
+          ...(fullReasoning.trim() ? { [assistantReasoningField(provider.id)]: fullReasoning } : {}),
         });
 
         saveAssistantMessage(fullContent, fullReasoning, JSON.stringify(toolCallsArray), []);

@@ -1,4 +1,4 @@
-export type Provider = 'openrouter';
+export type Provider = 'openrouter' | 'deepseek';
 
 export type ProviderRoutingConfig =
   | { mode: 'auto' }

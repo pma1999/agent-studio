@@ -2,8 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { CheckCircle, AlertCircle, ExternalLink, Zap, Coins, BarChart3, Loader2, Globe, KeyRound, Database, MessageSquare, Brain, Check, ChevronDown, Sparkles, Lightbulb, SlidersHorizontal, Wrench, Plug, Link } from 'lucide-react';
 import { useStore } from '../stores/store';
-import { settingsApi, toolsApi, mcpServersApi } from '../api/client';
+import { settingsApi, toolsApi, mcpServersApi, deepseekApi } from '../api/client';
 import type { ProviderRoutingConfig, ReasoningEffort, Tool, McpServer } from '../types';
+import { DEEPSEEK_ACCENT } from '../utils/providers';
 import { Modal } from './ui/Modal';
 import { Input } from './ui/Input';
 import { Button } from './ui/Button';
@@ -54,6 +55,7 @@ function ProviderKeySection({
   helpUrl,
   helpLabel,
   endpoints,
+  onTest,
 }: {
   providerName: string;
   providerIcon: React.ReactNode;
@@ -68,12 +70,19 @@ function ProviderKeySection({
   helpUrl: string;
   helpLabel: string;
   endpoints?: { name: string; url: string; models: string; default?: boolean }[];
+  /** Optional live validation; when provided, replaces the generic health-ping test. */
+  onTest?: () => Promise<{ ok: boolean; message: string }>;
 }) {
   const [saving, setSaving] = useState(false);
   const [testResult, setTestResult] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
   const [testMessage, setTestMessage] = useState('');
 
+  // A masked value (contains '****') means the input still shows the saved key unchanged;
+  // never write it back as the real key.
+  const isMasked = (v: string) => v.includes('****');
+
   const handleSave = async () => {
+    if (!localKey || isMasked(localKey)) return;
     setSaving(true);
     try {
       const data = await settingsApi.set(settingKey, localKey);
@@ -86,13 +95,13 @@ function ProviderKeySection({
   };
 
   const handleTest = async () => {
-    if (!localKey) {
+    if (!localKey && !savedKey) {
       setTestResult('error');
       setTestMessage('Please enter an API key first');
       return;
     }
 
-    if (localKey !== savedKey) {
+    if (localKey && localKey !== savedKey && !isMasked(localKey)) {
       await handleSave();
     }
 
@@ -100,6 +109,12 @@ function ProviderKeySection({
     setTestMessage('Testing connection...');
 
     try {
+      if (onTest) {
+        const result = await onTest();
+        setTestResult(result.ok ? 'success' : 'error');
+        setTestMessage(result.message);
+        return;
+      }
       const res = await fetch('/api/health');
       if (res.ok) {
         setTestResult('success');
@@ -250,6 +265,47 @@ function ProviderKeySection({
 }
 
 const OPENROUTER_ACCENT = '#8b5cf6';
+
+/** DeepSeek direct-provider API key section. Reuses ProviderKeySection with live key validation. */
+function DeepSeekSection() {
+  const { deepSeekApiKey, setDeepSeekApiKey } = useStore();
+  const [localKey, setLocalKey] = useState('');
+
+  const hasSavedKey = !!deepSeekApiKey;
+
+  const handleTest = async (): Promise<{ ok: boolean; message: string }> => {
+    try {
+      const result = await deepseekApi.validate();
+      if (result.ok) {
+        const balance = result.balance != null
+          ? ` Balance: ${result.balance} ${result.currency ?? ''}`.trimEnd()
+          : '';
+        return { ok: true, message: `DeepSeek key is valid.${balance}` };
+      }
+      return { ok: false, message: result.error || 'DeepSeek key is invalid' };
+    } catch (err) {
+      return { ok: false, message: err instanceof Error ? err.message : 'Could not reach DeepSeek' };
+    }
+  };
+
+  return (
+    <ProviderKeySection
+      providerName="DeepSeek (Direct)"
+      providerIcon={<Brain size={15} />}
+      accentColor={DEEPSEEK_ACCENT}
+      settingKey="deepseek_api_key"
+      localKey={localKey}
+      setLocalKey={setLocalKey}
+      savedKey={deepSeekApiKey}
+      setSavedKey={setDeepSeekApiKey}
+      placeholder={hasSavedKey ? `Saved: ${deepSeekApiKey} — enter a new key to replace` : 'sk-...'}
+      helpText="Use DeepSeek models directly with your own DeepSeek API key — billed by DeepSeek, not OpenRouter. Create one at"
+      helpUrl="https://platform.deepseek.com/api_keys"
+      helpLabel="DeepSeek Platform"
+      onTest={handleTest}
+    />
+  );
+}
 
 /** General Chat Settings section - Premium UI */
 function GeneralChatSettingsSection() {
@@ -1395,6 +1451,12 @@ export function SettingsPanel() {
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: '28px' }}>
         <OpenRouterSection />
+
+        {/* Divider */}
+        <div style={{ height: '1px', background: 'var(--border)' }} />
+
+        {/* DeepSeek (Direct) */}
+        <DeepSeekSection />
 
         {/* Divider */}
         <div style={{ height: '1px', background: 'var(--border)' }} />

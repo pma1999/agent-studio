@@ -387,6 +387,20 @@ export const modelsApi = {
   openrouterEndpoints: (model: string) => request<{ data: OpenRouterEndpoint[] }>(
     `/models/openrouter/endpoints?model=${encodeURIComponent(model)}`
   ),
+  deepseek: () => request<{ data: OpenRouterModel[] }>('/models/deepseek'),
+};
+
+// DeepSeek (direct provider)
+export interface DeepSeekValidateResult {
+  ok: boolean;
+  is_available?: boolean;
+  balance?: string;
+  currency?: string;
+  error?: string;
+}
+
+export const deepseekApi = {
+  validate: () => request<DeepSeekValidateResult>('/models/deepseek/validate'),
 };
 
 // Settings

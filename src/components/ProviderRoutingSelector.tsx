@@ -5,6 +5,7 @@ import type { OpenRouterEndpoint, ProviderRoutingConfig } from '../types';
 import { useOpenRouterEndpoints } from '../hooks/useOpenRouterEndpoints';
 import { formatContext, formatPrice } from '../utils/modelUtils';
 import { useIsMobile } from '../utils/breakpoints';
+import { isDeepSeekDirectModel } from '../utils/providers';
 
 interface ProviderRoutingSelectorProps {
   modelId: string | null | undefined;
@@ -42,9 +43,15 @@ export function ProviderRoutingSelector({
   const [isOpen, setIsOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const isMobile = useIsMobile();
+  const isDeepSeek = isDeepSeekDirectModel(modelId);
   const isAutoModel = !modelId || modelId === 'openrouter/auto';
   const selectedSlug = value?.mode === 'provider' ? value.provider_slug : null;
-  const { endpoints, loading, error } = useOpenRouterEndpoints(modelId, isOpen || !!selectedSlug);
+  const { endpoints, loading, error } = useOpenRouterEndpoints(modelId, (isOpen || !!selectedSlug) && !isDeepSeek);
+
+  // Provider routing is OpenRouter-only; clear any stale config when a DeepSeek model is selected.
+  useEffect(() => {
+    if (isDeepSeek && value !== null) onChange(null);
+  }, [isDeepSeek, value, onChange]);
 
   const selectedEndpoint = useMemo(
     () => endpoints.find((endpoint) => endpoint.tag === selectedSlug) || null,
@@ -117,6 +124,44 @@ export function ProviderRoutingSelector({
       ? { bottom: 'calc(100% + 8px)' }
       : { top: 'calc(100% + 6px)' }),
   };
+
+  if (isDeepSeek) {
+    return (
+      <div style={{ position: 'relative' }}>
+        {label && (
+          <label
+            style={{
+              display: 'block',
+              fontSize: '0.75rem',
+              fontWeight: 600,
+              color: 'var(--text-secondary)',
+              marginBottom: 8,
+              letterSpacing: '0.02em',
+              textTransform: 'uppercase',
+            }}
+          >
+            {label}
+          </label>
+        )}
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            padding: compact ? '6px 10px' : '10px 12px',
+            fontSize: compact ? '0.75rem' : '0.8125rem',
+            color: 'var(--text-muted)',
+            background: 'var(--bg-elevated)',
+            border: '1px solid var(--border)',
+            borderRadius: 'var(--radius-md)',
+          }}
+        >
+          <Server size={14} style={{ opacity: 0.6, flexShrink: 0 }} />
+          <span>Direct DeepSeek — provider routing not applicable</span>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div ref={dropdownRef} style={{ position: 'relative' }}>

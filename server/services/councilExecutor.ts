@@ -16,6 +16,14 @@ import {
   resolveProviderRouting,
   type ProviderRoutingConfig,
 } from '../providerRouting.js';
+import {
+  getProviderForModel,
+  toUpstreamModelId,
+  assistantReasoningField,
+  computeDeepSeekCost,
+  type ProviderConfig,
+  type ProviderId,
+} from '../providers/index.js';
 
 const MEMBER_TIMEOUT_MS = 240000; // 4 minutes per member
 const SYNTHESIS_TIMEOUT_MS = 240000; // 4 minutes for synthesis
@@ -110,12 +118,31 @@ interface StreamChunk {
 }
 
 export class CouncilExecutor {
-  private apiKey: string;
-  private apiUrl: string;
+  /** Resolves the decrypted API key for a given provider (members/synthesizer may differ). */
+  private getApiKey: (provider: ProviderId) => string;
 
-  constructor(apiKey: string) {
-    this.apiKey = apiKey;
-    this.apiUrl = 'https://openrouter.ai/api/v1/chat/completions';
+  constructor(getApiKey: (provider: ProviderId) => string) {
+    this.getApiKey = getApiKey;
+  }
+
+  /** Resolves the upstream endpoint (url + headers + bare model id) for a namespaced model id. */
+  private resolveEndpoint(modelId: string): {
+    url: string;
+    headers: Record<string, string>;
+    upstreamModel: string;
+    provider: ProviderConfig;
+  } {
+    const provider = getProviderForModel(modelId);
+    const apiKey = this.getApiKey(provider.id);
+    if (!apiKey?.trim()) {
+      throw new Error(`${provider.label} API key not configured`);
+    }
+    return {
+      url: provider.chatCompletionsUrl,
+      headers: provider.buildHeaders(apiKey),
+      upstreamModel: toUpstreamModelId(modelId),
+      provider,
+    };
   }
 
   async execute(options: CouncilExecutionOptions): Promise<CouncilResult> {
@@ -300,12 +327,8 @@ export class CouncilExecutor {
     index: number,
     options: CouncilExecutionOptions
   ): Promise<Omit<MemberResult, 'responseTimeMs' | 'status'>> {
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${this.apiKey}`,
-      'HTTP-Referer': 'http://localhost:5173',
-      'X-Title': 'Agent Studio',
-    };
+    const ep = this.resolveEndpoint(modelId);
+    const headers = ep.headers;
 
     // Build messages
     const messages: Array<{ role: string; content?: string | unknown[] | null; tool_call_id?: string; tool_calls?: unknown[] }> = [
@@ -313,8 +336,8 @@ export class CouncilExecutor {
       ...options.messageHistory,
     ];
 
-    // Handle attachments for the last user message
-    if (options.attachments && options.attachments.length > 0) {
+    // Handle attachments for the last user message (OpenRouter file-parser only)
+    if (options.attachments && options.attachments.length > 0 && ep.provider.supportsPlugins) {
       const lastIdx = messages.length - 1;
       if (lastIdx >= 0 && messages[lastIdx].role === 'user') {
         const textPart = { type: 'text' as const, text: options.content };
@@ -334,19 +357,21 @@ export class CouncilExecutor {
     const openRouterTools = toOpenRouterTools(resolvedTools);
 
     const requestBody: Record<string, unknown> = {
-      model: modelId,
+      model: ep.upstreamModel,
       messages,
       temperature: 0.7,
       max_tokens: 4096,
       stream: true,
     };
-    const providerRouting = resolveProviderRouting(
-      parseProviderRoutingConfig(options.memberProviderRouting?.[modelId])
-    );
-    assertProviderRoutingCompatible(modelId, providerRouting);
-    const providerPreference = buildOpenRouterProviderPreference(providerRouting);
-    if (providerPreference) {
-      requestBody.provider = providerPreference;
+    const providerRouting: ProviderRoutingConfig = ep.provider.supportsProviderRouting
+      ? resolveProviderRouting(parseProviderRoutingConfig(options.memberProviderRouting?.[modelId]))
+      : { mode: 'auto' };
+    if (ep.provider.supportsProviderRouting) {
+      assertProviderRoutingCompatible(modelId, providerRouting);
+      const providerPreference = buildOpenRouterProviderPreference(providerRouting);
+      if (providerPreference) {
+        requestBody.provider = providerPreference;
+      }
     }
 
     if (openRouterTools.length > 0) {
@@ -355,7 +380,7 @@ export class CouncilExecutor {
       requestBody.parallel_tool_calls = true;
     }
 
-    if (options.pdfEngine) {
+    if (options.pdfEngine && ep.provider.supportsPlugins) {
       requestBody.plugins = [{ id: 'file-parser', pdf: { engine: options.pdfEngine } }];
     }
 
@@ -376,7 +401,7 @@ export class CouncilExecutor {
         throw new Error('Execution cancelled');
       }
 
-      const response = await fetch(this.apiUrl, {
+      const response = await fetch(ep.url, {
         method: 'POST',
         headers,
         body: JSON.stringify(requestBody),
@@ -455,6 +480,7 @@ export class CouncilExecutor {
                 promptTokens = usage.prompt_tokens ?? promptTokens;
                 completionTokens = usage.completion_tokens ?? completionTokens;
                 if (usage.cost !== undefined) cost = usage.cost;
+                else if (ep.provider.id === 'deepseek') cost = computeDeepSeekCost(usage, ep.upstreamModel);
                 if (usage.completion_tokens_details?.reasoning_tokens) {
                   reasoningTokens = usage.completion_tokens_details.reasoning_tokens;
                 }
@@ -496,7 +522,8 @@ export class CouncilExecutor {
           role: 'assistant',
           content: fullContent || null,
           tool_calls: toolCallsArray,
-          ...(fullReasoning.trim() ? { reasoning: fullReasoning } : {}),
+          // DeepSeek thinking mode requires reasoning_content back on tool-call turns (else HTTP 400).
+          ...(fullReasoning.trim() ? { [assistantReasoningField(ep.provider.id)]: fullReasoning } : {}),
         });
 
         // Execute tools
@@ -570,19 +597,17 @@ export class CouncilExecutor {
     // Build synthesis prompt
     const synthesisPrompt = this.buildSynthesisPrompt(successfulResults, options.content);
 
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${this.apiKey}`,
-      'HTTP-Referer': 'http://localhost:5173',
-      'X-Title': 'Agent Studio',
-    };
+    const ep = this.resolveEndpoint(synthesizerModel);
+    const headers = ep.headers;
 
-    const providerRouting = resolveProviderRouting(
-      parseProviderRoutingConfig(options.synthesizerProviderRouting)
-    );
-    assertProviderRoutingCompatible(synthesizerModel, providerRouting);
+    const providerRouting: ProviderRoutingConfig = ep.provider.supportsProviderRouting
+      ? resolveProviderRouting(parseProviderRoutingConfig(options.synthesizerProviderRouting))
+      : { mode: 'auto' };
+    if (ep.provider.supportsProviderRouting) {
+      assertProviderRoutingCompatible(synthesizerModel, providerRouting);
+    }
     const requestBody: Record<string, unknown> = {
-      model: synthesizerModel,
+      model: ep.upstreamModel,
       messages: [
         { role: 'system', content: 'You are a synthesis expert. Your task is to analyze multiple AI model responses and create a unified, comprehensive answer.' },
         { role: 'user', content: synthesisPrompt },
@@ -591,9 +616,11 @@ export class CouncilExecutor {
       max_tokens: 4096,
       stream: true,
     };
-    const providerPreference = buildOpenRouterProviderPreference(providerRouting);
-    if (providerPreference) {
-      requestBody.provider = providerPreference;
+    if (ep.provider.supportsProviderRouting) {
+      const providerPreference = buildOpenRouterProviderPreference(providerRouting);
+      if (providerPreference) {
+        requestBody.provider = providerPreference;
+      }
     }
 
     // Notify synthesis start
@@ -607,7 +634,7 @@ export class CouncilExecutor {
       successfulResults
     );
 
-    const response = await fetch(this.apiUrl, {
+    const response = await fetch(ep.url, {
       method: 'POST',
       headers,
       body: JSON.stringify(requestBody),
@@ -677,6 +704,7 @@ export class CouncilExecutor {
                 promptTokens = usage.prompt_tokens ?? promptTokens;
                 completionTokens = usage.completion_tokens ?? completionTokens;
                 if (usage.cost !== undefined) cost = usage.cost;
+                else if (ep.provider.id === 'deepseek') cost = computeDeepSeekCost(usage, ep.upstreamModel);
               }
             } catch {
               // Skip malformed
@@ -718,21 +746,19 @@ export class CouncilExecutor {
     providerRouting?: ProviderRoutingConfig | null,
     signal?: AbortSignal
   ): Promise<string> {
-    const providerPreference = buildOpenRouterProviderPreference(providerRouting);
+    const ep = this.resolveEndpoint(synthesizerModel);
+    const providerPreference = ep.provider.supportsProviderRouting
+      ? buildOpenRouterProviderPreference(providerRouting)
+      : undefined;
     const timeoutPromise = new Promise<never>((_, reject) => {
       setTimeout(() => reject(new Error('Comparison extraction timeout')), COMPARISON_EXTRACTION_TIMEOUT_MS);
     });
 
-    const fetchPromise = fetch(this.apiUrl, {
+    const fetchPromise = fetch(ep.url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${this.apiKey}`,
-        'HTTP-Referer': 'http://localhost:5173',
-        'X-Title': 'Agent Studio',
-      },
+      headers: ep.headers,
       body: JSON.stringify({
-        model: synthesizerModel,
+        model: ep.upstreamModel,
         messages,
         temperature: 0.3,
         max_tokens: maxTokens,
@@ -793,6 +819,12 @@ export class CouncilExecutor {
     providerRouting?: ProviderRoutingConfig | null,
     signal?: AbortSignal
   ): Promise<string | null> {
+    // Structured comparison needs json_schema response_format (OpenRouter only).
+    // For other providers (e.g. a DeepSeek synthesizer) skip gracefully — council still completes.
+    if (!getProviderForModel(synthesizerModel).supportsJsonSchema) {
+      console.log('   ℹ️ Skipping structured comparison: synthesizer provider lacks json_schema support');
+      return null;
+    }
     const normalizedProviderRouting = resolveProviderRouting(parseProviderRoutingConfig(providerRouting));
     assertProviderRoutingCompatible(synthesizerModel, normalizedProviderRouting);
     const truncatedResponses = memberResults.map((r) => ({
@@ -937,6 +969,6 @@ Now provide your synthesized response:`;
   }
 }
 
-export function createCouncilExecutor(apiKey: string): CouncilExecutor {
-  return new CouncilExecutor(apiKey);
+export function createCouncilExecutor(getApiKey: (provider: ProviderId) => string): CouncilExecutor {
+  return new CouncilExecutor(getApiKey);
 }

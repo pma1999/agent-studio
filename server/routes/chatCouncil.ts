@@ -4,6 +4,7 @@ import db from '../db.js';
 import { getSettingValue } from './settings.js';
 import { resolveToolsForAgent, resolveToolsFromIds, toOpenRouterTools, appendToolInstructionsIfNeeded } from '../tools/index.js';
 import { CouncilExecutor } from '../services/councilExecutor.js';
+import { getProviderConfig, resolveProviderId, type ProviderId } from '../providers/index.js';
 import { AuthRequest } from '../middleware/auth.js';
 import { trackStream, untrackStream } from '../shutdown.js';
 import type { McpConnection } from '../mcp/index.js';
@@ -232,13 +233,6 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       agent = createGeneralChatAgent(generalSettings);
     }
 
-    // Get API key
-    const apiKey = getSettingValue(userId, 'openrouter_api_key');
-    if (!apiKey?.trim()) {
-      res.status(400).json({ error: 'OpenRouter API key not configured' });
-      return;
-    }
-
     // Resolve council configuration
     let councilConfig: CouncilConfig;
     if (council_member_id) {
@@ -282,6 +276,22 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Invalid provider routing' });
       return;
     }
+
+    // Pre-flight: ensure an API key exists for every provider this run needs (members + synthesizer).
+    const requiredProviders = new Set<ProviderId>();
+    for (const modelId of councilConfig.member_models) requiredProviders.add(resolveProviderId(modelId));
+    requiredProviders.add(resolveProviderId(councilConfig.synthesizer_model || 'anthropic/claude-3.5-sonnet'));
+    const apiKeyByProvider = new Map<ProviderId, string>();
+    for (const providerId of requiredProviders) {
+      const cfg = getProviderConfig(providerId);
+      const key = getSettingValue(userId, cfg.apiKeySetting);
+      if (!key?.trim()) {
+        res.status(400).json({ error: `${cfg.label} API key not configured. Please set your API key in Settings.` });
+        return;
+      }
+      apiKeyByProvider.set(providerId, key);
+    }
+    const getApiKey = (providerId: ProviderId): string => apiKeyByProvider.get(providerId) ?? '';
 
     // Save user message
     const userMsgId = nanoid();
@@ -393,8 +403,8 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
 
     abortController = new AbortController();
 
-    // Create executor and run council
-    const executor = new CouncilExecutor(apiKey);
+    // Create executor and run council (resolves the right key per member/synthesizer provider)
+    const executor = new CouncilExecutor(getApiKey);
 
     const result = await executor.execute({
       conversationId: conversation_id,
