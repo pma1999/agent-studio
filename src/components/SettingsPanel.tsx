@@ -1154,35 +1154,43 @@ function OpenRouterSection() {
           flex: 1,
           minWidth: 0,
           display: 'flex',
-          alignItems: 'flex-start',
-          justifyContent: 'space-between',
-          gap: '12px',
-          flexWrap: 'wrap',
+          alignItems: 'center',
         }}>
           <PremiumToggle
             checked={autoConversationTitlesEnabled}
             onChange={handleTitleToggle}
             disabled={!isConnected || titleSaving}
-            label="AI conversation titles"
+            label={
+              <span style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '8px',
+                minWidth: 0,
+                flexWrap: 'wrap',
+              }}>
+                <span>AI conversation titles</span>
+                <span style={{
+                  fontSize: '0.6875rem',
+                  lineHeight: 1,
+                  fontFamily: 'var(--font-mono)',
+                  fontWeight: 600,
+                  color: titleSaveState === 'error'
+                    ? 'var(--error)'
+                    : autoConversationTitlesEnabled
+                      ? OPENROUTER_ACCENT
+                      : 'var(--text-muted)',
+                  whiteSpace: 'nowrap',
+                }}>
+                  {titleSaveState === 'saved' ? 'Saved' : titleStatus}
+                </span>
+              </span>
+            }
             description={isConnected
               ? 'Name new conversations after the first message using openrouter/free.'
               : 'Connect OpenRouter to enable automatic titles.'}
             size="sm"
             color={OPENROUTER_ACCENT}
           />
-          <span style={{
-            fontSize: '0.6875rem',
-            fontFamily: 'var(--font-mono)',
-            color: titleSaveState === 'error'
-              ? 'var(--error)'
-              : autoConversationTitlesEnabled
-                ? OPENROUTER_ACCENT
-                : 'var(--text-muted)',
-            paddingTop: '3px',
-            whiteSpace: 'nowrap',
-          }}>
-            {titleSaveState === 'saved' ? 'Saved' : titleStatus}
-          </span>
         </div>
       </motion.div>
 

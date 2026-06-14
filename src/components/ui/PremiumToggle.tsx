@@ -4,7 +4,7 @@ import { motion } from 'framer-motion';
 interface PremiumToggleProps {
   checked: boolean;
   onChange: (checked: boolean) => void;
-  label?: string;
+  label?: React.ReactNode;
   description?: string;
   disabled?: boolean;
   size?: 'sm' | 'md' | 'lg';
