@@ -12,7 +12,7 @@
     "build:client": "vite build",
     "start": "node dist/server/index.js",
     "preview": "vite preview",
-    "test": "tsx scripts/test-provider-routing.ts",
+    "test": "tsx scripts/test-provider-routing.ts && tsx scripts/test-conversation-titles.ts",
     "db:restore": "node scripts/restore-db-from-stdin.mjs",
     "db:migrate-local": "node scripts/migrate-local-db.mjs",
     "test:web-fetch": "node scripts/test-web-fetch.mjs"

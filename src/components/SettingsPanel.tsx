@@ -265,6 +265,7 @@ function ProviderKeySection({
 }
 
 const OPENROUTER_ACCENT = '#8b5cf6';
+const AUTO_CONVERSATION_TITLES_SETTING_KEY = 'auto_conversation_titles_enabled';
 
 /** DeepSeek direct-provider API key section. Reuses ProviderKeySection with live key validation. */
 function DeepSeekSection() {
@@ -863,6 +864,8 @@ function OpenRouterSection() {
     setOpenRouterOAuthSuccess,
     openRouterOAuthError,
     setOpenRouterOAuthError,
+    autoConversationTitlesEnabled,
+    setAutoConversationTitlesEnabled,
   } = useStore();
   const [localORKey, setLocalORKey] = useState('');
   const [saving, setSaving] = useState(false);
@@ -870,6 +873,8 @@ function OpenRouterSection() {
   const [testMessage, setTestMessage] = useState('');
   const [showManualKey, setShowManualKey] = useState(false);
   const [oauthStarting, setOauthStarting] = useState(false);
+  const [titleSaving, setTitleSaving] = useState(false);
+  const [titleSaveState, setTitleSaveState] = useState<'idle' | 'saved' | 'error'>('idle');
 
   useEffect(() => {
     setLocalORKey(openRouterApiKey);
@@ -926,6 +931,34 @@ function OpenRouterSection() {
   };
 
   const isConnected = !!openRouterApiKey;
+  const titleStatus = titleSaving
+    ? 'Saving...'
+    : titleSaveState === 'error'
+      ? 'Save failed'
+      : !isConnected && autoConversationTitlesEnabled
+        ? 'Waiting for key'
+        : autoConversationTitlesEnabled
+          ? 'On'
+          : 'Off';
+
+  const handleTitleToggle = async (enabled: boolean) => {
+    if (!isConnected || titleSaving) return;
+    const previous = autoConversationTitlesEnabled;
+    setAutoConversationTitlesEnabled(enabled);
+    setTitleSaving(true);
+    setTitleSaveState('idle');
+    try {
+      await settingsApi.set(AUTO_CONVERSATION_TITLES_SETTING_KEY, String(enabled));
+      setTitleSaveState('saved');
+      window.setTimeout(() => setTitleSaveState('idle'), 1600);
+    } catch (err) {
+      console.error('Failed to save automatic conversation titles setting:', err);
+      setAutoConversationTitlesEnabled(previous);
+      setTitleSaveState('error');
+    } finally {
+      setTitleSaving(false);
+    }
+  };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
@@ -1087,6 +1120,71 @@ function OpenRouterSection() {
           )}
         </>
       )}
+
+      <motion.div
+        initial={{ opacity: 0, y: 4 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.18 }}
+        style={{
+          padding: '12px',
+          background: 'var(--bg-surface)',
+          border: '1px solid var(--border)',
+          borderRadius: 'var(--radius-sm)',
+          display: 'flex',
+          alignItems: 'flex-start',
+          gap: '12px',
+          opacity: isConnected ? 1 : 0.72,
+        }}
+      >
+        <div style={{
+          width: '28px',
+          height: '28px',
+          borderRadius: 'var(--radius-sm)',
+          background: `${OPENROUTER_ACCENT}14`,
+          border: `1px solid ${OPENROUTER_ACCENT}28`,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          color: OPENROUTER_ACCENT,
+          flexShrink: 0,
+        }}>
+          <Sparkles size={15} />
+        </div>
+        <div style={{
+          flex: 1,
+          minWidth: 0,
+          display: 'flex',
+          alignItems: 'flex-start',
+          justifyContent: 'space-between',
+          gap: '12px',
+          flexWrap: 'wrap',
+        }}>
+          <PremiumToggle
+            checked={autoConversationTitlesEnabled}
+            onChange={handleTitleToggle}
+            disabled={!isConnected || titleSaving}
+            label="AI conversation titles"
+            description={isConnected
+              ? 'Name new conversations after the first message using openrouter/free.'
+              : 'Connect OpenRouter to enable automatic titles.'}
+            size="sm"
+            color={OPENROUTER_ACCENT}
+          />
+          <span style={{
+            fontSize: '0.6875rem',
+            fontFamily: 'var(--font-mono)',
+            color: titleSaveState === 'error'
+              ? 'var(--error)'
+              : autoConversationTitlesEnabled
+                ? OPENROUTER_ACCENT
+                : 'var(--text-muted)',
+            paddingTop: '3px',
+            whiteSpace: 'nowrap',
+          }}>
+            {titleSaveState === 'saved' ? 'Saved' : titleStatus}
+          </span>
+        </div>
+      </motion.div>
 
       <div style={{ padding: '10px 12px', background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '3px' }}>

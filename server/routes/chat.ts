@@ -26,6 +26,12 @@ import {
   deepSeekCachedTokens,
 } from '../providers/index.js';
 import { buildDateTimeContext, injectDateTimeIntoCurrentTurn } from '../dateTimeContext.js';
+import {
+  AUTO_CONVERSATION_TITLES_SETTING_KEY,
+  createFallbackConversationTitle,
+  generateConversationTitleWithOpenRouter,
+  isAutoConversationTitlesEnabled,
+} from '../conversationTitles.js';
 
 const router = Router();
 
@@ -271,9 +277,26 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
 
     // Update conversation title if first message
     const msgCount = db.prepare('SELECT COUNT(*) as cnt FROM messages WHERE conversation_id = ?').get(conversation_id) as { cnt: number };
+    let firstMessageTitle: string | null = null;
+    let generatedTitlePromise: Promise<string | null> | null = null;
     if (msgCount.cnt === 1) {
-      const title = content.length > 50 ? content.substring(0, 50) + '...' : content;
-      db.prepare('UPDATE conversations SET title = ?, updated_at = datetime(\'now\') WHERE id = ? AND user_id = ?').run(title, conversation_id, userId);
+      const fallbackTitle = createFallbackConversationTitle(content);
+      firstMessageTitle = fallbackTitle;
+      db.prepare('UPDATE conversations SET title = ?, updated_at = datetime(\'now\') WHERE id = ? AND user_id = ?').run(fallbackTitle, conversation_id, userId);
+
+      const titleApiKey = getSettingValue(userId, 'openrouter_api_key');
+      const titleEnabled = isAutoConversationTitlesEnabled(getSettingValue(userId, AUTO_CONVERSATION_TITLES_SETTING_KEY));
+      if (titleEnabled && titleApiKey.trim()) {
+        generatedTitlePromise = generateConversationTitleWithOpenRouter({
+          apiKey: titleApiKey,
+          userMessage: content,
+          systemPrompt: agent.system_prompt,
+        }).then((title) => {
+          if (!title || title === fallbackTitle) return null;
+          db.prepare('UPDATE conversations SET title = ? WHERE id = ? AND user_id = ?').run(title, conversation_id, userId);
+          return title;
+        });
+      }
     } else {
       db.prepare("UPDATE conversations SET updated_at = datetime('now') WHERE id = ? AND user_id = ?").run(conversation_id, userId);
     }
@@ -368,6 +391,21 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
 
     // Register this SSE connection for graceful shutdown draining.
     trackStream(res);
+
+    const sendConversationTitleEvent = (title: string) => {
+      if (clientDisconnected || res.writableEnded) return;
+      res.write(`data: ${JSON.stringify({ type: 'conversation_title', conversation_id, title })}\n\n`);
+    };
+    if (firstMessageTitle) {
+      sendConversationTitleEvent(firstMessageTitle);
+    }
+    generatedTitlePromise
+      ?.then((title) => {
+        if (title) sendConversationTitleEvent(title);
+      })
+      .catch((err) => {
+        console.warn('[chat] Conversation title generation skipped:', err instanceof Error ? err.message : String(err));
+      });
 
     const apiUrl = provider.chatCompletionsUrl;
 

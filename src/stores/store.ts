@@ -45,6 +45,7 @@ interface AppState {
   loadConversations: (agentId?: string) => Promise<void>;
   activeConversationId: string | null;
   setActiveConversationId: (id: string | null) => void;
+  updateConversationTitle: (conversationId: string, title: string) => void;
 
   // Messages
   messages: Message[];
@@ -96,6 +97,8 @@ interface AppState {
   // Settings
   openRouterApiKey: string;
   setOpenRouterApiKey: (key: string) => void;
+  autoConversationTitlesEnabled: boolean;
+  setAutoConversationTitlesEnabled: (enabled: boolean) => void;
   deepSeekApiKey: string;
   setDeepSeekApiKey: (key: string) => void;
   loadSettings: () => Promise<void>;
@@ -234,6 +237,13 @@ export const useStore = create<AppState>((set, get) => ({
   },
   activeConversationId: null,
   setActiveConversationId: (id) => set({ activeConversationId: id }),
+  updateConversationTitle: (conversationId, title) => set((state) => ({
+    conversations: state.conversations.map((conversation) =>
+      conversation.id === conversationId
+        ? { ...conversation, title }
+        : conversation
+    ),
+  })),
 
   // Messages
   messages: [],
@@ -447,6 +457,8 @@ export const useStore = create<AppState>((set, get) => ({
   // Settings
   openRouterApiKey: '',
   setOpenRouterApiKey: (key) => set({ openRouterApiKey: key }),
+  autoConversationTitlesEnabled: false,
+  setAutoConversationTitlesEnabled: (enabled) => set({ autoConversationTitlesEnabled: enabled }),
   deepSeekApiKey: '',
   setDeepSeekApiKey: (key) => set({ deepSeekApiKey: key }),
   loadSettings: async () => {
@@ -454,6 +466,7 @@ export const useStore = create<AppState>((set, get) => ({
       const data = await settingsApi.getAll();
       set({
         openRouterApiKey: data.openrouter_api_key ?? '',
+        autoConversationTitlesEnabled: data.auto_conversation_titles_enabled === 'true' || data.auto_conversation_titles_enabled === '1',
         deepSeekApiKey: data.deepseek_api_key ?? '',
       });
     } catch (err) {

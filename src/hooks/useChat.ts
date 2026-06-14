@@ -35,6 +35,7 @@ export function useChat() {
     addMessage,
     loadMessages,
     loadConversations,
+    updateConversationTitle,
     selectedAgentId,
     upsertStreamingToolCall,
     completeStreamingToolCall,
@@ -58,7 +59,7 @@ export function useChat() {
     }
 
     return sendRegularMessage(content, options);
-  }, [councilEnabled, activeConversationId, isStreaming, addMessage, setIsStreaming, setStreamingContent, appendStreamingContent, appendStreamingContentEvent, setAbortController, setStreamStartTime, setReasoningContent, appendReasoningContent, appendStreamingReasoningEvent, reasoningOverride, upsertStreamingToolCall, completeStreamingToolCall, resetStreamingActivityEvents, loadMessages, loadConversations, selectedAgentId]);
+  }, [councilEnabled, activeConversationId, isStreaming, addMessage, setIsStreaming, setStreamingContent, appendStreamingContent, appendStreamingContentEvent, setAbortController, setStreamStartTime, setReasoningContent, appendReasoningContent, appendStreamingReasoningEvent, reasoningOverride, upsertStreamingToolCall, completeStreamingToolCall, resetStreamingActivityEvents, loadMessages, loadConversations, updateConversationTitle, selectedAgentId]);
 
   const sendCouncilMessage = useCallback(async (content: string, options?: SendMessageOptions) => {
     if (!activeConversationId || isStreaming || !content.trim()) return;
@@ -149,6 +150,9 @@ export function useChat() {
             appendCouncilStreamingContent(chunk);
             appendStreamingContentEvent(chunk);
           },
+          onConversationTitle: (event) => {
+            updateConversationTitle(event.conversation_id, event.title);
+          },
           onComplete: async () => {
             setCouncilIsExecuting(false);
             setIsStreaming(false);
@@ -183,7 +187,7 @@ export function useChat() {
       setAbortController(null);
       await loadMessages(activeConversationId, { silent: true });
     }
-  }, [activeConversationId, isStreaming, addMessage, setIsStreaming, setStreamStartTime, setCouncilIsExecuting, setCouncilMemberProgress, setCouncilSynthesisPhase, setCouncilStreamingContent, appendCouncilStreamingContent, appendStreamingContentEvent, setAbortController, resetStreamingActivityEvents, loadMessages, loadConversations, selectedAgentId]);
+  }, [activeConversationId, isStreaming, addMessage, setIsStreaming, setStreamStartTime, setCouncilIsExecuting, setCouncilMemberProgress, setCouncilSynthesisPhase, setCouncilStreamingContent, appendCouncilStreamingContent, appendStreamingContentEvent, setAbortController, resetStreamingActivityEvents, loadMessages, loadConversations, updateConversationTitle, selectedAgentId]);
 
   const sendRegularMessage = useCallback(async (content: string, options?: SendMessageOptions) => {
     if (!activeConversationId || isStreaming || !content.trim()) return;
@@ -272,8 +276,9 @@ export function useChat() {
       model,
       providerRouting,
       invokeAgentId,
+      (data) => updateConversationTitle(data.conversation_id, data.title),
     );
-  }, [activeConversationId, isStreaming, addMessage, setIsStreaming, setStreamingContent, appendStreamingContent, appendStreamingContentEvent, setAbortController, setStreamStartTime, setReasoningContent, appendReasoningContent, appendStreamingReasoningEvent, reasoningOverride, upsertStreamingToolCall, completeStreamingToolCall, resetStreamingActivityEvents, loadMessages, loadConversations, selectedAgentId]);
+  }, [activeConversationId, isStreaming, addMessage, setIsStreaming, setStreamingContent, appendStreamingContent, appendStreamingContentEvent, setAbortController, setStreamStartTime, setReasoningContent, appendReasoningContent, appendStreamingReasoningEvent, reasoningOverride, upsertStreamingToolCall, completeStreamingToolCall, resetStreamingActivityEvents, loadMessages, loadConversations, updateConversationTitle, selectedAgentId]);
 
   const cancelStream = useCallback(() => {
     const controller = useStore.getState().abortController;

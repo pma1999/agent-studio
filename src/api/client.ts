@@ -232,6 +232,11 @@ export interface StreamToolResultData {
   source?: ToolSource;
 }
 
+export interface StreamConversationTitleData {
+  conversation_id: string;
+  title: string;
+}
+
 // Chat (streaming) with AbortSignal support, reasoning callback, tool callbacks, PDF attachments, and rich done data
 export async function streamChat(
   conversationId: string,
@@ -249,6 +254,7 @@ export async function streamChat(
   model?: string,
   providerRouting?: ProviderRoutingConfig | null,
   invokeAgentId?: string,
+  onConversationTitle?: (data: StreamConversationTitleData) => void,
 ): Promise<void> {
   try {
     const body: Record<string, unknown> = { conversation_id: conversationId, content };
@@ -341,6 +347,18 @@ export async function streamChat(
           if (parsed.error) {
             onError(parsed.error);
             return;
+          }
+          // Conversation title updates
+          if (
+            parsed.type === 'conversation_title' &&
+            typeof parsed.conversation_id === 'string' &&
+            typeof parsed.title === 'string' &&
+            onConversationTitle
+          ) {
+            onConversationTitle({
+              conversation_id: parsed.conversation_id,
+              title: parsed.title,
+            });
           }
           // Reasoning content
           if (parsed.reasoning && onReasoning) {

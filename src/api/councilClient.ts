@@ -24,6 +24,7 @@ export interface CouncilStreamHandlers {
   onSynthesisStart?: (event: { synthesizer_model: string; successful_members: number; failed_members: number }) => void;
   onSynthesisChunk?: (content: string) => void;
   onSynthesisReasoning?: (content: string) => void;
+  onConversationTitle?: (event: { conversation_id: string; title: string }) => void;
   onComplete?: (event: {
     council_run_id: string;
     message_id: string;
@@ -95,6 +96,9 @@ export async function streamCouncilChat(
               break;
             case 'council_synthesis_reasoning':
               handlers.onSynthesisReasoning?.(event.content);
+              break;
+            case 'conversation_title':
+              handlers.onConversationTitle?.(event);
               break;
             case 'council_complete':
               handlers.onComplete?.(event);

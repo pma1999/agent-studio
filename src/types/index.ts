@@ -476,6 +476,12 @@ export type CouncilErrorEvent = {
   phase: 'execution' | 'synthesis' | 'storage';
 };
 
+export type ConversationTitleEvent = {
+  type: 'conversation_title';
+  conversation_id: string;
+  title: string;
+};
+
 export type CouncilStreamEvent =
   | CouncilMemberStartEvent
   | CouncilMemberCompleteEvent
@@ -483,6 +489,7 @@ export type CouncilStreamEvent =
   | CouncilSynthesisChunkEvent
   | CouncilSynthesisReasoningEvent
   | CouncilCompleteEvent
+  | ConversationTitleEvent
   | CouncilErrorEvent;
 
 // Council Chat Request
