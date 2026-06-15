@@ -2609,6 +2609,16 @@ button:focus-visible .conv-delete-btn {
   background: #fff;
 }
 
+/* Mobile-only: momentum scrolling + overscroll containment on scroll regions. */
+@media (max-width: 767px) {
+  .chat-view-messages-scroll,
+  .recents-list,
+  .modal-body {
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+  }
+}
+
 /* ---------- View header (shared slim header) ---------- */
 .view-header {
   display: flex;

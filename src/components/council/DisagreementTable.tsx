@@ -2,6 +2,7 @@ import React from 'react';
 import { motion } from 'framer-motion';
 import { MessageSquareOff } from 'lucide-react';
 import { ModelAvatar, getModelDisplayName } from './ModelAvatar';
+import { useIsMobile } from '../../utils/breakpoints';
 import type { CouncilComparison } from '../../types';
 
 const container = {
@@ -22,6 +23,7 @@ interface DisagreementTableProps {
 }
 
 export function DisagreementTable({ disagreements }: DisagreementTableProps) {
+  const isMobile = useIsMobile();
   if (!disagreements.length) return null;
 
   return (
@@ -60,6 +62,56 @@ export function DisagreementTable({ disagreements }: DisagreementTableProps) {
           Where they disagree
         </span>
       </div>
+      {isMobile ? (
+        <div>
+          {disagreements.map((row, idx) => (
+            <motion.div
+              key={idx}
+              variants={item}
+              style={{
+                padding: '14px 16px',
+                borderBottom: idx < disagreements.length - 1 ? '1px solid var(--border)' : 'none',
+                background: idx % 2 === 0 ? 'transparent' : 'rgba(212, 165, 87, 0.04)',
+              }}
+            >
+              <div style={{ fontSize: '0.9375rem', fontWeight: 500, color: 'var(--text-primary)', marginBottom: 10 }}>
+                {row.topic}
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: row.why_they_differ ? 10 : 0 }}>
+                {row.stances.map((s, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'flex-start',
+                      gap: 10,
+                      padding: '8px 10px',
+                      background: 'var(--bg-elevated)',
+                      borderRadius: 'var(--radius-sm)',
+                      borderLeft: '3px solid var(--council-border)',
+                    }}
+                  >
+                    <ModelAvatar modelId={s.model_id} size="xs" />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginBottom: 2 }}>
+                        {getModelDisplayName(s.model_id)}
+                      </div>
+                      <div style={{ fontSize: '0.875rem', lineHeight: 1.45, color: 'var(--text-secondary)' }}>
+                        {s.stance}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              {row.why_they_differ && (
+                <div style={{ fontSize: '0.8125rem', lineHeight: 1.5, color: 'var(--text-secondary)', fontStyle: 'italic' }}>
+                  {row.why_they_differ}
+                </div>
+              )}
+            </motion.div>
+          ))}
+        </div>
+      ) : (
       <div style={{ overflowX: 'auto' }}>
         <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 480 }}>
           <thead>
@@ -191,6 +243,7 @@ export function DisagreementTable({ disagreements }: DisagreementTableProps) {
           </tbody>
         </table>
       </div>
+      )}
     </motion.div>
   );
 }

@@ -6,6 +6,7 @@ import { MessageTokenPills } from './TokenCounter';
 import { ToolCallTimeline } from './ToolCallTimeline';
 import { CouncilMessageView } from './CouncilMessageView';
 import { formatModelId, getModelAuthor, getAuthorColor, formatAuthor } from '../utils/modelUtils';
+import { useIsMobile } from '../utils/breakpoints';
 import { getCouncilRun } from '../api/councilClient';
 import type { Message, Annotation, ToolExecution, StreamingActivityEvent, CouncilRunDetail, ProviderRoutingConfig } from '../types';
 
@@ -242,14 +243,16 @@ function ReasoningBlock({
   isStreaming: boolean;
   tokenCount?: number;
 }) {
-  const [expanded, setExpanded] = React.useState(isStreaming);
+  const isMobile = useIsMobile();
+  // On mobile, keep reasoning collapsed by default (even while streaming) to
+  // save vertical space; on desktop it auto-expands while streaming as before.
+  const [expanded, setExpanded] = React.useState(isStreaming && !isMobile);
 
-  // Auto-expand while streaming, auto-collapse when done
   React.useEffect(() => {
-    if (isStreaming) {
+    if (isStreaming && !isMobile) {
       setExpanded(true);
     }
-  }, [isStreaming]);
+  }, [isStreaming, isMobile]);
 
   if (!content) return null;
 
