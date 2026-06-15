@@ -6,6 +6,8 @@ import { useChat } from '../hooks/useChat';
 import { useIsMobile, usePrefersReducedMotion } from '../utils/breakpoints';
 import { ConversationList } from './ConversationList';
 import { IconButton } from './ui/IconButton';
+import { useBodyScrollLock } from '../hooks/useBodyScrollLock';
+import { useFocusTrap } from '../hooks/useFocusTrap';
 
 const navItems = [
   { id: 'chat' as const, label: 'Chat', icon: MessageSquare },
@@ -72,48 +74,9 @@ export function Sidebar() {
     previousMobileOpenRef.current = sidebarMobileOpen;
   }, [isMobile, sidebarMobileOpen]);
 
-  // Lock body scroll when mobile drawer is open
-  useEffect(() => {
-    if (isMobile && sidebarMobileOpen) {
-      const prev = document.body.style.overflow;
-      document.body.style.overflow = 'hidden';
-      return () => {
-        document.body.style.overflow = prev;
-      };
-    }
-  }, [isMobile, sidebarMobileOpen]);
-
-  // Focus trap when mobile drawer is open
-  useEffect(() => {
-    if (!isMobile || !sidebarMobileOpen || !asideRef.current) return;
-    const el = asideRef.current;
-    const getFocusable = () =>
-      Array.from(
-        el.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-        )
-      ).filter((node) => node.getAttribute('aria-hidden') !== 'true');
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key !== 'Tab') return;
-      const focusable = getFocusable();
-      if (focusable.length === 0) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (e.shiftKey) {
-        if (document.activeElement === first) {
-          e.preventDefault();
-          last.focus();
-        }
-      } else {
-        if (document.activeElement === last) {
-          e.preventDefault();
-          first.focus();
-        }
-      }
-    };
-    el.addEventListener('keydown', onKeyDown);
-    return () => el.removeEventListener('keydown', onKeyDown);
-  }, [isMobile, sidebarMobileOpen]);
+  // Lock body scroll + trap focus while the mobile drawer is open
+  useBodyScrollLock(isMobile && sidebarMobileOpen);
+  useFocusTrap(asideRef, isMobile && sidebarMobileOpen);
 
   // Close the agent picker whenever the view changes
   useEffect(() => {

@@ -15,13 +15,7 @@ export function Layout({ children }: LayoutProps) {
   const menuOpen = useStore((s) => s.sidebarMobileOpen);
 
   return (
-    <div style={{
-      display: 'flex',
-      height: '100vh',
-      width: '100vw',
-      overflow: 'hidden',
-      background: 'var(--bg-deepest)',
-    }}>
+    <div className="app-shell">
       <Sidebar />
       <main style={{
         flex: 1,

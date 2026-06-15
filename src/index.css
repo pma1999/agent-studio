@@ -182,6 +182,19 @@
   --sidebar-width-collapsed: 56px;
   --header-height: 56px;
 
+  /* Mobile chrome (only consumed by mobile-only components / media queries) */
+  --bottom-nav-height: 56px;
+  --mobile-topbar-height: 52px;
+
+  /* Stacking order (single source of truth for overlay layering)
+     content < bottom-nav < drawer < modal < sheet < mention-dropdown */
+  --z-bottom-nav: 850;
+  --z-drawer-scrim: 899;
+  --z-drawer: 900;
+  --z-modal: 1000;
+  --z-sheet-scrim: 1100;
+  --z-sheet: 1101;
+
   /* Chat view */
   --chat-content-max-width: 800px;
   --chat-bubble-gap: 14px;
@@ -287,17 +300,42 @@ body {
   overflow: hidden;
   overflow-x: hidden;
   height: 100vh;
+  height: 100dvh; /* dynamic viewport height — handles mobile browser chrome; == 100vh on desktop */
   width: 100vw;
 }
 
 #root {
   height: 100vh;
+  height: 100dvh;
   width: 100vw;
   overflow: hidden;
   overflow-x: hidden;
   min-width: 0;
   position: relative;
   z-index: 1;
+}
+
+/* Full-height app shell — replaces inline 100vh in Layout so the
+   vh→dvh fallback lives in CSS. Identical to 100vh on desktop. */
+.app-shell {
+  display: flex;
+  height: 100vh;
+  height: 100dvh;
+  width: 100%;
+  overflow: hidden;
+  background: var(--bg-deepest);
+}
+
+/* Mobile-only global safety: contain overscroll chaining and guard against
+   any accidental horizontal overflow on phones. No visual effect on desktop. */
+@media (max-width: 767px) {
+  html,
+  body {
+    overscroll-behavior-y: none;
+  }
+  #root {
+    overflow-x: hidden;
+  }
 }
 
 /* Noise texture overlay — sits BEHIND content (atelier grain in the
@@ -1256,14 +1294,19 @@ button:hover .conv-delete-btn,
   padding: 20px 24px;
 }
 @media (max-width: 767px) {
+  /* Full-screen sheet presentation on mobile (panel sizing handled inline). */
   .modal-overlay {
-    padding: 12px;
+    padding: 0;
   }
   .modal-body {
     padding: 16px;
   }
   .modal-header {
-    padding: 16px 20px;
+    padding: calc(16px + env(safe-area-inset-top)) 20px 16px;
+  }
+  /* When there is no sticky footer, let the scrollable body clear the home indicator. */
+  .modal-panel-mobile .modal-body {
+    padding-bottom: calc(16px + env(safe-area-inset-bottom));
   }
 }
 
@@ -2292,7 +2335,93 @@ button:focus-visible .conv-delete-btn {
 }
 @media (max-width: 767px) {
   .modal-panel { max-height: 92vh; max-height: 92svh; }
-  .modal-footer { padding: 12px 16px; }
+  .modal-footer { padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); }
+}
+
+/* ===== Bottom sheet (mobile only; never mounted on desktop) ===== */
+.sheet-scrim {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(3px);
+  z-index: var(--z-sheet-scrim);
+}
+.sheet-panel {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  background: var(--bg-base);
+  border-top: 1px solid var(--border);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  box-shadow: var(--shadow-lg);
+  padding-bottom: env(safe-area-inset-bottom);
+  z-index: var(--z-sheet);
+  overflow: hidden;
+}
+.sheet-drag-zone {
+  flex-shrink: 0;
+  cursor: grab;
+  touch-action: none;
+}
+.sheet-grab {
+  width: 38px;
+  height: 4px;
+  border-radius: var(--radius-pill);
+  background: var(--border-light);
+  margin: 10px auto 4px;
+}
+.sheet-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  padding: 4px var(--space-lg) 12px;
+  border-bottom: 1px solid var(--border);
+}
+.sheet-title {
+  font-family: var(--font-display);
+  font-size: 1.2rem;
+  font-weight: 500;
+  color: var(--text-primary);
+  margin: 0;
+}
+.sheet-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  -webkit-tap-highlight-color: transparent;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+.sheet-close:active {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.sheet-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: var(--space-md) var(--space-lg);
+}
+.sheet-footer {
+  flex-shrink: 0;
+  display: flex;
+  gap: var(--space-sm);
+  padding: var(--space-md) var(--space-lg);
+  border-top: 1px solid var(--border);
+  background: var(--bg-base);
 }
 
 /* ---------- View header (shared slim header) ---------- */
