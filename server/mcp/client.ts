@@ -13,40 +13,99 @@ const MCP_CLIENT_NAME = 'agent-studio';
 const MCP_CLIENT_VERSION = '1.0.0';
 const CONNECT_TIMEOUT_MS = 15_000;
 const TOOL_CALL_TIMEOUT_MS = 60_000;
+const MAX_TEXT_RESULT_CHARS = 64_000;
+const TOOL_CACHE_TTL_MS = 30_000;
 
 export interface McpConnection {
   client: Client;
   close(): Promise<void>;
 }
 
+async function closeQuietly(close: () => Promise<void>, label: string): Promise<void> {
+  try {
+    await close();
+  } catch (e) {
+    console.error(`[mcp] Error closing ${label}:`, e);
+  }
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string,
+  onTimeout?: () => Promise<void> | void
+): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => {
+      timedOut = true;
+      void Promise.resolve(onTimeout?.()).finally(() => reject(new Error(message)));
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+    // Avoid unhandled rejections if the underlying operation finishes after the timeout.
+    if (timedOut) promise.catch(() => undefined);
+  }
+}
+
 /**
  * Try connecting via StreamableHTTP first, fall back to SSE for legacy servers.
  * Returns the connected client and a close function for the transport that succeeded.
  */
+
+function createMcpClient(label: string): Client {
+  const client = new Client(
+    { name: MCP_CLIENT_NAME, version: MCP_CLIENT_VERSION },
+    {
+      listChanged: {
+        tools: {
+          onChanged: (error: Error | null) => {
+            invalidateMcpToolCache(client);
+            if (error) {
+              console.warn(`[mcp] Failed to refresh changed tool list for ${label}:`, error.message);
+            } else {
+              console.log(`[mcp] Tool list changed for ${label}; cache invalidated`);
+            }
+          },
+        },
+      },
+    }
+  );
+  return client;
+}
+
 async function connectUrlTransport(
   url: URL,
   headers?: Record<string, string>
 ): Promise<{ client: Client; close: () => Promise<void> }> {
   const requestInit = headers && Object.keys(headers).length > 0 ? { headers } : undefined;
 
-  // Try StreamableHTTP first (modern MCP servers)
   let streamableTransport: StreamableHTTPClientTransport | null = null;
   try {
     streamableTransport = new StreamableHTTPClientTransport(url, requestInit ? { requestInit } : undefined);
-    const client = new Client({ name: MCP_CLIENT_NAME, version: MCP_CLIENT_VERSION });
-    await client.connect(streamableTransport);
-    console.log(`[mcp] Connected via StreamableHTTP to ${url.href}`);
+    const client = createMcpClient(url.href);
     const transport = streamableTransport;
+    await withTimeout(
+      client.connect(transport),
+      CONNECT_TIMEOUT_MS,
+      `MCP StreamableHTTP connection to ${url.href} timed out after ${CONNECT_TIMEOUT_MS}ms`,
+      () => transport.close()
+    );
+    console.log(`[mcp] Connected via StreamableHTTP to ${url.href}`);
     return {
       client,
       async close() {
-        try { await transport.close(); } catch (e) { console.error('[mcp] Error closing transport:', e); }
+        await closeQuietly(() => transport.close(), 'StreamableHTTP transport');
       },
     };
   } catch (streamableErr) {
-    // Clean up failed transport
     if (streamableTransport) {
-      try { await streamableTransport.close(); } catch { /* ignore */ }
+      await closeQuietly(() => streamableTransport!.close(), 'failed StreamableHTTP transport');
     }
     console.warn(
       `[mcp] StreamableHTTP failed for ${url.href}, trying SSE fallback:`,
@@ -54,15 +113,19 @@ async function connectUrlTransport(
     );
   }
 
-  // Fallback to SSE (legacy MCP servers)
   const sseTransport = new SSEClientTransport(url, requestInit ? { requestInit } : undefined);
-  const sseClient = new Client({ name: MCP_CLIENT_NAME, version: MCP_CLIENT_VERSION });
-  await sseClient.connect(sseTransport);
+  const sseClient = createMcpClient(url.href);
+  await withTimeout(
+    sseClient.connect(sseTransport),
+    CONNECT_TIMEOUT_MS,
+    `MCP SSE connection to ${url.href} timed out after ${CONNECT_TIMEOUT_MS}ms`,
+    () => sseTransport.close()
+  );
   console.log(`[mcp] Connected via SSE (legacy) to ${url.href}`);
   return {
     client: sseClient,
     async close() {
-      try { await sseTransport.close(); } catch (e) { console.error('[mcp] Error closing transport:', e); }
+      await closeQuietly(() => sseTransport.close(), 'SSE transport');
     },
   };
 }
@@ -77,68 +140,43 @@ export async function createAndConnectMcpClient(server: {
   config: McpServerConfig;
 }): Promise<McpConnection> {
   if (server.transport === 'url') {
-    if (!isMcpConfigUrl(server.config)) {
-      throw new Error('URL transport requires config.url');
-    }
+    if (!isMcpConfigUrl(server.config)) throw new Error('URL transport requires config.url');
     const urlStr = server.config.url?.trim();
-    if (!urlStr) {
-      throw new Error('config.url is required for URL transport');
-    }
+    if (!urlStr) throw new Error('config.url is required for URL transport');
     let url: URL;
     try {
       url = new URL(urlStr);
     } catch {
       throw new Error(`Invalid MCP URL: ${urlStr}`);
     }
-
-    const headers = server.config.headers;
-
-    const connectPromise = connectUrlTransport(url, headers);
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error('MCP connection timeout')), CONNECT_TIMEOUT_MS);
-    });
-
-    const result = await Promise.race([connectPromise, timeoutPromise]);
+    const result = await connectUrlTransport(url, server.config.headers);
     return { client: result.client, close: result.close };
   }
 
   if (server.transport === 'stdio') {
-    if (!isMcpConfigStdio(server.config)) {
-      throw new Error('stdio transport requires config.command');
-    }
+    if (!isMcpConfigStdio(server.config)) throw new Error('stdio transport requires config.command');
     const command = server.config.command?.trim();
-    if (!command) {
-      throw new Error('config.command is required for stdio transport');
-    }
+    if (!command) throw new Error('config.command is required for stdio transport');
 
     const transport = new StdioClientTransport({
       command,
       args: Array.isArray(server.config.args) ? server.config.args : [],
-      env: server.config.env
-        ? { ...process.env as Record<string, string>, ...server.config.env }
-        : undefined,
+      env: server.config.env ? { ...(process.env as Record<string, string>), ...server.config.env } : undefined,
       cwd: server.config.cwd || undefined,
     });
+    const client = createMcpClient(command);
 
-    const client = new Client(
-      { name: MCP_CLIENT_NAME, version: MCP_CLIENT_VERSION }
+    await withTimeout(
+      client.connect(transport),
+      CONNECT_TIMEOUT_MS,
+      `MCP stdio connection timed out after ${CONNECT_TIMEOUT_MS}ms`,
+      () => transport.close()
     );
-
-    const connectPromise = client.connect(transport);
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error('MCP connection timeout')), CONNECT_TIMEOUT_MS);
-    });
-
-    await Promise.race([connectPromise, timeoutPromise]);
 
     return {
       client,
       async close() {
-        try {
-          await transport.close();
-        } catch (e) {
-          console.error('[mcp] Error closing transport:', e);
-        }
+        await closeQuietly(() => transport.close(), 'stdio transport');
       },
     };
   }
@@ -146,9 +184,6 @@ export async function createAndConnectMcpClient(server: {
   throw new Error(`Unsupported MCP transport: ${server.transport}`);
 }
 
-/**
- * Normalize tool name for OpenAI/OpenRouter: snake_case, no spaces.
- */
 function normalizeToolName(name: string): string {
   return name
     .trim()
@@ -158,52 +193,27 @@ function normalizeToolName(name: string): string {
     .toLowerCase() || 'tool';
 }
 
-/**
- * Ensure unique name with optional prefix (e.g. mcp_abc123_read_file).
- */
 export function prefixToolName(prefix: string, name: string): string {
   const normalized = normalizeToolName(name);
   const prefixed = prefix ? `${prefix.replace(/[^a-z0-9_]/gi, '_')}_${normalized}` : normalized;
   return prefixed || 'tool';
 }
 
-/**
- * Extract the original MCP tool name from a prefixed name (prefix_tool_name -> tool_name).
- */
 export function unprefixToolName(prefix: string, prefixedName: string): string {
   if (!prefix) return prefixedName;
   const p = prefix.replace(/[^a-z0-9_]/gi, '_');
-  if (!p || !prefixedName.startsWith(p + '_')) {
-    return prefixedName;
-  }
+  if (!p || !prefixedName.startsWith(p + '_')) return prefixedName;
   return prefixedName.slice(p.length + 1);
 }
 
-/**
- * Map MCP inputSchema (JSON Schema) to OpenAI/OpenRouter function parameters.
- * Passes through the full schema faithfully (including additionalProperties, enum, oneOf, etc.)
- * while ensuring the required minimum structure for OpenAI compatibility.
- */
 function inputSchemaToOpenAIParameters(inputSchema: Record<string, unknown>): Record<string, unknown> {
   const schema = inputSchema && typeof inputSchema === 'object' ? { ...inputSchema } : {} as Record<string, unknown>;
-  // Ensure type is 'object' (required by OpenAI function calling)
-  if (schema.type !== 'object') {
-    schema.type = 'object';
-  }
-  // Ensure properties exists
-  if (!schema.properties || typeof schema.properties !== 'object') {
-    schema.properties = {};
-  }
-  // Ensure required is an array
-  if (!Array.isArray(schema.required)) {
-    schema.required = [];
-  }
+  if (schema.type !== 'object') schema.type = 'object';
+  if (!schema.properties || typeof schema.properties !== 'object') schema.properties = {};
+  if (!Array.isArray(schema.required)) schema.required = [];
   return schema;
 }
 
-/**
- * Build annotation hints from MCP tool annotations for the LLM description.
- */
 function buildAnnotationHints(annotations: Record<string, unknown> | undefined): string {
   if (!annotations || typeof annotations !== 'object') return '';
   const hints: string[] = [];
@@ -217,6 +227,10 @@ function buildAnnotationHints(annotations: Record<string, unknown> | undefined):
 export interface McpToolDef {
   name: string;
   mcpToolName: string;
+  title?: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  annotations?: Record<string, unknown>;
   openAIDef: {
     type: 'function';
     function: {
@@ -227,17 +241,25 @@ export interface McpToolDef {
   };
 }
 
-/**
- * List tools from an MCP client and convert to OpenAI/OpenRouter format.
- * namePrefix is used to avoid collisions when multiple MCPs are attached (e.g. mcp_abc_).
- * Handles pagination (follows nextCursor) for servers with many tools.
- * Exposes name, title (if present), description, annotations, and full inputSchema.
- */
-export async function listMcpTools(
-  client: Client,
-  namePrefix: string
-): Promise<McpToolDef[]> {
-  // Fetch all tools with pagination
+const toolCache = new WeakMap<Client, { fetchedAt: number; namePrefix: string; tools: McpToolDef[] }>();
+
+function uniqueToolName(baseName: string, used: Map<string, number>): string {
+  const count = used.get(baseName) || 0;
+  used.set(baseName, count + 1);
+  return count === 0 ? baseName : `${baseName}_${count + 1}`;
+}
+
+export function invalidateMcpToolCache(client: Client): void {
+  toolCache.delete(client);
+}
+
+export async function listMcpTools(client: Client, namePrefix: string): Promise<McpToolDef[]> {
+  const now = Date.now();
+  const cached = toolCache.get(client);
+  if (cached && cached.namePrefix === namePrefix && now - cached.fetchedAt < TOOL_CACHE_TTL_MS) {
+    return cached.tools;
+  }
+
   const allTools: Array<{ name: string; description?: string; inputSchema?: Record<string, unknown>; [key: string]: unknown }> = [];
   let cursor: string | undefined;
   do {
@@ -247,122 +269,115 @@ export async function listMcpTools(
   } while (cursor);
 
   const result: McpToolDef[] = [];
+  const usedNames = new Map<string, number>();
 
   for (const tool of allTools) {
     const mcpName = tool.name || 'unnamed';
-    const displayName = prefixToolName(namePrefix, mcpName);
-    const schema =
-      tool.inputSchema && typeof tool.inputSchema === 'object'
-        ? tool.inputSchema
-        : { type: 'object' as const, properties: {}, required: [] as string[] };
+    const baseDisplayName = prefixToolName(namePrefix, mcpName);
+    const displayName = uniqueToolName(baseDisplayName, usedNames);
+    if (displayName !== baseDisplayName) {
+      console.warn(`[mcp] Tool name collision for ${baseDisplayName}; exposed as ${displayName}`);
+    }
+
+    const schema = tool.inputSchema && typeof tool.inputSchema === 'object'
+      ? tool.inputSchema
+      : { type: 'object' as const, properties: {}, required: [] as string[] };
     const parameters = inputSchemaToOpenAIParameters(schema as Record<string, unknown>);
-
     const desc = typeof tool.description === 'string' ? tool.description : (tool.description ?? '');
-    const title = typeof (tool as unknown as { title?: string }).title === 'string' ? (tool as unknown as { title: string }).title : '';
-    const baseDescription =
-      title && desc ? `${title}. ${desc}` : title ? title : desc || 'MCP tool';
-
-    // Append annotation hints (read-only, destructive, etc.)
-    const annotationHints = buildAnnotationHints(
-      (tool as { annotations?: Record<string, unknown> }).annotations
-    );
-    const description =
-      baseDescription +
-      annotationHints +
-      (namePrefix ? ` You must call this tool using its exact name: ${displayName}.` : '');
+    const rawTitle = (tool as Record<string, unknown>).title;
+    const title = typeof rawTitle === 'string' ? rawTitle : '';
+    const rawAnnotations = (tool as Record<string, unknown>).annotations;
+    const annotations = rawAnnotations && typeof rawAnnotations === 'object'
+      ? rawAnnotations as Record<string, unknown>
+      : undefined;
+    const baseDescription = title && desc ? `${title}. ${desc}` : title ? title : desc || 'MCP tool';
+    const description = baseDescription + buildAnnotationHints(annotations);
+    const openAIDescription = description + (namePrefix ? ` You must call this tool using its exact name: ${displayName}.` : '');
 
     result.push({
       name: displayName,
       mcpToolName: mcpName,
+      title: title || undefined,
+      description,
+      inputSchema: schema as Record<string, unknown>,
+      annotations,
       openAIDef: {
         type: 'function',
-        function: {
-          name: displayName,
-          description,
-          parameters,
-        },
+        function: { name: displayName, description: openAIDescription, parameters },
       },
     });
   }
 
+  toolCache.set(client, { fetchedAt: now, namePrefix, tools: result });
   return result;
 }
 
-/**
- * Call an MCP tool and return the result as a string (for the tool message content).
- * Handles text, image, audio, embedded resource, resource_link, isError, and structuredContent.
- * Per spec: tool execution errors should be given to the model for self-correction.
- * Includes a configurable timeout to prevent hung tool calls from blocking indefinitely.
- */
+export interface McpToolCallResult {
+  output: string;
+  isError: boolean;
+  content: unknown[];
+  structuredContent?: Record<string, unknown>;
+}
+
+function truncateText(text: string): string {
+  if (text.length <= MAX_TEXT_RESULT_CHARS) return text;
+  return `${text.slice(0, MAX_TEXT_RESULT_CHARS)}\n\n[Output truncated to ${MAX_TEXT_RESULT_CHARS} characters]`;
+}
+
+export async function callMcpToolDetailed(
+  client: Client,
+  toolName: string,
+  args: Record<string, unknown>,
+  timeoutMs: number = TOOL_CALL_TIMEOUT_MS
+): Promise<McpToolCallResult> {
+  const result = await withTimeout(
+    client.callTool({ name: toolName, arguments: args }),
+    timeoutMs,
+    `MCP tool call "${toolName}" timed out after ${timeoutMs}ms`
+  );
+
+  const content = Array.isArray(result?.content) ? result.content : [];
+  const isError = (result as { isError?: boolean })?.isError === true;
+  const structuredContent = (result as { structuredContent?: Record<string, unknown> })?.structuredContent;
+
+  const parts: string[] = [];
+  if (isError) parts.push('[Tool execution error]');
+
+  for (const item of content) {
+    if (!item || typeof item !== 'object' || !('type' in item)) continue;
+    const t = (item as { type: string }).type;
+    if (t === 'text' && 'text' in item) {
+      parts.push(String((item as { text: string }).text));
+    } else if (t === 'image' && 'data' in item) {
+      const img = item as { data: string; mimeType?: string };
+      parts.push(`[Image: ${img.mimeType || 'image/png'}, ${img.data ? img.data.length : 0} bytes of base64 data]`);
+    } else if (t === 'audio' && 'data' in item) {
+      const audio = item as { data: string; mimeType?: string };
+      parts.push(`[Audio: ${audio.mimeType || 'audio/wav'}, ${audio.data ? audio.data.length : 0} bytes of base64 data]`);
+    } else if (t === 'resource' && 'resource' in item) {
+      const res = (item as { resource: { uri?: string; mimeType?: string; text?: string } }).resource;
+      parts.push(res.text ? res.text : `[Embedded resource: ${res.uri || 'unknown'} (${res.mimeType || 'unknown type'})]`);
+    } else if (t === 'resource_link' && 'uri' in item && 'name' in item) {
+      const r = item as { uri: string; name: string; description?: string };
+      parts.push(r.description ? `Resource: ${r.name} (${r.uri}) — ${r.description}` : `Resource: ${r.name} (${r.uri})`);
+    } else {
+      parts.push(`[Unsupported MCP content block: ${t}]`);
+    }
+  }
+
+  if (structuredContent && Object.keys(structuredContent).length > 0) {
+    try { parts.push(JSON.stringify(structuredContent)); } catch { /* ignore */ }
+  }
+
+  const output = parts.length === 0 ? JSON.stringify(result ?? {}) : truncateText(parts.join('\n\n'));
+  return { output, isError, content, structuredContent };
+}
+
 export async function callMcpTool(
   client: Client,
   toolName: string,
   args: Record<string, unknown>,
   timeoutMs: number = TOOL_CALL_TIMEOUT_MS
 ): Promise<string> {
-  const callPromise = client.callTool({
-    name: toolName,
-    arguments: args,
-  });
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    setTimeout(() => reject(new Error(`MCP tool call "${toolName}" timed out after ${timeoutMs}ms`)), timeoutMs);
-  });
-
-  const result = await Promise.race([callPromise, timeoutPromise]);
-
-  const content = result?.content;
-  const isError = (result as { isError?: boolean })?.isError === true;
-  const structuredContent = (result as { structuredContent?: Record<string, unknown> })?.structuredContent;
-
-  const parts: string[] = [];
-  if (isError) {
-    parts.push('[Tool execution error]');
-  }
-
-  if (content && Array.isArray(content)) {
-    for (const item of content) {
-      if (!item || typeof item !== 'object' || !('type' in item)) continue;
-      const t = (item as { type: string }).type;
-
-      if (t === 'text' && 'text' in item) {
-        parts.push(String((item as { text: string }).text));
-      } else if (t === 'image' && 'data' in item) {
-        const img = item as { data: string; mimeType?: string };
-        const mimeType = img.mimeType || 'image/png';
-        const dataLen = img.data ? img.data.length : 0;
-        parts.push(`[Image: ${mimeType}, ${dataLen} bytes of base64 data]`);
-      } else if (t === 'audio' && 'data' in item) {
-        const audio = item as { data: string; mimeType?: string };
-        const mimeType = audio.mimeType || 'audio/wav';
-        const dataLen = audio.data ? audio.data.length : 0;
-        parts.push(`[Audio: ${mimeType}, ${dataLen} bytes of base64 data]`);
-      } else if (t === 'resource' && 'resource' in item) {
-        const res = (item as { resource: { uri?: string; mimeType?: string; text?: string } }).resource;
-        if (res.text) {
-          parts.push(res.text);
-        } else {
-          parts.push(`[Embedded resource: ${res.uri || 'unknown'} (${res.mimeType || 'unknown type'})]`);
-        }
-      } else if (t === 'resource_link' && 'uri' in item && 'name' in item) {
-        const r = item as { uri: string; name: string; description?: string };
-        const line = r.description
-          ? `Resource: ${r.name} (${r.uri}) — ${r.description}`
-          : `Resource: ${r.name} (${r.uri})`;
-        parts.push(line);
-      }
-    }
-  }
-
-  if (structuredContent && typeof structuredContent === 'object' && Object.keys(structuredContent).length > 0) {
-    try {
-      parts.push(JSON.stringify(structuredContent));
-    } catch {
-      // ignore
-    }
-  }
-
-  if (parts.length === 0) {
-    return JSON.stringify(result ?? {});
-  }
-  return parts.join('\n\n');
+  return (await callMcpToolDetailed(client, toolName, args, timeoutMs)).output;
 }
