@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Send, ArrowDown, StopCircle, MessageSquare, Bot, Brain, FileUp, Link, X, Users } from 'lucide-react';
+import { Send, ArrowDown, StopCircle, MessageSquare, Bot, Brain, FileUp, Link, X, Users, SlidersHorizontal } from 'lucide-react';
 import { CouncilToggle } from './CouncilToggle';
 import { CouncilStreamingView } from './CouncilStreamingView';
 import { useStore } from '../stores/store';
@@ -14,6 +14,7 @@ import { ModelSelectorCore } from './ModelSelectorCore';
 import { ProviderRoutingSelector } from './ProviderRoutingSelector';
 import { conversationsApi } from '../api/client';
 import { PremiumMentionInput } from './ui/PremiumMentionInput';
+import { Sheet } from './ui/Sheet';
 import { ConversationTokenSummary, StreamingTokenCounter } from './TokenCounter';
 import type {
   ReasoningEffort,
@@ -244,6 +245,12 @@ export function ChatView() {
   const reasoningActive = effectiveReasoning.enabled;
   const currentEffort = effectiveReasoning.effort || 'medium';
   const isMobile = useIsMobile();
+  const setComposerFocused = useStore((s) => s.setComposerFocused);
+  const [optionsOpen, setOptionsOpen] = useState(false);
+  // Clear the composing flag if the chat unmounts while focused.
+  useEffect(() => () => setComposerFocused(false), [setComposerFocused]);
+  const composerOptionsActive =
+    reasoningActive || messageModelOverride !== null || councilEnabled || !!pdfEngine;
   const prefersReducedMotion = usePrefersReducedMotion();
 
   // Close popover when clicking outside
@@ -468,7 +475,8 @@ export function ChatView() {
         position: 'relative',
       }}
     >
-      {/* Chat Header */}
+      {/* Chat Header — hidden on mobile; the title lives in the sticky top app bar */}
+      {!isMobile && (
       <header className="chat-view-header" aria-label="Conversation header">
         <div className="chat-view-header-icon">
           {agent ? (
@@ -510,6 +518,7 @@ export function ChatView() {
         </div>
         <ConversationTokenSummary messages={messages} />
       </header>
+      )}
 
       {/* Messages + FAB wrapper (position relative so FAB is positioned above input) */}
       <div className="chat-view-messages-wrapper" style={{ flex: 1, minHeight: 0, position: 'relative', display: 'flex', flexDirection: 'column' }}>
@@ -682,7 +691,8 @@ export function ChatView() {
             gap: '10px',
             minWidth: 0,
           }} className="chat-input-container">
-            {/* Toolbar row - Model selectors and controls */}
+            {/* Toolbar row — desktop only; on mobile these controls move into the options sheet */}
+            {!isMobile && (
             <div style={{
               display: 'flex',
               gap: '8px',
@@ -925,6 +935,7 @@ export function ChatView() {
                 />
               </div>
             </div>
+            )}
 
             {/* Main input row - textarea and send button */}
             <div style={{
@@ -933,6 +944,42 @@ export function ChatView() {
               alignItems: 'flex-end',
               minWidth: 0,
             }} className="chat-input-main-row">
+            {isMobile && (
+              <button
+                type="button"
+                onClick={() => setOptionsOpen(true)}
+                aria-label="Message options"
+                style={{
+                  width: 44,
+                  height: 44,
+                  flexShrink: 0,
+                  borderRadius: 'var(--radius-md)',
+                  background: 'var(--bg-surface)',
+                  border: '1px solid var(--border)',
+                  color: composerOptionsActive ? 'var(--accent)' : 'var(--text-secondary)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  cursor: 'pointer',
+                  position: 'relative',
+                }}
+              >
+                <SlidersHorizontal size={20} />
+                {composerOptionsActive && (
+                  <span
+                    style={{
+                      position: 'absolute',
+                      top: 6,
+                      right: 6,
+                      width: 7,
+                      height: 7,
+                      borderRadius: '50%',
+                      background: 'var(--accent)',
+                    }}
+                  />
+                )}
+              </button>
+            )}
             <div style={{
               flex: 1,
               minWidth: 0,
@@ -1028,7 +1075,7 @@ export function ChatView() {
                       This agent uses structured JSON output; with PDFs the model may return plain text instead.
                     </div>
                   )}
-                  {!isStreaming && (
+                  {!isStreaming && !isMobile && (
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', alignItems: 'center' }}>
                       <button
                         type="button"
@@ -1107,6 +1154,8 @@ export function ChatView() {
                 agents={agents}
                 onSubmit={handleSend}
                 submitDisabled={!inputValue.trim() || isStreaming}
+                onFocus={() => setComposerFocused(true)}
+                onBlur={() => setComposerFocused(false)}
                 minRows={1}
                 maxRows={10}
               />
@@ -1223,7 +1272,7 @@ export function ChatView() {
                 </>
               )}
             </span>
-            {!isStreaming && (
+            {!isStreaming && !isMobile && (
               <select
                 value={pdfEngine}
                 onChange={(e) => setPdfEngine((e.target.value || '') as '' | PDFEngine)}
@@ -1250,6 +1299,122 @@ export function ChatView() {
           </div>
         </div>
       </div>
+
+      {/* Mobile composer options — everything that used to crowd the toolbar */}
+      {isMobile && (
+        <Sheet isOpen={optionsOpen} onClose={() => setOptionsOpen(false)} title="Message options">
+          <div className="composer-options">
+            <section className="composer-options-section">
+              <div className="composer-options-row">
+                <span className="composer-options-label"><Brain size={15} /> Thinking</span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={reasoningActive}
+                  onClick={toggleReasoning}
+                  className={`composer-switch ${reasoningActive ? 'is-on' : ''}`}
+                  aria-label="Toggle thinking"
+                >
+                  <span className="composer-switch-knob" />
+                </button>
+              </div>
+              {reasoningActive && (
+                <div className="composer-effort">
+                  {EFFORT_OPTIONS.map((opt) => (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      className={currentEffort === opt.value ? 'is-active' : ''}
+                      onClick={() => setEffort(opt.value)}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </section>
+
+            <section className="composer-options-section">
+              <span className="composer-options-label"><Users size={15} /> Council</span>
+              <CouncilToggle disabled={isStreaming} placement="above" />
+            </section>
+
+            <section className="composer-options-section">
+              <span className="composer-options-label">Model for this message</span>
+              <div className="composer-options-controls">
+                <ModelSelectorCore
+                  variant="message"
+                  value={messageModelOverride}
+                  onChange={(modelId) => {
+                    setMessageModelOverride(modelId);
+                    setMessageProviderRoutingOverride(null);
+                  }}
+                  agentModel={defaultModelForChat}
+                  conversationModel={activeConversation?.model}
+                  disabled={isStreaming}
+                  compact
+                />
+                <ProviderRoutingSelector
+                  modelId={messageModelOverride ?? effectiveConversationModel ?? defaultModelForChat}
+                  value={messageProviderRoutingOverride}
+                  onChange={setMessageProviderRoutingOverride}
+                  inheritedRouting={effectiveConversationProviderRouting ?? defaultProviderRoutingForChat}
+                  disabled={isStreaming}
+                  allowDefault
+                  compact
+                />
+              </div>
+            </section>
+
+            {!isStreaming && (
+              <section className="composer-options-section">
+                <span className="composer-options-label"><FileUp size={15} /> PDF attachments</span>
+                <div className="composer-options-controls">
+                  <button
+                    type="button"
+                    className="composer-options-btn"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={pendingAttachments.length >= MAX_PDF_ATTACHMENTS}
+                  >
+                    <FileUp size={14} /> Attach PDF
+                  </button>
+                </div>
+                <div className="composer-options-controls">
+                  <Link size={14} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
+                  <input
+                    type="url"
+                    value={pdfUrlInput}
+                    onChange={(e) => setPdfUrlInput(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), addAttachmentFromUrl())}
+                    placeholder="PDF URL"
+                    className="composer-options-input"
+                    aria-label="PDF URL"
+                  />
+                  <button type="button" className="composer-options-btn" onClick={addAttachmentFromUrl}>
+                    Add
+                  </button>
+                </div>
+                {pdfUrlError && (
+                  <span style={{ fontSize: '0.6875rem', color: 'var(--error)' }}>{pdfUrlError}</span>
+                )}
+                <span className="composer-options-label" style={{ marginTop: 4 }}>PDF engine</span>
+                <select
+                  value={pdfEngine}
+                  onChange={(e) => setPdfEngine((e.target.value || '') as '' | PDFEngine)}
+                  className="composer-options-input"
+                  aria-label="PDF engine"
+                >
+                  {PDF_ENGINE_OPTIONS.map((opt) => (
+                    <option key={opt.value || 'auto'} value={opt.value} title={opt.title}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </section>
+            )}
+          </div>
+        </Sheet>
+      )}
     </div>
   );
 }
