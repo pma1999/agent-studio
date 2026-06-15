@@ -1,19 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Bot, MessageSquare, Wrench, Plug, Settings, ChevronLeft, ChevronRight, ChevronDown, Coins, X, LogOut, Plus, Users, Search } from 'lucide-react';
+import { Bot, Settings, ChevronLeft, ChevronRight, ChevronDown, Coins, X, LogOut, Plus, Search } from 'lucide-react';
 import { useStore } from '../stores/store';
 import { useChat } from '../hooks/useChat';
 import { useIsMobile, usePrefersReducedMotion } from '../utils/breakpoints';
 import { ConversationList } from './ConversationList';
 import { IconButton } from './ui/IconButton';
-
-const navItems = [
-  { id: 'chat' as const, label: 'Chat', icon: MessageSquare },
-  { id: 'agents' as const, label: 'Agents', icon: Bot },
-  { id: 'councils' as const, label: 'Councils', icon: Users },
-  { id: 'tools' as const, label: 'Tools', icon: Wrench },
-  { id: 'mcp' as const, label: 'MCP', icon: Plug },
-];
+import { navItems } from './navItems';
+import { useBodyScrollLock } from '../hooks/useBodyScrollLock';
+import { useFocusTrap } from '../hooks/useFocusTrap';
 
 const TOUCH_MIN_HEIGHT = 44;
 const SIDEBAR_COLLAPSED_WIDTH = 56; // matches --sidebar-width-collapsed
@@ -72,48 +67,9 @@ export function Sidebar() {
     previousMobileOpenRef.current = sidebarMobileOpen;
   }, [isMobile, sidebarMobileOpen]);
 
-  // Lock body scroll when mobile drawer is open
-  useEffect(() => {
-    if (isMobile && sidebarMobileOpen) {
-      const prev = document.body.style.overflow;
-      document.body.style.overflow = 'hidden';
-      return () => {
-        document.body.style.overflow = prev;
-      };
-    }
-  }, [isMobile, sidebarMobileOpen]);
-
-  // Focus trap when mobile drawer is open
-  useEffect(() => {
-    if (!isMobile || !sidebarMobileOpen || !asideRef.current) return;
-    const el = asideRef.current;
-    const getFocusable = () =>
-      Array.from(
-        el.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-        )
-      ).filter((node) => node.getAttribute('aria-hidden') !== 'true');
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key !== 'Tab') return;
-      const focusable = getFocusable();
-      if (focusable.length === 0) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (e.shiftKey) {
-        if (document.activeElement === first) {
-          e.preventDefault();
-          last.focus();
-        }
-      } else {
-        if (document.activeElement === last) {
-          e.preventDefault();
-          first.focus();
-        }
-      }
-    };
-    el.addEventListener('keydown', onKeyDown);
-    return () => el.removeEventListener('keydown', onKeyDown);
-  }, [isMobile, sidebarMobileOpen]);
+  // Lock body scroll + trap focus while the mobile drawer is open
+  useBodyScrollLock(isMobile && sidebarMobileOpen);
+  useFocusTrap(asideRef, isMobile && sidebarMobileOpen);
 
   // Close the agent picker whenever the view changes
   useEffect(() => {
@@ -152,6 +108,21 @@ export function Sidebar() {
   const showExpanded = isMobile || !sidebarCollapsed;
   const mobilePanelHeaderHeight = 64;
 
+  // Swipe-left-to-close on the mobile drawer. Uses raw touch deltas (not
+  // framer drag) to avoid fighting the controlled `transform` animation.
+  const drawerTouchStart = useRef<{ x: number; y: number } | null>(null);
+  const handleDrawerTouchStart = (e: React.TouchEvent) => {
+    drawerTouchStart.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+  };
+  const handleDrawerTouchEnd = (e: React.TouchEvent) => {
+    const start = drawerTouchStart.current;
+    drawerTouchStart.current = null;
+    if (!start) return;
+    const dx = e.changedTouches[0].clientX - start.x;
+    const dy = e.changedTouches[0].clientY - start.y;
+    if (dx < -60 && Math.abs(dx) > Math.abs(dy)) setSidebarMobileOpen(false);
+  };
+
   return (
     <>
       <AnimatePresence>
@@ -178,6 +149,8 @@ export function Sidebar() {
         role="navigation"
         aria-label="Main navigation"
         className={isMobile ? 'sidebar-drawer-mobile' : undefined}
+        onTouchStart={isMobile ? handleDrawerTouchStart : undefined}
+        onTouchEnd={isMobile ? handleDrawerTouchEnd : undefined}
         initial={false}
         animate={{
           width: isMobile ? undefined : (sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : SIDEBAR_EXPANDED_WIDTH),
@@ -271,7 +244,8 @@ export function Sidebar() {
         )}
       </div>
 
-      {/* Navigation */}
+      {/* Navigation — desktop rail only; on mobile the BottomNav owns section switching */}
+      {!isMobile && (
       <div style={{
         padding: isMobile ? 'var(--space-sm) var(--space-sm)' : 'var(--space-md) var(--space-sm)',
         display: 'flex',
@@ -313,6 +287,7 @@ export function Sidebar() {
           );
         })}
       </div>
+      )}
 
       {/* New chat (collapsed rail) */}
       {!showExpanded && (

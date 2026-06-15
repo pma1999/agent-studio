@@ -1,7 +1,9 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { createPortal } from 'react-dom';
 import { Building2, Users, Plus, ChevronDown, Settings } from 'lucide-react';
 import { useStore } from '../stores/store';
+import { useIsMobile } from '../utils/breakpoints';
 import { ModelAvatar, getModelDisplayName } from './council/ModelAvatar';
 import type { CouncilConfig, CouncilMember } from '../types';
 
@@ -103,6 +105,7 @@ export function CouncilToggle({ disabled, placement = 'above' }: CouncilTogglePr
       ? `${councilConfig.member_models.length} models`
       : null;
 
+  const isMobile = useIsMobile();
   const popoverStyle = placement === 'above'
     ? { bottom: 'calc(100% + 8px)' }
     : { top: 'calc(100% + 8px)' };
@@ -179,27 +182,50 @@ export function CouncilToggle({ disabled, placement = 'above' }: CouncilTogglePr
         )}
       </button>
 
-      {/* Selector Popover */}
-      <AnimatePresence>
-        {showSelector && (
-          <CouncilSelectorPopover
-            ref={popoverRef}
-            style={{
-              position: 'absolute',
-              left: '0',
-              zIndex: 100,
-              ...popoverStyle,
-            }}
-            members={councilMembers}
-            loading={councilMembersLoading}
-            onSelectCouncil={handleSelectCouncil}
-            onSelectQuickConfig={handleSelectQuickConfig}
-            onCreateNew={handleCreateNew}
-            onManageCouncils={handleManageCouncils}
-            onClose={() => setShowSelector(false)}
-          />
-        )}
-      </AnimatePresence>
+      {/* Selector Popover — desktop popover; mobile portaled bottom sheet */}
+      {((tree: React.ReactNode) =>
+        isMobile
+          ? createPortal(
+              <>
+                <AnimatePresence>
+                  {showSelector && (
+                    <motion.div
+                      key="ct-scrim"
+                      className="sheet-scrim"
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      transition={{ duration: 0.2 }}
+                      onClick={() => setShowSelector(false)}
+                    />
+                  )}
+                </AnimatePresence>
+                {tree}
+              </>,
+              document.body
+            )
+          : tree)(
+        <AnimatePresence>
+          {showSelector && (
+            <CouncilSelectorPopover
+              ref={popoverRef}
+              asSheet={isMobile}
+              style={
+                isMobile
+                  ? { position: 'fixed', left: 0, right: 0, bottom: 0, zIndex: 1101 }
+                  : { position: 'absolute', left: '0', zIndex: 100, ...popoverStyle }
+              }
+              members={councilMembers}
+              loading={councilMembersLoading}
+              onSelectCouncil={handleSelectCouncil}
+              onSelectQuickConfig={handleSelectQuickConfig}
+              onCreateNew={handleCreateNew}
+              onManageCouncils={handleManageCouncils}
+              onClose={() => setShowSelector(false)}
+            />
+          )}
+        </AnimatePresence>
+      )}
     </div>
   );
 }
@@ -213,6 +239,7 @@ interface CouncilSelectorPopoverProps {
   onCreateNew: () => void;
   onManageCouncils: () => void;
   onClose: () => void;
+  asSheet?: boolean;
 }
 
 const CouncilSelectorPopover = React.forwardRef<HTMLDivElement, CouncilSelectorPopoverProps>(function CouncilSelectorPopover({
@@ -224,6 +251,7 @@ const CouncilSelectorPopover = React.forwardRef<HTMLDivElement, CouncilSelectorP
   onCreateNew,
   onManageCouncils,
   onClose,
+  asSheet,
 }, ref) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
@@ -250,18 +278,24 @@ const CouncilSelectorPopover = React.forwardRef<HTMLDivElement, CouncilSelectorP
   return (
     <motion.div
       ref={ref}
-      initial={{ opacity: 0, y: 8, scale: 0.96 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      exit={{ opacity: 0, y: 8, scale: 0.96 }}
-      transition={{ duration: 0.15 }}
+      initial={asSheet ? { y: '100%' } : { opacity: 0, y: 8, scale: 0.96 }}
+      animate={asSheet ? { y: 0 } : { opacity: 1, y: 0, scale: 1 }}
+      exit={asSheet ? { y: '100%' } : { opacity: 0, y: 8, scale: 0.96 }}
+      transition={{ duration: asSheet ? 0.3 : 0.15, ease: asSheet ? [0.32, 0.72, 0, 1] : undefined }}
       style={{
-        width: '340px',
-        maxWidth: 'calc(100vw - 24px)',
+        width: asSheet ? '100%' : '340px',
+        maxWidth: asSheet ? '100%' : 'calc(100vw - 24px)',
+        maxHeight: asSheet ? '85dvh' : undefined,
         background: 'var(--bg-elevated)',
-        border: '1px solid var(--border-light)',
-        borderRadius: 'var(--radius-md)',
+        border: asSheet ? 'none' : '1px solid var(--border-light)',
+        borderTop: asSheet ? '1px solid var(--border-light)' : undefined,
+        borderRadius: asSheet ? 'var(--radius-lg) var(--radius-lg) 0 0' : 'var(--radius-md)',
         boxShadow: 'var(--shadow-lg)',
-        overflow: 'hidden',
+        overflowY: asSheet ? 'auto' : 'hidden',
+        overflowX: 'hidden',
+        WebkitOverflowScrolling: 'touch',
+        overscrollBehavior: 'contain',
+        paddingBottom: asSheet ? 'env(safe-area-inset-bottom)' : undefined,
         ...style,
       }}
     >

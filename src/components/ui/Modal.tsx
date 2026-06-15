@@ -1,6 +1,8 @@
 import React, { useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X } from 'lucide-react';
+import { useIsMobile, usePrefersReducedMotion } from '../../utils/breakpoints';
+import { useBodyScrollLock } from '../../hooks/useBodyScrollLock';
 
 interface ModalProps {
   isOpen: boolean;
@@ -8,10 +10,16 @@ interface ModalProps {
   title?: string;
   children: React.ReactNode;
   maxWidth?: string;
+  /** Optional sticky footer (e.g. primary actions). Pins to the bottom, full-bleed on mobile. */
+  footer?: React.ReactNode;
 }
 
-export function Modal({ isOpen, onClose, title, children, maxWidth = '560px' }: ModalProps) {
+export function Modal({ isOpen, onClose, title, children, maxWidth = '560px', footer }: ModalProps) {
   const contentRef = useRef<HTMLDivElement>(null);
+  const isMobile = useIsMobile();
+  const prefersReducedMotion = usePrefersReducedMotion();
+
+  useBodyScrollLock(isOpen);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -19,13 +27,19 @@ export function Modal({ isOpen, onClose, title, children, maxWidth = '560px' }: 
     };
     if (isOpen) {
       document.addEventListener('keydown', handleKeyDown);
-      document.body.style.overflow = 'hidden';
     }
     return () => {
       document.removeEventListener('keydown', handleKeyDown);
-      document.body.style.overflow = '';
     };
   }, [isOpen, onClose]);
+
+  // On mobile the dialog becomes a full-screen sheet that slides up; on desktop
+  // it keeps the original centered pop. Reduced motion → simple fade.
+  const panelMotion = prefersReducedMotion
+    ? { initial: { opacity: 0 }, animate: { opacity: 1 }, exit: { opacity: 0 } }
+    : isMobile
+      ? { initial: { y: '100%' }, animate: { y: 0 }, exit: { y: '100%' } }
+      : { initial: { opacity: 0, scale: 0.95, y: 10 }, animate: { opacity: 1, scale: 1, y: 0 }, exit: { opacity: 0, scale: 0.95, y: 10 } };
 
   return (
     <AnimatePresence>
@@ -34,7 +48,7 @@ export function Modal({ isOpen, onClose, title, children, maxWidth = '560px' }: 
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          transition={{ duration: 0.2 }}
+          transition={{ duration: prefersReducedMotion ? 0 : 0.2 }}
           onClick={(e) => {
             if (contentRef.current && !contentRef.current.contains(e.target as Node)) {
               onClose();
@@ -45,7 +59,7 @@ export function Modal({ isOpen, onClose, title, children, maxWidth = '560px' }: 
             position: 'fixed',
             inset: 0,
             display: 'flex',
-            alignItems: 'center',
+            alignItems: isMobile ? 'stretch' : 'center',
             justifyContent: 'center',
             background: 'rgba(0, 0, 0, 0.7)',
             backdropFilter: 'blur(4px)',
@@ -54,17 +68,19 @@ export function Modal({ isOpen, onClose, title, children, maxWidth = '560px' }: 
         >
           <motion.div
             ref={contentRef}
-            initial={{ opacity: 0, scale: 0.95, y: 10 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.95, y: 10 }}
-            transition={{ duration: 0.25, ease: [0.4, 0, 0.2, 1] }}
+            className={isMobile ? 'modal-panel-mobile' : undefined}
+            initial={panelMotion.initial}
+            animate={panelMotion.animate}
+            exit={panelMotion.exit}
+            transition={{ duration: prefersReducedMotion ? 0 : (isMobile ? 0.32 : 0.25), ease: [0.4, 0, 0.2, 1] }}
             style={{
               background: 'var(--bg-base)',
-              border: '1px solid var(--border)',
-              borderRadius: 'var(--radius-lg)',
+              border: isMobile ? 'none' : '1px solid var(--border)',
+              borderRadius: isMobile ? 0 : 'var(--radius-lg)',
               width: '100%',
-              maxWidth,
-              maxHeight: '85vh',
+              maxWidth: isMobile ? '100%' : maxWidth,
+              height: isMobile ? '100dvh' : undefined,
+              maxHeight: isMobile ? '100dvh' : '85vh',
               display: 'flex',
               flexDirection: 'column',
               boxShadow: 'var(--shadow-lg)',
@@ -79,6 +95,7 @@ export function Modal({ isOpen, onClose, title, children, maxWidth = '560px' }: 
                   alignItems: 'center',
                   justifyContent: 'space-between',
                   borderBottom: '1px solid var(--border)',
+                  flexShrink: 0,
                 }}
               >
                 <h3 style={{
@@ -91,18 +108,20 @@ export function Modal({ isOpen, onClose, title, children, maxWidth = '560px' }: 
                 </h3>
                 <button
                   onClick={onClose}
+                  aria-label="Close"
                   style={{
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
-                    width: '32px',
-                    height: '32px',
+                    width: isMobile ? '40px' : '32px',
+                    height: isMobile ? '40px' : '32px',
                     background: 'transparent',
                     border: 'none',
                     color: 'var(--text-muted)',
                     cursor: 'pointer',
                     borderRadius: 'var(--radius-sm)',
                     transition: 'all var(--transition-fast)',
+                    flexShrink: 0,
                   }}
                   onMouseEnter={(e) => {
                     e.currentTarget.style.background = 'var(--bg-hover)';
@@ -117,9 +136,10 @@ export function Modal({ isOpen, onClose, title, children, maxWidth = '560px' }: 
                 </button>
               </div>
             )}
-            <div className="modal-body" style={{ overflowY: 'auto', flex: 1 }}>
+            <div className="modal-body" style={{ overflowY: 'auto', flex: 1, minHeight: 0 }}>
               {children}
             </div>
+            {footer && <div className="modal-footer">{footer}</div>}
           </motion.div>
         </motion.div>
       )}

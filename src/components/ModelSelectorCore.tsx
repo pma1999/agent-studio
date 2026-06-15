@@ -15,6 +15,7 @@ import {
   Brain,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { createPortal } from 'react-dom';
 import {
   getModelAuthor,
   formatModelId,
@@ -260,11 +261,13 @@ export function ModelSelectorCore({
         setIsOpen(false);
       }
     }
-    if (isOpen) {
+    // On mobile the dropdown is portaled out of dropdownRef and dismissed via
+    // the scrim, so the document-level outside-click handler must not run.
+    if (isOpen && !isMobile) {
       document.addEventListener('mousedown', handleClickOutside);
       return () => document.removeEventListener('mousedown', handleClickOutside);
     }
-  }, [isOpen]);
+  }, [isOpen, isMobile]);
 
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
@@ -418,25 +421,44 @@ export function ModelSelectorCore({
     </motion.button>
   );
 
-  const dropdownStyle: React.CSSProperties = {
-    position: 'absolute',
-    left: 0,
-    right: isSettings ? 0 : undefined,
-    minWidth: isSettings ? undefined : isMobile ? 280 : 360,
-    maxWidth: isMobile ? 'calc(100vw - 24px)' : '90vw',
-    maxHeight: isMobile ? '70vh' : 480,
-    background: 'var(--bg-elevated)',
-    border: '1px solid var(--border-light)',
-    borderRadius: 'var(--radius-lg)',
-    boxShadow: 'var(--shadow-lg), 0 0 0 1px rgba(255,255,255,0.04)',
-    zIndex: 1000,
-    display: 'flex',
-    flexDirection: 'column',
-    overflow: 'hidden',
-    ...(placement === 'above'
-      ? { bottom: 'calc(100% + 8px)' }
-      : { top: 'calc(100% + 6px)' }),
-  };
+  const dropdownStyle: React.CSSProperties = isMobile
+    ? {
+        // Mobile: full-width bottom sheet (portaled to body — see render below).
+        position: 'fixed',
+        left: 0,
+        right: 0,
+        bottom: 0,
+        maxWidth: '100%',
+        maxHeight: '85dvh',
+        background: 'var(--bg-elevated)',
+        borderTop: '1px solid var(--border-light)',
+        borderRadius: 'var(--radius-lg) var(--radius-lg) 0 0',
+        boxShadow: 'var(--shadow-lg)',
+        zIndex: 1101,
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        paddingBottom: 'env(safe-area-inset-bottom)',
+      }
+    : {
+        position: 'absolute',
+        left: 0,
+        right: isSettings ? 0 : undefined,
+        minWidth: isSettings ? undefined : 360,
+        maxWidth: '90vw',
+        maxHeight: 480,
+        background: 'var(--bg-elevated)',
+        border: '1px solid var(--border-light)',
+        borderRadius: 'var(--radius-lg)',
+        boxShadow: 'var(--shadow-lg), 0 0 0 1px rgba(255,255,255,0.04)',
+        zIndex: 1000,
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        ...(placement === 'above'
+          ? { bottom: 'calc(100% + 8px)' }
+          : { top: 'calc(100% + 6px)' }),
+      };
 
   return (
     <div ref={dropdownRef} className="model-selector-core" style={{ position: 'relative' }}>
@@ -457,17 +479,39 @@ export function ModelSelectorCore({
       )}
       {triggerButton}
 
-      <AnimatePresence>
-        {isOpen && (
-          <motion.div
-            role="listbox"
-            aria-label="Available AI models"
-            initial={{ opacity: 0, y: placement === 'above' ? 8 : -8, scale: 0.98 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: placement === 'above' ? 8 : -8, scale: 0.98 }}
-            transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
-            style={dropdownStyle}
-          >
+      {((dropdownTree: React.ReactNode) =>
+        isMobile
+          ? createPortal(
+              <>
+                <AnimatePresence>
+                  {isOpen && (
+                    <motion.div
+                      key="ms-scrim"
+                      className="sheet-scrim"
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      transition={{ duration: 0.2 }}
+                      onClick={() => setIsOpen(false)}
+                    />
+                  )}
+                </AnimatePresence>
+                {dropdownTree}
+              </>,
+              document.body
+            )
+          : dropdownTree)(
+        <AnimatePresence>
+          {isOpen && (
+            <motion.div
+              role="listbox"
+              aria-label="Available AI models"
+              initial={isMobile ? { y: '100%' } : { opacity: 0, y: placement === 'above' ? 8 : -8, scale: 0.98 }}
+              animate={isMobile ? { y: 0 } : { opacity: 1, y: 0, scale: 1 }}
+              exit={isMobile ? { y: '100%' } : { opacity: 0, y: placement === 'above' ? 8 : -8, scale: 0.98 }}
+              transition={{ duration: isMobile ? 0.3 : 0.2, ease: isMobile ? [0.32, 0.72, 0, 1] : [0.4, 0, 0.2, 1] }}
+              style={dropdownStyle}
+            >
             <div
               style={{
                 padding: '14px 16px',
@@ -932,8 +976,9 @@ export function ModelSelectorCore({
               )}
             </div>
           </motion.div>
-        )}
-      </AnimatePresence>
+          )}
+        </AnimatePresence>
+      )}
 
       <style>{`
         @keyframes spin {

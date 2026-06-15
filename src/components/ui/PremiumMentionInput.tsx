@@ -13,6 +13,8 @@ interface PremiumMentionInputProps {
   minRows?: number;
   onSubmit?: () => void;
   submitDisabled?: boolean;
+  onFocus?: () => void;
+  onBlur?: () => void;
 }
 
 interface Mention {
@@ -31,6 +33,8 @@ export function PremiumMentionInput({
   minRows = 1,
   onSubmit,
   submitDisabled,
+  onFocus,
+  onBlur,
 }: PremiumMentionInputProps) {
   const [showMentionDropdown, setShowMentionDropdown] = useState(false);
   const [mentionQuery, setMentionQuery] = useState('');
@@ -310,6 +314,8 @@ export function PremiumMentionInput({
           value={value}
           onChange={handleInputChange}
           onKeyDown={handleKeyDown}
+          onFocus={onFocus}
+          onBlur={onBlur}
           disabled={disabled}
           placeholder={placeholder}
           rows={minRows}

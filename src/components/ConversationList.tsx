@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
-import { motion } from 'framer-motion';
+import React, { useState, useRef } from 'react';
+import { motion, type PanInfo } from 'framer-motion';
 import { Trash2, Search } from 'lucide-react';
 import { useStore } from '../stores/store';
 import { useIsMobile, usePrefersReducedMotion } from '../utils/breakpoints';
+import { shouldDismiss } from '../utils/gestures';
 import { conversationsApi } from '../api/client';
 
 export function ConversationList() {
@@ -42,8 +43,10 @@ export function ConversationList() {
     await loadMessages(id);
   };
 
-  const handleDeleteConversation = async (e: React.MouseEvent, id: string) => {
-    e.stopPropagation();
+  // Set after a swipe so the row's onClick (open) doesn't fire post-drag.
+  const suppressClick = useRef(false);
+
+  const deleteConversation = async (id: string) => {
     try {
       await conversationsApi.delete(id);
       if (activeConversationId === id) {
@@ -53,6 +56,11 @@ export function ConversationList() {
     } catch (err) {
       console.error('Failed to delete conversation:', err);
     }
+  };
+
+  const handleDeleteConversation = (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    void deleteConversation(id);
   };
 
   const showSearch = conversations.length > 5;
@@ -94,7 +102,29 @@ export function ConversationList() {
                 initial={prefersReducedMotion ? false : { opacity: 0, x: -8 }}
                 animate={{ opacity: 1, x: 0 }}
                 transition={{ duration: prefersReducedMotion ? 0 : 0.2, delay: prefersReducedMotion ? 0 : Math.min(index, 8) * 0.02 }}
-                onClick={() => handleSelectConversation(conv.id)}
+                {...(isMobile && !prefersReducedMotion
+                  ? {
+                      drag: 'x' as const,
+                      dragConstraints: { left: 0, right: 0 },
+                      dragElastic: { left: 0.6, right: 0 },
+                      dragDirectionLock: true,
+                      onDragEnd: (_e: unknown, info: PanInfo) => {
+                        if (shouldDismiss(info, 'x', -1)) {
+                          suppressClick.current = true;
+                          void deleteConversation(conv.id);
+                        } else if (Math.abs(info.offset.x) > 6) {
+                          suppressClick.current = true;
+                        }
+                      },
+                    }
+                  : {})}
+                onClick={() => {
+                  if (suppressClick.current) {
+                    suppressClick.current = false;
+                    return;
+                  }
+                  handleSelectConversation(conv.id);
+                }}
                 className={`recents-item ${active ? 'recents-item-active' : ''}`}
                 title={`${conv.title} · ${label}`}
               >

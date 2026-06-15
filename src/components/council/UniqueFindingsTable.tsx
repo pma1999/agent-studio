@@ -2,6 +2,7 @@ import React from 'react';
 import { motion } from 'framer-motion';
 import { Sparkles } from 'lucide-react';
 import { ModelAvatar, getModelDisplayName } from './ModelAvatar';
+import { useIsMobile } from '../../utils/breakpoints';
 import type { CouncilComparison } from '../../types';
 
 const container = {
@@ -22,6 +23,7 @@ interface UniqueFindingsTableProps {
 }
 
 export function UniqueFindingsTable({ uniqueFindings }: UniqueFindingsTableProps) {
+  const isMobile = useIsMobile();
   if (!uniqueFindings.length) return null;
 
   return (
@@ -60,6 +62,36 @@ export function UniqueFindingsTable({ uniqueFindings }: UniqueFindingsTableProps
           Unique discoveries
         </span>
       </div>
+      {isMobile ? (
+        <div>
+          {uniqueFindings.map((row, idx) => (
+            <motion.div
+              key={idx}
+              variants={item}
+              style={{
+                padding: '14px 16px',
+                borderBottom: idx < uniqueFindings.length - 1 ? '1px solid var(--border)' : 'none',
+                background: idx % 2 === 0 ? 'transparent' : 'rgba(201, 149, 107, 0.05)',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                <ModelAvatar modelId={row.model_id} size="sm" />
+                <span style={{ fontSize: '0.8125rem', fontWeight: 500, color: 'var(--text-secondary)' }}>
+                  {getModelDisplayName(row.model_id)}
+                </span>
+              </div>
+              <div style={{ fontSize: '0.9375rem', lineHeight: 1.5, color: 'var(--text-primary)', marginBottom: row.why_it_matters ? 8 : 0 }}>
+                {row.finding}
+              </div>
+              {row.why_it_matters && (
+                <div style={{ fontSize: '0.8125rem', lineHeight: 1.5, color: 'var(--text-secondary)' }}>
+                  {row.why_it_matters}
+                </div>
+              )}
+            </motion.div>
+          ))}
+        </div>
+      ) : (
       <div style={{ overflowX: 'auto' }}>
         <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 400 }}>
           <thead>
@@ -164,6 +196,7 @@ export function UniqueFindingsTable({ uniqueFindings }: UniqueFindingsTableProps
           </tbody>
         </table>
       </div>
+      )}
     </motion.div>
   );
 }

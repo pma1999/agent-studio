@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
+import { createPortal } from 'react-dom';
 import { Check, ChevronDown, Loader2, Server, Shuffle, X } from 'lucide-react';
 import type { OpenRouterEndpoint, ProviderRoutingConfig } from '../types';
 import { useOpenRouterEndpoints } from '../hooks/useOpenRouterEndpoints';
@@ -64,11 +65,11 @@ export function ProviderRoutingSelector({
         setIsOpen(false);
       }
     }
-    if (isOpen) {
+    if (isOpen && !isMobile) {
       document.addEventListener('mousedown', handleClickOutside);
       return () => document.removeEventListener('mousedown', handleClickOutside);
     }
-  }, [isOpen]);
+  }, [isOpen, isMobile]);
 
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
@@ -106,24 +107,42 @@ export function ProviderRoutingSelector({
     });
   };
 
-  const dropdownStyle: React.CSSProperties = {
-    position: 'absolute',
-    left: 0,
-    minWidth: isMobile ? 280 : 360,
-    maxWidth: isMobile ? 'calc(100vw - 24px)' : '90vw',
-    maxHeight: isMobile ? '70vh' : 420,
-    background: 'var(--bg-elevated)',
-    border: '1px solid var(--border-light)',
-    borderRadius: 'var(--radius-lg)',
-    boxShadow: 'var(--shadow-lg), 0 0 0 1px rgba(255,255,255,0.04)',
-    zIndex: 1000,
-    display: 'flex',
-    flexDirection: 'column',
-    overflow: 'hidden',
-    ...(placement === 'above'
-      ? { bottom: 'calc(100% + 8px)' }
-      : { top: 'calc(100% + 6px)' }),
-  };
+  const dropdownStyle: React.CSSProperties = isMobile
+    ? {
+        position: 'fixed',
+        left: 0,
+        right: 0,
+        bottom: 0,
+        maxWidth: '100%',
+        maxHeight: '85dvh',
+        background: 'var(--bg-elevated)',
+        borderTop: '1px solid var(--border-light)',
+        borderRadius: 'var(--radius-lg) var(--radius-lg) 0 0',
+        boxShadow: 'var(--shadow-lg)',
+        zIndex: 1101,
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        paddingBottom: 'env(safe-area-inset-bottom)',
+      }
+    : {
+        position: 'absolute',
+        left: 0,
+        minWidth: 360,
+        maxWidth: '90vw',
+        maxHeight: 420,
+        background: 'var(--bg-elevated)',
+        border: '1px solid var(--border-light)',
+        borderRadius: 'var(--radius-lg)',
+        boxShadow: 'var(--shadow-lg), 0 0 0 1px rgba(255,255,255,0.04)',
+        zIndex: 1000,
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        ...(placement === 'above'
+          ? { bottom: 'calc(100% + 8px)' }
+          : { top: 'calc(100% + 6px)' }),
+      };
 
   if (isDeepSeek) {
     return (
@@ -221,17 +240,39 @@ export function ProviderRoutingSelector({
         </motion.span>
       </motion.button>
 
-      <AnimatePresence>
-        {isOpen && !effectiveDisabled && (
-          <motion.div
-            role="listbox"
-            aria-label="OpenRouter provider endpoints"
-            initial={{ opacity: 0, y: placement === 'above' ? 8 : -8, scale: 0.98 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: placement === 'above' ? 8 : -8, scale: 0.98 }}
-            transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
-            style={dropdownStyle}
-          >
+      {((dropdownTree: React.ReactNode) =>
+        isMobile
+          ? createPortal(
+              <>
+                <AnimatePresence>
+                  {isOpen && !effectiveDisabled && (
+                    <motion.div
+                      key="pr-scrim"
+                      className="sheet-scrim"
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      transition={{ duration: 0.2 }}
+                      onClick={() => setIsOpen(false)}
+                    />
+                  )}
+                </AnimatePresence>
+                {dropdownTree}
+              </>,
+              document.body
+            )
+          : dropdownTree)(
+        <AnimatePresence>
+          {isOpen && !effectiveDisabled && (
+            <motion.div
+              role="listbox"
+              aria-label="OpenRouter provider endpoints"
+              initial={isMobile ? { y: '100%' } : { opacity: 0, y: placement === 'above' ? 8 : -8, scale: 0.98 }}
+              animate={isMobile ? { y: 0 } : { opacity: 1, y: 0, scale: 1 }}
+              exit={isMobile ? { y: '100%' } : { opacity: 0, y: placement === 'above' ? 8 : -8, scale: 0.98 }}
+              transition={{ duration: isMobile ? 0.3 : 0.18, ease: isMobile ? [0.32, 0.72, 0, 1] : [0.4, 0, 0.2, 1] }}
+              style={dropdownStyle}
+            >
             <div style={{
               padding: '12px 14px',
               borderBottom: '1px solid var(--border)',
@@ -399,8 +440,9 @@ export function ProviderRoutingSelector({
               </div>
             )}
           </motion.div>
-        )}
-      </AnimatePresence>
+          )}
+        </AnimatePresence>
+      )}
 
       <style>{`
         @keyframes spin {

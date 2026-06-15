@@ -2,6 +2,7 @@ import React from 'react';
 import { motion } from 'framer-motion';
 import { CheckCircle2 } from 'lucide-react';
 import { ModelAvatar, getModelDisplayName } from './ModelAvatar';
+import { useIsMobile } from '../../utils/breakpoints';
 import type { CouncilComparison } from '../../types';
 
 const container = {
@@ -23,6 +24,7 @@ interface AgreementTableProps {
 }
 
 export function AgreementTable({ agreements, modelIds }: AgreementTableProps) {
+  const isMobile = useIsMobile();
   if (!agreements.length) return null;
 
   const modelIdToIndex = new Map(modelIds.map((id, i) => [id, i]));
@@ -63,6 +65,51 @@ export function AgreementTable({ agreements, modelIds }: AgreementTableProps) {
           Where they agree
         </span>
       </div>
+      {isMobile ? (
+        <div>
+          {agreements.map((row, idx) => (
+            <motion.div
+              key={idx}
+              variants={item}
+              style={{
+                padding: '14px 16px',
+                borderBottom: idx < agreements.length - 1 ? '1px solid var(--border)' : 'none',
+                background: idx % 2 === 0 ? 'transparent' : 'rgba(122, 184, 143, 0.04)',
+              }}
+            >
+              <div style={{ fontSize: '0.9375rem', lineHeight: 1.5, color: 'var(--text-primary)', marginBottom: 10 }}>
+                {row.finding}
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: row.evidence ? 10 : 0 }}>
+                {modelIds.filter((id) => row.model_ids.includes(id)).map((id) => (
+                  <span
+                    key={id}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 5,
+                      padding: '3px 9px 3px 4px',
+                      borderRadius: 'var(--radius-pill)',
+                      background: 'rgba(122, 184, 143, 0.12)',
+                      border: '1px solid var(--council-border)',
+                      fontSize: '0.75rem',
+                      color: 'var(--text-secondary)',
+                    }}
+                  >
+                    <ModelAvatar modelId={id} size="xs" />
+                    {getModelDisplayName(id)}
+                  </span>
+                ))}
+              </div>
+              {row.evidence && (
+                <div style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)', fontStyle: 'italic' }}>
+                  {row.evidence}
+                </div>
+              )}
+            </motion.div>
+          ))}
+        </div>
+      ) : (
       <div style={{ overflowX: 'auto' }}>
         <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 420 }}>
           <thead>
@@ -171,6 +218,7 @@ export function AgreementTable({ agreements, modelIds }: AgreementTableProps) {
           </tbody>
         </table>
       </div>
+      )}
     </motion.div>
   );
 }
