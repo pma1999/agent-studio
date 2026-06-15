@@ -17,6 +17,22 @@ import type { McpServerConfig } from '../mcp/types.js';
 export interface ResolvedToolMcpConfig {
   mcp_server_id: string;
   mcp_tool_name: string;
+  annotations?: Record<string, unknown>;
+}
+
+export interface McpToolCatalogEntry {
+  serverId: string;
+  serverName: string;
+  name: string;
+  mcpToolName: string;
+  title?: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  annotations?: Record<string, unknown>;
+}
+
+export interface ResolvedToolMcpMetaConfig {
+  kind: 'mcp_search' | 'mcp_details' | 'mcp_call';
 }
 
 export interface ResolvedTool {
@@ -24,6 +40,7 @@ export interface ResolvedTool {
   name: string;
   type: 'builtin' | 'http' | 'mcp';
   config: unknown;
+  mcpCatalog?: McpToolCatalogEntry[];
   openAIDef: {
     type: 'function';
     function: {
@@ -87,6 +104,82 @@ export interface ResolveToolsResult {
   mcpClients: Map<string, McpConnection>;
 }
 
+const PROGRESSIVE_MCP_TOOL_THRESHOLD = Number.parseInt(process.env.MCP_PROGRESSIVE_TOOL_THRESHOLD || '20', 10);
+
+function shouldUseProgressiveDiscovery(mcpToolCount: number): boolean {
+  return mcpToolCount >= Math.max(1, PROGRESSIVE_MCP_TOOL_THRESHOLD);
+}
+
+function buildMcpMetaTools(catalog: McpToolCatalogEntry[]): ResolvedTool[] {
+  const commonCatalog = catalog;
+  return [
+    {
+      id: 'mcp_meta_search_tools',
+      name: 'search_mcp_tools',
+      type: 'mcp',
+      config: { kind: 'mcp_search' } as ResolvedToolMcpMetaConfig,
+      mcpCatalog: commonCatalog,
+      openAIDef: {
+        type: 'function',
+        function: {
+          name: 'search_mcp_tools',
+          description: 'Search available MCP tools by natural-language query. Returns concise matches; call get_mcp_tool_details before executing a tool.',
+          parameters: {
+            type: 'object',
+            properties: {
+              query: { type: 'string', description: 'Capability or task to search for.' },
+              server_id: { type: 'string', description: 'Optional MCP server id to limit the search.' },
+              limit: { type: 'integer', minimum: 1, maximum: 20, description: 'Maximum matches to return.' },
+            },
+            required: ['query'],
+          },
+        },
+      },
+    },
+    {
+      id: 'mcp_meta_get_tool_details',
+      name: 'get_mcp_tool_details',
+      type: 'mcp',
+      config: { kind: 'mcp_details' } as ResolvedToolMcpMetaConfig,
+      mcpCatalog: commonCatalog,
+      openAIDef: {
+        type: 'function',
+        function: {
+          name: 'get_mcp_tool_details',
+          description: 'Fetch the full input schema and safety annotations for one MCP tool found by search_mcp_tools.',
+          parameters: {
+            type: 'object',
+            properties: { name: { type: 'string', description: 'Exact exposed MCP tool name.' } },
+            required: ['name'],
+          },
+        },
+      },
+    },
+    {
+      id: 'mcp_meta_call_tool',
+      name: 'call_mcp_tool',
+      type: 'mcp',
+      config: { kind: 'mcp_call' } as ResolvedToolMcpMetaConfig,
+      mcpCatalog: commonCatalog,
+      openAIDef: {
+        type: 'function',
+        function: {
+          name: 'call_mcp_tool',
+          description: 'Execute an MCP tool by exact exposed name after inspecting it. Use this stable broker tool for MCP calls.',
+          parameters: {
+            type: 'object',
+            properties: {
+              name: { type: 'string', description: 'Exact exposed MCP tool name.' },
+              arguments: { type: 'object', description: 'Arguments matching the inspected MCP tool input schema.', additionalProperties: true },
+            },
+            required: ['name', 'arguments'],
+          },
+        },
+      },
+    },
+  ];
+}
+
 /**
  * Load all tools assigned to the agent (builtin, http, and from linked MCP servers)
  * and return only those that are usable, in OpenRouter format.
@@ -95,6 +188,7 @@ export interface ResolveToolsResult {
 export async function resolveToolsForAgent(agentId: string, userId: string): Promise<ResolveToolsResult> {
   const resolved: ResolvedTool[] = [];
   const mcpClients = new Map<string, McpConnection>();
+  const mcpCatalog: McpToolCatalogEntry[] = [];
 
   // 1. Tools from tools table (builtin, http)
   const rows = db.prepare(`
@@ -192,25 +286,41 @@ export async function resolveToolsForAgent(agentId: string, userId: string): Pro
     if (!connection) continue;
 
     try {
-      mcpClients.set(mcp_server_id, connection);
-
       const slug = slugFromServerName(serverRow.name, mcp_server_id);
       const namePrefix = `mcp_${slug}`;
       const mcpTools = await listMcpTools(connection.client, namePrefix);
 
       for (const mt of mcpTools) {
+        mcpCatalog.push({
+          serverId: mcp_server_id,
+          serverName: serverRow.name,
+          name: mt.name,
+          mcpToolName: mt.mcpToolName,
+          title: mt.title,
+          description: mt.description,
+          inputSchema: mt.inputSchema,
+          annotations: mt.annotations,
+        });
         resolved.push({
           id: `mcp_${mcp_server_id}_${mt.mcpToolName}`,
           name: mt.name,
           type: 'mcp',
-          config: { mcp_server_id, mcp_tool_name: mt.mcpToolName } as ResolvedToolMcpConfig,
+          config: { mcp_server_id, mcp_tool_name: mt.mcpToolName, annotations: mt.annotations } as ResolvedToolMcpConfig,
           openAIDef: mt.openAIDef,
         });
       }
+      mcpClients.set(mcp_server_id, connection);
     } catch (err) {
+      await connection.close();
       console.error(`[resolve] Failed to list tools from MCP server ${serverRow.name} (${mcp_server_id}):`, err);
       // Do not fail the whole request; skip this MCP server
     }
+  }
+
+  const mcpToolCount = mcpCatalog.length;
+  if (shouldUseProgressiveDiscovery(mcpToolCount)) {
+    const nonMcpTools = resolved.filter((tool) => tool.type !== 'mcp');
+    return { resolvedTools: [...nonMcpTools, ...buildMcpMetaTools(mcpCatalog)], mcpClients };
   }
 
   return { resolvedTools: resolved, mcpClients };
@@ -234,6 +344,7 @@ export async function resolveToolsFromIds(
 ): Promise<ResolveToolsResult> {
   const resolved: ResolvedTool[] = [];
   const mcpClients = new Map<string, McpConnection>();
+  const mcpCatalog: McpToolCatalogEntry[] = [];
   const byIdOnly = options?.byIdOnly === true;
 
   // 1. Tools from tools table by id; optionally scoped to user
@@ -337,24 +448,40 @@ export async function resolveToolsFromIds(
     if (!connection) continue;
 
     try {
-      mcpClients.set(mcp_server_id, connection);
-
       const slug = slugFromServerName(serverRow.name, mcp_server_id);
       const namePrefix = `mcp_${slug}`;
       const mcpTools = await listMcpTools(connection.client, namePrefix);
 
       for (const mt of mcpTools) {
+        mcpCatalog.push({
+          serverId: mcp_server_id,
+          serverName: serverRow.name,
+          name: mt.name,
+          mcpToolName: mt.mcpToolName,
+          title: mt.title,
+          description: mt.description,
+          inputSchema: mt.inputSchema,
+          annotations: mt.annotations,
+        });
         resolved.push({
           id: `mcp_${mcp_server_id}_${mt.mcpToolName}`,
           name: mt.name,
           type: 'mcp',
-          config: { mcp_server_id, mcp_tool_name: mt.mcpToolName } as ResolvedToolMcpConfig,
+          config: { mcp_server_id, mcp_tool_name: mt.mcpToolName, annotations: mt.annotations } as ResolvedToolMcpConfig,
           openAIDef: mt.openAIDef,
         });
       }
+      mcpClients.set(mcp_server_id, connection);
     } catch (err) {
+      await connection.close();
       console.error(`[resolve] Failed to list tools from MCP server ${serverRow.name} (${mcp_server_id}):`, err);
     }
+  }
+
+  const mcpToolCount = mcpCatalog.length;
+  if (shouldUseProgressiveDiscovery(mcpToolCount)) {
+    const nonMcpTools = resolved.filter((tool) => tool.type !== 'mcp');
+    return { resolvedTools: [...nonMcpTools, ...buildMcpMetaTools(mcpCatalog)], mcpClients };
   }
 
   return { resolvedTools: resolved, mcpClients };
@@ -380,9 +507,14 @@ export function toOpenRouterTools(resolved: ResolvedTool[]): { type: 'function';
 export function appendToolInstructionsIfNeeded(systemPrompt: string, resolvedTools: ResolvedTool[]): string {
   const hasMcp = resolvedTools.some((t) => t.type === 'mcp');
   if (!hasMcp) return systemPrompt;
+  const hasMeta = resolvedTools.some((t) => t.name === 'search_mcp_tools' || t.name === 'call_mcp_tool');
+  const extra = hasMeta
+    ? ' When many MCP tools are available, first use search_mcp_tools, then get_mcp_tool_details, and execute through call_mcp_tool with the exact tool name.'
+    : '';
   return (
     systemPrompt +
-    '\n\nWhen calling tools, always use the exact tool name from the tools list. MCP tools have names starting with mcp_; do not omit this prefix.'
+    '\n\nWhen calling tools, always use the exact tool name from the tools list. MCP tools have names starting with mcp_; do not omit this prefix.' +
+    extra
   );
 }
 
