@@ -1,21 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Bot, MessageSquare, Wrench, Plug, Settings, ChevronLeft, ChevronRight, ChevronDown, Coins, X, LogOut, Plus, Users, Search } from 'lucide-react';
+import { Bot, Settings, ChevronLeft, ChevronRight, ChevronDown, Coins, X, LogOut, Plus, Search } from 'lucide-react';
 import { useStore } from '../stores/store';
 import { useChat } from '../hooks/useChat';
 import { useIsMobile, usePrefersReducedMotion } from '../utils/breakpoints';
 import { ConversationList } from './ConversationList';
 import { IconButton } from './ui/IconButton';
+import { navItems } from './navItems';
 import { useBodyScrollLock } from '../hooks/useBodyScrollLock';
 import { useFocusTrap } from '../hooks/useFocusTrap';
-
-const navItems = [
-  { id: 'chat' as const, label: 'Chat', icon: MessageSquare },
-  { id: 'agents' as const, label: 'Agents', icon: Bot },
-  { id: 'councils' as const, label: 'Councils', icon: Users },
-  { id: 'tools' as const, label: 'Tools', icon: Wrench },
-  { id: 'mcp' as const, label: 'MCP', icon: Plug },
-];
 
 const TOUCH_MIN_HEIGHT = 44;
 const SIDEBAR_COLLAPSED_WIDTH = 56; // matches --sidebar-width-collapsed
@@ -115,6 +108,21 @@ export function Sidebar() {
   const showExpanded = isMobile || !sidebarCollapsed;
   const mobilePanelHeaderHeight = 64;
 
+  // Swipe-left-to-close on the mobile drawer. Uses raw touch deltas (not
+  // framer drag) to avoid fighting the controlled `transform` animation.
+  const drawerTouchStart = useRef<{ x: number; y: number } | null>(null);
+  const handleDrawerTouchStart = (e: React.TouchEvent) => {
+    drawerTouchStart.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+  };
+  const handleDrawerTouchEnd = (e: React.TouchEvent) => {
+    const start = drawerTouchStart.current;
+    drawerTouchStart.current = null;
+    if (!start) return;
+    const dx = e.changedTouches[0].clientX - start.x;
+    const dy = e.changedTouches[0].clientY - start.y;
+    if (dx < -60 && Math.abs(dx) > Math.abs(dy)) setSidebarMobileOpen(false);
+  };
+
   return (
     <>
       <AnimatePresence>
@@ -141,6 +149,8 @@ export function Sidebar() {
         role="navigation"
         aria-label="Main navigation"
         className={isMobile ? 'sidebar-drawer-mobile' : undefined}
+        onTouchStart={isMobile ? handleDrawerTouchStart : undefined}
+        onTouchEnd={isMobile ? handleDrawerTouchEnd : undefined}
         initial={false}
         animate={{
           width: isMobile ? undefined : (sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : SIDEBAR_EXPANDED_WIDTH),
@@ -234,7 +244,8 @@ export function Sidebar() {
         )}
       </div>
 
-      {/* Navigation */}
+      {/* Navigation — desktop rail only; on mobile the BottomNav owns section switching */}
+      {!isMobile && (
       <div style={{
         padding: isMobile ? 'var(--space-sm) var(--space-sm)' : 'var(--space-md) var(--space-sm)',
         display: 'flex',
@@ -276,6 +287,7 @@ export function Sidebar() {
           );
         })}
       </div>
+      )}
 
       {/* New chat (collapsed rail) */}
       {!showExpanded && (

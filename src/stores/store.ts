@@ -170,6 +170,9 @@ interface AppState {
   setSidebarCollapsed: (collapsed: boolean) => void;
   sidebarMobileOpen: boolean;
   setSidebarMobileOpen: (open: boolean) => void;
+  /** True while the chat composer is focused (used to hide mobile bottom nav). */
+  composerFocused: boolean;
+  setComposerFocused: (focused: boolean) => void;
 }
 
 export const useStore = create<AppState>((set, get) => ({
@@ -665,4 +668,6 @@ export const useStore = create<AppState>((set, get) => ({
   setSidebarCollapsed: (collapsed) => set({ sidebarCollapsed: collapsed }),
   sidebarMobileOpen: false,
   setSidebarMobileOpen: (open) => set({ sidebarMobileOpen: open }),
+  composerFocused: false,
+  setComposerFocused: (focused) => set({ composerFocused: focused }),
 }));
