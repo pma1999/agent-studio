@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { motion } from 'framer-motion';
 import { useStore } from '../stores/store';
-import { authApi } from '../api/client';
+import { authApi, setAuthToken } from '../api/client';
 import { Button } from './ui/Button';
 import { Input } from './ui/Input';
 
@@ -28,9 +28,11 @@ export function AuthView() {
     try {
       if (mode === 'login') {
         const res = await authApi.login(email.trim(), password);
+        setAuthToken(res.token);
         setUser(res.user);
       } else {
         const res = await authApi.register(email.trim(), password);
+        setAuthToken(res.token);
         setUser(res.user);
       }
     } catch (err) {

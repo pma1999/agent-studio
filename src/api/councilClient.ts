@@ -6,6 +6,7 @@ import type {
   CouncilRunDetail,
   CouncilConfig,
 } from '../types';
+import { getAuthHeaders } from './client';
 
 /** Same as main API client: use VITE_API_URL in production so requests hit the backend, not the SPA. */
 const API_BASE = (import.meta.env.VITE_API_URL ?? '').replace(/\/$/, '') + '/api';
@@ -44,7 +45,10 @@ export async function streamCouncilChat(
   const response = await fetch(`${API_BASE}/chat/council`, {
     method: 'POST',
     credentials: 'include',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...getAuthHeaders(),
+    },
     body: JSON.stringify(request),
     signal,
   });
@@ -135,6 +139,7 @@ export async function getCouncilRuns(conversationId: string): Promise<
 > {
   const response = await fetch(`${API_BASE}/council/runs?conversation_id=${encodeURIComponent(conversationId)}`, {
     credentials: 'include',
+    headers: getAuthHeaders(),
   });
   if (!response.ok) {
     throw new Error('Failed to fetch council runs');
@@ -145,6 +150,7 @@ export async function getCouncilRuns(conversationId: string): Promise<
 export async function getCouncilRun(id: string): Promise<CouncilRunDetail> {
   const response = await fetch(`${API_BASE}/council/runs/${encodeURIComponent(id)}`, {
     credentials: 'include',
+    headers: getAuthHeaders(),
   });
   if (!response.ok) {
     throw new Error('Failed to fetch council run');
@@ -156,6 +162,7 @@ export async function getCouncilRun(id: string): Promise<CouncilRunDetail> {
 export async function getCouncilMembers(): Promise<CouncilMember[]> {
   const response = await fetch(`${API_BASE}/council/members`, {
     credentials: 'include',
+    headers: getAuthHeaders(),
   });
   if (!response.ok) {
     throw new Error('Failed to fetch council members');
@@ -167,7 +174,10 @@ export async function createCouncilMember(member: Omit<CouncilMember, 'id' | 'us
   const response = await fetch(`${API_BASE}/council/members`, {
     method: 'POST',
     credentials: 'include',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...getAuthHeaders(),
+    },
     body: JSON.stringify(member),
   });
   if (!response.ok) {
@@ -184,7 +194,10 @@ export async function updateCouncilMember(
   const response = await fetch(`${API_BASE}/council/members/${encodeURIComponent(id)}`, {
     method: 'PUT',
     credentials: 'include',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...getAuthHeaders(),
+    },
     body: JSON.stringify(updates),
   });
   if (!response.ok) {
@@ -198,6 +211,7 @@ export async function deleteCouncilMember(id: string): Promise<void> {
   const response = await fetch(`${API_BASE}/council/members/${encodeURIComponent(id)}`, {
     method: 'DELETE',
     credentials: 'include',
+    headers: getAuthHeaders(),
   });
   if (!response.ok) {
     throw new Error('Failed to delete council');

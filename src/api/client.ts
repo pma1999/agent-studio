@@ -26,6 +26,26 @@ import type {
 /** In production (Vercel), set VITE_API_URL to your Railway API URL (e.g. https://your-app.railway.app). No trailing slash. */
 const API_BASE = (import.meta.env.VITE_API_URL ?? '').replace(/\/$/, '') + '/api';
 
+const AUTH_TOKEN_KEY = 'auth_token';
+
+export function setAuthToken(token: string): void {
+  sessionStorage.setItem(AUTH_TOKEN_KEY, token);
+}
+
+export function clearAuthToken(): void {
+  sessionStorage.removeItem(AUTH_TOKEN_KEY);
+}
+
+export function getAuthToken(): string | null {
+  return sessionStorage.getItem(AUTH_TOKEN_KEY);
+}
+
+/** Returns Authorization header when a token is stored (cross-origin cookie fallback). */
+export function getAuthHeaders(): Record<string, string> {
+  const token = getAuthToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 let onUnauthorized: (() => void) | null = null;
 export function setOnUnauthorized(fn: (() => void) | null) {
   onUnauthorized = fn;
@@ -43,9 +63,13 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 
   for (let attempt = 0; attempt <= MAX_503_RETRIES; attempt++) {
     const res = await fetch(`${API_BASE}${url}`, {
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
       ...options,
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        ...getAuthHeaders(),
+        ...(options?.headers as Record<string, string> | undefined),
+      },
     });
     if (res.status === 401 && onUnauthorized) {
       onUnauthorized();
@@ -84,8 +108,13 @@ export const authApi = {
       method: 'POST',
       body: JSON.stringify({ email, password }),
     }),
-  logout: () =>
-    request<{ success: boolean }>('/auth/logout', { method: 'POST' }),
+  logout: async () => {
+    try {
+      return await request<{ success: boolean }>('/auth/logout', { method: 'POST' });
+    } finally {
+      clearAuthToken();
+    }
+  },
   me: () => request<AuthUser>('/auth/me'),
 };
 
@@ -300,7 +329,10 @@ export async function streamChat(
       res = await fetch(`${API_BASE}/chat`, {
         method: 'POST',
         credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders(),
+        },
         body: JSON.stringify(body),
         signal,
       });
