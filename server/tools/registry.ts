@@ -67,7 +67,9 @@ When the search provider is Brave you can use:
     function: {
       name: 'web_fetch',
       description: `Fetch the main content of a web page as clean text or markdown via Jina Reader. Use when the user provides a URL to read, summarize, or analyze. Supports pagination for long pages: use max_chars to control segment size and offset to get the next segment; the response includes outline (structure/headings), total_length, next_offset, and has_more so you can navigate. First call with url (and optional max_chars); if has_more is true, call again with the same url and max_chars and offset set to the returned next_offset.
-Optional: max_chars (1000-2000000, default 200000), offset (for pagination; use next_offset from previous response), respond_with (content|markdown|html|text), timeout_seconds (1-180), no_cache, wait_for_selector, target_selector, remove_selector, user_agent, referer, locale, retain_images, retain_links, with_links_summary, with_images_summary, respond_timing, engine (browser|direct|cf-browser-rendering).`,
+Optional: max_chars (1000-2000000, default 200000), offset (for pagination; use next_offset from previous response), respond_with (content|markdown|html|text), timeout_seconds (1-180), no_cache, wait_for_selector, target_selector, remove_selector, user_agent, referer, locale, retain_images, retain_links, with_links_summary, with_images_summary, respond_timing, engine (browser|direct|cf-browser-rendering).
+
+Si la página objetivo parece bloqueada, muestra un captcha, un muro de pago o contenido vacío, la herramienta reintenta automáticamente con un fetch directo y, como último recurso, con una copia archivada de Wayback Machine, antes de fallar. Un resultado con error significa que se agotaron todos los métodos disponibles. Un resultado exitoso puede incluir source y source_note cuando el contenido provino de uno de estos métodos alternativos (por ejemplo, una copia de Wayback puede estar desactualizada).`,
       parameters: {
         type: 'object',
         properties: {
@@ -151,6 +153,8 @@ const executors: Record<string, ToolExecutor> = {
       has_more: result.has_more,
       outline: result.outline,
       navigation_hint: result.navigation_hint,
+      source: result.source,
+      source_note: result.source_note,
     });
   },
 };

@@ -4,7 +4,10 @@
  */
 
 import { z } from 'zod';
-import { fetchWithJinaReader, type JinaReaderOptions } from './jinaReader.js';
+import { fetchWithJinaReader, validateUrl, type JinaReaderOptions } from './jinaReader.js';
+import { detectBlock } from './blockDetection.js';
+import { fetchDirect } from './directFetch.js';
+import { fetchFromWayback, formatWaybackTimestamp } from './waybackFetch.js';
 import { getSettingValue } from '../routes/settings.js';
 
 const RESPOND_WITH = ['content', 'markdown', 'html', 'text', 'pageshot', 'screenshot', 'vlm', 'readerlm-v2'] as const;
@@ -20,6 +23,10 @@ const MAX_CHARS_DEFAULT = 200_000; // High default: models have large context wi
 const OUTLINE_MAX_CHARS = 2500;
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const CACHE_MAX_ENTRIES_PER_USER = 10;
+const DIRECT_FETCH_TIMEOUT_MS = 15_000;
+const WAYBACK_CDX_TIMEOUT_MS = 8_000;
+const WAYBACK_SNAPSHOT_TIMEOUT_MS = 12_000;
+const OVERALL_BUDGET_MS = 70_000;
 
 export const webFetchArgsSchema = z.object({
   url: z.string().min(1, 'url is required').transform((s) => s.trim()),
@@ -195,6 +202,8 @@ export interface WebFetchResult {
   outline?: string;
   navigation_hint?: string;
   error?: string;
+  source?: 'direct_fetch' | 'wayback';
+  source_note?: string;
 }
 
 const PAGINATION_ERROR =
@@ -265,6 +274,8 @@ export async function runWebFetch(
   let fullContent = '';
   let outline = '';
   let fromCache = false;
+  let source: 'direct_fetch' | 'wayback' | undefined;
+  let sourceNote: string | undefined;
 
   if (!parsed.data.no_cache) {
     const cached = getCached(cacheKey);
@@ -276,22 +287,73 @@ export async function runWebFetch(
   }
 
   if (!fromCache) {
+    const domain = domainForLog(url);
     const options = buildOptions(parsed.data, apiKey);
     const response = await fetchWithJinaReader(options);
-    const durationMs = Date.now() - start;
-    const domain = domainForLog(url);
+
+    let resolvedContent: string | undefined;
+    let failureReason: string | undefined;
 
     if (response.error) {
-      console.log(`[web_fetch] ${userHash} ${domain} ${durationMs}ms error=${response.error.slice(0, 80)}`);
-      return { content: '', url, error: response.error };
+      failureReason = response.error;
+    } else {
+      const detection = detectBlock({
+        originHttpStatus: response.originHttpStatus,
+        originWarning: response.originWarning,
+        originTitle: response.originTitle,
+        content: response.data ?? '',
+        respondWith: parsed.data.respond_with,
+      });
+      if (detection.blocked) {
+        failureReason = detection.reason;
+      } else {
+        resolvedContent = response.data ?? '';
+      }
     }
 
-    fullContent = response.data ?? '';
+    if (resolvedContent === undefined) {
+      const urlCheck = validateUrl(url);
+      const withinBudget = () => Date.now() - start < OVERALL_BUDGET_MS;
+
+      if ('url' in urlCheck && withinBudget()) {
+        const direct = await fetchDirect(url, DIRECT_FETCH_TIMEOUT_MS);
+        if (!('error' in direct)) {
+          resolvedContent = direct.content;
+          source = 'direct_fetch';
+          sourceNote = 'Contenido recuperado mediante fetch directo porque Jina Reader no devolvió contenido utilizable.';
+        }
+      }
+
+      if (resolvedContent === undefined && 'url' in urlCheck && withinBudget()) {
+        const wayback = await fetchFromWayback(url, WAYBACK_CDX_TIMEOUT_MS, WAYBACK_SNAPSHOT_TIMEOUT_MS);
+        if (!('error' in wayback)) {
+          resolvedContent = wayback.content;
+          source = 'wayback';
+          sourceNote = `Contenido recuperado de una copia archivada de Wayback Machine (${formatWaybackTimestamp(wayback.snapshotTimestamp)}); puede estar desactualizado respecto a la página actual.`;
+        }
+      }
+    }
+
+    const durationMs = Date.now() - start;
+
+    if (resolvedContent === undefined) {
+      const reason = failureReason || 'No se pudo obtener contenido válido de la página.';
+      console.log(`[web_fetch] ${userHash} ${domain} ${durationMs}ms error=all_methods_exhausted reason=${reason.slice(0, 120)}`);
+      return {
+        content: '',
+        url,
+        error: `No se pudo obtener el contenido real de la página tras agotar todos los métodos disponibles (Jina Reader, fetch directo, Wayback Machine). Motivo original: ${reason}`,
+      };
+    }
+
+    fullContent = resolvedContent;
     outline = extractOutline(fullContent, parsed.data.respond_with, OUTLINE_MAX_CHARS);
 
     if (!parsed.data.no_cache) {
       setCached(cacheKey, { content: fullContent, outline, storedAt: Date.now() }, userId);
     }
+
+    console.log(`[web_fetch] ${userHash} ${domain} ${durationMs}ms ok source=${source ?? 'jina'} total=${fullContent.length}`);
   }
 
   const totalLength = fullContent.length;
@@ -315,5 +377,7 @@ export async function runWebFetch(
     has_more: hasMore,
     outline,
     navigation_hint: navigationHint,
+    source,
+    source_note: sourceNote,
   };
 }

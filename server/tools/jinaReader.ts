@@ -108,6 +108,13 @@ export interface JinaReaderResponse {
   status?: number;
   meta?: unknown;
   error?: string;
+  /** Origin (target site) HTTP status as reported by Jina in data.httpStatus, when present. */
+  originHttpStatus?: number;
+  /** Origin block/warning message as reported by Jina in data.warning, when present. */
+  originWarning?: string;
+  /** Origin page title as reported by Jina in data.title, when present (corroborating signal,
+   *  e.g. "Checking your browser before accessing. Just a moment..."). */
+  originTitle?: string;
 }
 
 /** Allowed URL protocols for security. */
@@ -323,11 +330,20 @@ export async function fetchWithJinaReader(options: JinaReaderOptions): Promise<J
           : typeof body?.data === 'object' && body?.data !== null && typeof (body.data as { content?: string }).content === 'string'
             ? (body.data as { content: string }).content
             : '';
+
+      const dataObj = typeof body?.data === 'object' && body?.data !== null ? (body.data as Record<string, unknown>) : undefined;
+      const originHttpStatus = typeof dataObj?.httpStatus === 'number' ? dataObj.httpStatus : undefined;
+      const originWarning = typeof dataObj?.warning === 'string' && dataObj.warning.trim() ? dataObj.warning : undefined;
+      const originTitle = typeof dataObj?.title === 'string' && dataObj.title.trim() ? dataObj.title : undefined;
+
       return {
         data: content,
         code: body?.code,
         status: body?.status,
         meta: body?.meta,
+        originHttpStatus,
+        originWarning,
+        originTitle,
       };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
