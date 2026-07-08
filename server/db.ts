@@ -432,6 +432,28 @@ export function migrate() {
     console.log('[Agent Studio] Migrated conversations: agent_id is now nullable');
   }
 
+  // Migration: conversation-level tool/MCP override (tools_overridden flag + link tables)
+  const convColsForToolOverride = db.prepare("PRAGMA table_info(conversations)").all() as { name: string }[];
+  if (!convColsForToolOverride.some((c) => c.name === 'tools_overridden')) {
+    db.exec('ALTER TABLE conversations ADD COLUMN tools_overridden INTEGER DEFAULT 0');
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS conversation_tools (
+      conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+      tool_id TEXT NOT NULL REFERENCES tools(id) ON DELETE CASCADE,
+      PRIMARY KEY (conversation_id, tool_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_conversation_tools_conversation ON conversation_tools(conversation_id);
+    CREATE INDEX IF NOT EXISTS idx_conversation_tools_tool ON conversation_tools(tool_id);
+    CREATE TABLE IF NOT EXISTS conversation_mcp_servers (
+      conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+      mcp_server_id TEXT NOT NULL REFERENCES mcp_servers(id) ON DELETE CASCADE,
+      PRIMARY KEY (conversation_id, mcp_server_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_conversation_mcp_servers_conversation ON conversation_mcp_servers(conversation_id);
+    CREATE INDEX IF NOT EXISTS idx_conversation_mcp_servers_mcp ON conversation_mcp_servers(mcp_server_id);
+  `);
+
   // Migration: add processed_by_agent_id to messages for @agent tracking
   const msgColsFinal2 = db.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
   if (!msgColsFinal2.some((c) => c.name === 'processed_by_agent_id')) {

@@ -487,6 +487,63 @@ export async function resolveToolsFromIds(
   return { resolvedTools: resolved, mcpClients };
 }
 
+export interface ConversationToolOverride {
+  tools_overridden: boolean;
+  tool_ids: string[];
+  mcp_server_ids: string[];
+}
+
+/**
+ * Reads conversations.tools_overridden + conversation_tools + conversation_mcp_servers for one conversation.
+ * Always returns a value (never null) — { tools_overridden: false, tool_ids: [], mcp_server_ids: [] } when no
+ * override row/flag is set, so callers never need a null-check.
+ */
+export function getConversationToolOverride(conversationId: string): ConversationToolOverride {
+  const row = db.prepare('SELECT tools_overridden FROM conversations WHERE id = ?').get(conversationId) as
+    | { tools_overridden: number }
+    | undefined;
+  const tools_overridden = !!row?.tools_overridden;
+  const toolLinks = db.prepare('SELECT tool_id FROM conversation_tools WHERE conversation_id = ?').all(conversationId) as { tool_id: string }[];
+  const mcpLinks = db.prepare('SELECT mcp_server_id FROM conversation_mcp_servers WHERE conversation_id = ?').all(conversationId) as { mcp_server_id: string }[];
+  return {
+    tools_overridden,
+    tool_ids: toolLinks.map((l) => l.tool_id),
+    mcp_server_ids: mcpLinks.map((l) => l.mcp_server_id),
+  };
+}
+
+export type ToolResolutionSource =
+  | { kind: 'conversation-override'; tool_ids: string[]; mcp_server_ids: string[] }
+  | { kind: 'general-settings'; tool_ids: string[]; mcp_server_ids: string[] }
+  | { kind: 'agent-default' };
+
+/**
+ * Pure decision function — no DB access. Conversation override wins outright; otherwise general-chat
+ * settings win for agent-less conversations; otherwise fall through to the agent's own defaults.
+ */
+export function selectToolResolutionSource(params: {
+  conversationOverride: ConversationToolOverride;
+  isGeneralChat: boolean;
+  generalSettings: { tool_ids: string[]; mcp_server_ids: string[] } | null;
+}): ToolResolutionSource {
+  const { conversationOverride, isGeneralChat, generalSettings } = params;
+  if (conversationOverride.tools_overridden === true) {
+    return {
+      kind: 'conversation-override',
+      tool_ids: conversationOverride.tool_ids,
+      mcp_server_ids: conversationOverride.mcp_server_ids,
+    };
+  }
+  if (isGeneralChat && generalSettings !== null) {
+    return {
+      kind: 'general-settings',
+      tool_ids: generalSettings.tool_ids,
+      mcp_server_ids: generalSettings.mcp_server_ids,
+    };
+  }
+  return { kind: 'agent-default' };
+}
+
 /**
  * Build the `tools` array for OpenRouter request body (only definitions).
  */

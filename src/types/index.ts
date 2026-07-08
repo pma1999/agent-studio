@@ -67,6 +67,12 @@ export interface McpServer {
   updated_at: string;
 }
 
+export interface ConversationToolConfigOverride {
+  tools_overridden: boolean;
+  tool_ids: string[];
+  mcp_server_ids: string[];
+}
+
 export interface Conversation {
   id: string;
   agent_id: string | null;
@@ -76,6 +82,9 @@ export interface Conversation {
   agent_name?: string;
   agent_emoji?: string;
   is_general?: boolean;
+  tools_overridden?: boolean;
+  tool_ids?: string[];
+  mcp_server_ids?: string[];
   created_at: string;
   updated_at: string;
 }

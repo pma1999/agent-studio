@@ -163,6 +163,13 @@ export const conversationsApi = {
     method: 'PUT',
     body: JSON.stringify({ provider_routing }),
   }),
+  updateToolConfig: (id: string, toolIds: string[], mcpServerIds: string[]) => request<Conversation>(`/conversations/${id}/tool-config`, {
+    method: 'PUT',
+    body: JSON.stringify({ tool_ids: toolIds, mcp_server_ids: mcpServerIds }),
+  }),
+  resetToolConfig: (id: string) => request<Conversation>(`/conversations/${id}/tool-config`, {
+    method: 'DELETE',
+  }),
   delete: (id: string) => request<{ success: boolean }>(`/conversations/${id}`, {
     method: 'DELETE',
   }),

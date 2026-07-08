@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { nanoid } from 'nanoid';
 import db from '../db.js';
 import { getSettingValue } from './settings.js';
-import { resolveToolsForAgent, resolveToolsFromIds, toOpenRouterTools, runTool, appendToolInstructionsIfNeeded } from '../tools/index.js';
+import { resolveToolsForAgent, resolveToolsFromIds, toOpenRouterTools, runTool, appendToolInstructionsIfNeeded, getConversationToolOverride, selectToolResolutionSource } from '../tools/index.js';
 import { annotationsFromWebSearchResults } from '../tools/registry.js';
 import { parseReasoningToolCalls } from '../utils/parseReasoningToolCalls.js';
 import type { McpConnection } from '../mcp/index.js';
@@ -361,9 +361,16 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     injectDateTimeIntoCurrentTurn(messages, buildDateTimeContext(userTimezone));
 
     // Resolve tools for this agent (with user context for settings)
-    const resolved = agent.id === 'general' && generalSettings
-      ? await resolveToolsFromIds(generalSettings.tool_ids || [], generalSettings.mcp_server_ids || [], userId)
-      : await resolveToolsForAgent(agent.id, userId);
+    // Hierarchy: conversation tool/MCP override > agent/general default (no message-level tier for tools)
+    const conversationToolOverride = getConversationToolOverride(conversation.id);
+    const toolSource = selectToolResolutionSource({
+      conversationOverride: conversationToolOverride,
+      isGeneralChat: agent.id === 'general',
+      generalSettings: generalSettings ? { tool_ids: generalSettings.tool_ids || [], mcp_server_ids: generalSettings.mcp_server_ids || [] } : null,
+    });
+    const resolved = toolSource.kind === 'agent-default'
+      ? await resolveToolsForAgent(agent.id, userId)
+      : await resolveToolsFromIds(toolSource.tool_ids, toolSource.mcp_server_ids, userId);
     const resolvedTools = resolved.resolvedTools;
     mcpClients = resolved.mcpClients;
     const openRouterTools = toOpenRouterTools(resolvedTools);

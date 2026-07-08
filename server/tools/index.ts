@@ -6,8 +6,10 @@ export {
   toOpenRouterTools,
   appendToolInstructionsIfNeeded,
   slugFromServerName,
+  getConversationToolOverride,
+  selectToolResolutionSource,
 } from './resolve.js';
-export type { ResolvedTool, ResolveToolsResult, ResolvedToolMcpConfig, ResolvedToolMcpMetaConfig, McpToolCatalogEntry, ResolveToolsFromIdsOptions } from './resolve.js';
+export type { ResolvedTool, ResolveToolsResult, ResolvedToolMcpConfig, ResolvedToolMcpMetaConfig, McpToolCatalogEntry, ResolveToolsFromIdsOptions, ConversationToolOverride, ToolResolutionSource } from './resolve.js';
 export { runTool } from './run.js';
 export type { RunToolResult, ToolExecutionSource } from './run.js';
 export { runWebSearch } from './webSearch.js';

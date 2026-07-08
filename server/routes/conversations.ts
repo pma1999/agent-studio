@@ -27,6 +27,27 @@ function normalizeProviderRoutingBody(value: unknown): { config: ProviderRouting
   return { config };
 }
 
+function attachToolConfig(row: Record<string, unknown>): Record<string, unknown> {
+  return attachToolConfigBatch([row])[0];
+}
+function attachToolConfigBatch(rows: Record<string, unknown>[]): Record<string, unknown>[] {
+  if (rows.length === 0) return rows;
+  const ids = rows.map((r) => r.id as string);
+  const placeholders = ids.map(() => '?').join(',');
+  const toolLinks = db.prepare(`SELECT conversation_id, tool_id FROM conversation_tools WHERE conversation_id IN (${placeholders})`).all(...ids) as { conversation_id: string; tool_id: string }[];
+  const mcpLinks = db.prepare(`SELECT conversation_id, mcp_server_id FROM conversation_mcp_servers WHERE conversation_id IN (${placeholders})`).all(...ids) as { conversation_id: string; mcp_server_id: string }[];
+  const toolMap = new Map<string, string[]>();
+  const mcpMap = new Map<string, string[]>();
+  for (const l of toolLinks) { if (!toolMap.has(l.conversation_id)) toolMap.set(l.conversation_id, []); toolMap.get(l.conversation_id)!.push(l.tool_id); }
+  for (const l of mcpLinks) { if (!mcpMap.has(l.conversation_id)) mcpMap.set(l.conversation_id, []); mcpMap.get(l.conversation_id)!.push(l.mcp_server_id); }
+  return rows.map((r) => ({
+    ...r,
+    tools_overridden: !!r.tools_overridden,
+    tool_ids: toolMap.get(r.id as string) || [],
+    mcp_server_ids: mcpMap.get(r.id as string) || [],
+  }));
+}
+
 // GET /api/conversations - List conversations, optionally filtered by agent_id
 router.get('/', (req: AuthRequest, res: Response) => {
   try {
@@ -53,7 +74,7 @@ router.get('/', (req: AuthRequest, res: Response) => {
       `).all(userId);
     }
 
-    res.json((conversations as Record<string, unknown>[]).map(withParsedProviderRouting));
+    res.json(attachToolConfigBatch(conversations as Record<string, unknown>[]).map(withParsedProviderRouting));
   } catch (err) {
     console.error('Error listing conversations:', err);
     res.status(500).json({ error: 'Failed to list conversations' });
@@ -94,7 +115,7 @@ router.post('/', (req: AuthRequest, res: Response) => {
       WHERE c.id = ?
     `).get(id);
 
-    res.status(201).json(withParsedProviderRouting(conversation as Record<string, unknown>));
+    res.status(201).json(withParsedProviderRouting(attachToolConfig(conversation as Record<string, unknown>)));
   } catch (err) {
     console.error('Error creating conversation:', err);
     res.status(500).json({ error: 'Failed to create conversation' });
@@ -113,7 +134,7 @@ router.put('/:id', (req: AuthRequest, res: Response) => {
 
     const conversation = db.prepare('SELECT * FROM conversations WHERE id = ? AND user_id = ?').get(req.params.id, userId);
     if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
-    res.json(withParsedProviderRouting(conversation as Record<string, unknown>));
+    res.json(withParsedProviderRouting(attachToolConfig(conversation as Record<string, unknown>)));
   } catch (err) {
     console.error('Error updating conversation:', err);
     res.status(500).json({ error: 'Failed to update conversation' });
@@ -147,7 +168,7 @@ router.put('/:id/model', (req: AuthRequest, res: Response) => {
     `).get(req.params.id, userId);
 
     if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
-    res.json(withParsedProviderRouting(conversation as Record<string, unknown>));
+    res.json(withParsedProviderRouting(attachToolConfig(conversation as Record<string, unknown>)));
   } catch (err) {
     console.error('Error updating conversation model:', err);
     res.status(500).json({ error: 'Failed to update conversation model' });
@@ -196,10 +217,89 @@ router.put('/:id/provider-routing', (req: AuthRequest, res: Response) => {
     `).get(req.params.id, userId);
 
     if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
-    res.json(withParsedProviderRouting(conversation as Record<string, unknown>));
+    res.json(withParsedProviderRouting(attachToolConfig(conversation as Record<string, unknown>)));
   } catch (err) {
     console.error('Error updating conversation provider routing:', err);
     res.status(500).json({ error: 'Failed to update conversation provider routing' });
+  }
+});
+
+// PUT /api/conversations/:id/tool-config - Set conversation-level tool/MCP override (full replace)
+router.put('/:id/tool-config', (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.userId;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    const { tool_ids, mcp_server_ids } = req.body;
+
+    if (!Array.isArray(tool_ids) || !tool_ids.every((id: unknown) => typeof id === 'string')) {
+      return res.status(400).json({ error: 'tool_ids must be an array of strings' });
+    }
+    if (!Array.isArray(mcp_server_ids) || !mcp_server_ids.every((id: unknown) => typeof id === 'string')) {
+      return res.status(400).json({ error: 'mcp_server_ids must be an array of strings' });
+    }
+
+    const existing = db.prepare('SELECT * FROM conversations WHERE id = ? AND user_id = ?').get(req.params.id, userId);
+    if (!existing) return res.status(404).json({ error: 'Conversation not found' });
+
+    const dedupedToolIds = [...new Set(tool_ids as string[])];
+    const dedupedMcpServerIds = [...new Set(mcp_server_ids as string[])];
+
+    const run = db.transaction(() => {
+      db.prepare(`UPDATE conversations SET tools_overridden = 1, updated_at = datetime('now') WHERE id = ? AND user_id = ?`).run(req.params.id, userId);
+      db.prepare('DELETE FROM conversation_tools WHERE conversation_id = ?').run(req.params.id);
+      for (const toolId of dedupedToolIds) {
+        db.prepare('INSERT OR IGNORE INTO conversation_tools (conversation_id, tool_id) VALUES (?, ?)').run(req.params.id, toolId);
+      }
+      db.prepare('DELETE FROM conversation_mcp_servers WHERE conversation_id = ?').run(req.params.id);
+      for (const mcpId of dedupedMcpServerIds) {
+        db.prepare('INSERT OR IGNORE INTO conversation_mcp_servers (conversation_id, mcp_server_id) VALUES (?, ?)').run(req.params.id, mcpId);
+      }
+    });
+    run();
+
+    const conversation = db.prepare(`
+      SELECT c.*, a.name as agent_name, a.emoji as agent_emoji
+      FROM conversations c
+      LEFT JOIN agents a ON c.agent_id = a.id
+      WHERE c.id = ? AND c.user_id = ?
+    `).get(req.params.id, userId);
+
+    if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
+    res.json(withParsedProviderRouting(attachToolConfig(conversation as Record<string, unknown>)));
+  } catch (err) {
+    console.error('Error updating conversation tool config:', err);
+    res.status(500).json({ error: 'Failed to update conversation tool config' });
+  }
+});
+
+// DELETE /api/conversations/:id/tool-config - Clear conversation-level tool/MCP override
+router.delete('/:id/tool-config', (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.userId;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const existing = db.prepare('SELECT * FROM conversations WHERE id = ? AND user_id = ?').get(req.params.id, userId);
+    if (!existing) return res.status(404).json({ error: 'Conversation not found' });
+
+    const run = db.transaction(() => {
+      db.prepare(`UPDATE conversations SET tools_overridden = 0, updated_at = datetime('now') WHERE id = ? AND user_id = ?`).run(req.params.id, userId);
+      db.prepare('DELETE FROM conversation_tools WHERE conversation_id = ?').run(req.params.id);
+      db.prepare('DELETE FROM conversation_mcp_servers WHERE conversation_id = ?').run(req.params.id);
+    });
+    run();
+
+    const conversation = db.prepare(`
+      SELECT c.*, a.name as agent_name, a.emoji as agent_emoji
+      FROM conversations c
+      LEFT JOIN agents a ON c.agent_id = a.id
+      WHERE c.id = ? AND c.user_id = ?
+    `).get(req.params.id, userId);
+
+    if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
+    res.json(withParsedProviderRouting(attachToolConfig(conversation as Record<string, unknown>)));
+  } catch (err) {
+    console.error('Error clearing conversation tool config:', err);
+    res.status(500).json({ error: 'Failed to clear conversation tool config' });
   }
 });
 

@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Send, ArrowDown, StopCircle, MessageSquare, Bot, Brain, FileUp, Link, X, Users, SlidersHorizontal } from 'lucide-react';
+import { Send, ArrowDown, StopCircle, MessageSquare, Bot, Brain, FileUp, Link, X, Users, SlidersHorizontal, Wrench } from 'lucide-react';
 import { CouncilToggle } from './CouncilToggle';
 import { CouncilStreamingView } from './CouncilStreamingView';
 import { useStore } from '../stores/store';
@@ -12,6 +12,7 @@ import { EmptyState } from './EmptyState';
 import { Button } from './ui/Button';
 import { ModelSelectorCore } from './ModelSelectorCore';
 import { ProviderRoutingSelector } from './ProviderRoutingSelector';
+import { ConversationToolsSelector } from './ConversationToolsSelector';
 import { conversationsApi } from '../api/client';
 import { PremiumMentionInput } from './ui/PremiumMentionInput';
 import { Sheet } from './ui/Sheet';
@@ -98,6 +99,8 @@ export function ChatView() {
     setConversationModelOverride,
     conversationProviderRoutingOverrides,
     setConversationProviderRoutingOverride,
+    conversationToolConfigOverrides,
+    setConversationToolConfigOverride,
     loadConversations,
     generalChatSettings,
     councilEnabled,
@@ -176,6 +179,8 @@ export function ChatView() {
   const defaultProviderRoutingForChat = agent
     ? (agent.provider_routing ?? null)
     : (generalChatSettings?.provider_routing ?? null);
+  const defaultToolIdsForChat = agent ? (agent.tool_ids ?? []) : (generalChatSettings?.tool_ids ?? []);
+  const defaultMcpServerIdsForChat = agent ? (agent.mcp_server_ids ?? []) : (generalChatSettings?.mcp_server_ids ?? []);
 
   const effectiveConversationModel = useMemo(() => {
     if (!activeConversationId) return null;
@@ -189,6 +194,21 @@ export function ChatView() {
     if (override !== undefined) return override;
     return activeConversation?.provider_routing ?? null;
   }, [activeConversationId, conversationProviderRoutingOverrides, activeConversation?.provider_routing]);
+
+  const effectiveConversationToolConfig = useMemo(() => {
+    if (!activeConversationId) {
+      return { overrideActive: false, toolIds: defaultToolIdsForChat, mcpServerIds: defaultMcpServerIdsForChat };
+    }
+    const override = conversationToolConfigOverrides[activeConversationId];
+    const source = override !== undefined
+      ? override
+      : { tools_overridden: !!activeConversation?.tools_overridden, tool_ids: activeConversation?.tool_ids ?? [], mcp_server_ids: activeConversation?.mcp_server_ids ?? [] };
+    return {
+      overrideActive: source.tools_overridden,
+      toolIds: source.tools_overridden ? source.tool_ids : defaultToolIdsForChat,
+      mcpServerIds: source.tools_overridden ? source.mcp_server_ids : defaultMcpServerIdsForChat,
+    };
+  }, [activeConversationId, conversationToolConfigOverrides, activeConversation, defaultToolIdsForChat, defaultMcpServerIdsForChat]);
 
   // Model used for the next (or current streaming) message; shown in the assistant bubble when streaming.
   const effectiveModelForThisMessage = messageModelOverride ?? effectiveConversationModel ?? defaultModelForChat;
@@ -221,6 +241,31 @@ export function ChatView() {
     },
     [activeConversationId, setConversationProviderRoutingOverride, loadConversations]
   );
+
+  const handleConversationToolConfigApply = useCallback(
+    async (toolIds: string[], mcpServerIds: string[]) => {
+      if (!activeConversationId) return;
+      setConversationToolConfigOverride(activeConversationId, { tools_overridden: true, tool_ids: toolIds, mcp_server_ids: mcpServerIds });
+      try {
+        await conversationsApi.updateToolConfig(activeConversationId, toolIds, mcpServerIds);
+        await loadConversations();
+      } catch (err) {
+        console.error('Failed to update conversation tool config:', err);
+      }
+    },
+    [activeConversationId, setConversationToolConfigOverride, loadConversations]
+  );
+
+  const handleConversationToolConfigReset = useCallback(async () => {
+    if (!activeConversationId) return;
+    setConversationToolConfigOverride(activeConversationId, { tools_overridden: false, tool_ids: [], mcp_server_ids: [] });
+    try {
+      await conversationsApi.resetToolConfig(activeConversationId);
+      await loadConversations();
+    } catch (err) {
+      console.error('Failed to reset conversation tool config:', err);
+    }
+  }, [activeConversationId, setConversationToolConfigOverride, loadConversations]);
 
   // Determine effective reasoning state: override > agent default > general chat settings (when no agent)
   const effectiveReasoning: ReasoningConfig = useMemo(() => {
@@ -512,6 +557,14 @@ export function ChatView() {
                 disabled={isStreaming}
                 allowDefault
                 compact
+              />
+              <ConversationToolsSelector
+                toolIds={effectiveConversationToolConfig.toolIds}
+                mcpServerIds={effectiveConversationToolConfig.mcpServerIds}
+                overrideActive={effectiveConversationToolConfig.overrideActive}
+                onApply={handleConversationToolConfigApply}
+                onReset={handleConversationToolConfigReset}
+                disabled={isStreaming || !activeConversationId}
               />
             </span>
           </div>
@@ -1361,6 +1414,21 @@ export function ChatView() {
                   inheritedRouting={effectiveConversationProviderRouting ?? defaultProviderRoutingForChat}
                   disabled={isStreaming}
                   allowDefault
+                  compact
+                />
+              </div>
+            </section>
+
+            <section className="composer-options-section">
+              <span className="composer-options-label"><Wrench size={15} /> Tools for this conversation</span>
+              <div className="composer-options-controls">
+                <ConversationToolsSelector
+                  toolIds={effectiveConversationToolConfig.toolIds}
+                  mcpServerIds={effectiveConversationToolConfig.mcpServerIds}
+                  overrideActive={effectiveConversationToolConfig.overrideActive}
+                  onApply={handleConversationToolConfigApply}
+                  onReset={handleConversationToolConfigReset}
+                  disabled={isStreaming || !activeConversationId}
                   compact
                 />
               </div>

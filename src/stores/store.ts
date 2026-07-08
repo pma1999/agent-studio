@@ -15,6 +15,7 @@ import type {
   CouncilMember,
   CouncilConfig,
   ProviderRoutingConfig,
+  ConversationToolConfigOverride,
 } from '../types';
 import type { AuthUser } from '../api/client';
 import { agentsApi, conversationsApi, messagesApi, settingsApi, creditsApi, usageApi, authApi } from '../api/client';
@@ -85,6 +86,11 @@ interface AppState {
   conversationProviderRoutingOverrides: Record<string, ProviderRoutingConfig | null>;
   setConversationProviderRoutingOverride: (conversationId: string, providerRouting: ProviderRoutingConfig | null) => void;
   getConversationProviderRoutingOverride: (conversationId: string) => ProviderRoutingConfig | null;
+
+  // Per-conversation tool/MCP config override (undefined = no override, use agent/general-chat defaults)
+  conversationToolConfigOverrides: Record<string, ConversationToolConfigOverride | undefined>;
+  setConversationToolConfigOverride: (conversationId: string, config: ConversationToolConfigOverride | undefined) => void;
+  getConversationToolConfigOverride: (conversationId: string) => ConversationToolConfigOverride | undefined;
 
   // Ordered live activity timeline (text/thinking/tool) for current streaming message
   streamingActivityEvents: StreamingActivityEvent[];
@@ -324,6 +330,19 @@ export const useStore = create<AppState>((set, get) => ({
     })),
   getConversationProviderRoutingOverride: (conversationId) => {
     return get().conversationProviderRoutingOverrides[conversationId] ?? null;
+  },
+
+  // Per-conversation tool/MCP config override
+  conversationToolConfigOverrides: {},
+  setConversationToolConfigOverride: (conversationId, config) =>
+    set((state) => ({
+      conversationToolConfigOverrides: {
+        ...state.conversationToolConfigOverrides,
+        [conversationId]: config,
+      },
+    })),
+  getConversationToolConfigOverride: (conversationId) => {
+    return get().conversationToolConfigOverrides[conversationId];
   },
 
   // Ordered streaming activity timeline (append by arrival order)
