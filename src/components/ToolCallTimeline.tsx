@@ -9,11 +9,16 @@ import {
   Clock3,
   Cloud,
   Code2,
+  FileEdit,
+  FilePlus,
+  FileText,
+  FolderOpen,
   Globe,
   Laptop,
   ShieldAlert,
   Sparkles,
   Terminal,
+  Trash2,
   Wrench,
 } from 'lucide-react';
 import type { ToolExecution, ToolOutputChunk, ToolSource } from '../types';
@@ -50,6 +55,14 @@ function sourceLabel(source: ToolSource | undefined, name: string): string {
   if (source === 'http') return 'HTTP';
   return 'Tool';
 }
+
+const FILE_TOOL_ICONS: Record<string, React.ReactNode> = {
+  read_file: <FileText size={13} />,
+  write_file: <FilePlus size={13} />,
+  edit_file: <FileEdit size={13} />,
+  delete_file: <Trash2 size={13} />,
+  list_directory: <FolderOpen size={13} />,
+};
 
 function formatDuration(durationMs?: number): string | null {
   if (durationMs === undefined || durationMs < 0) return null;
@@ -245,7 +258,9 @@ function ToolCallCard({
       >
         <div className="tool-call-card-left">
           <div className="tool-call-card-icon">
-            {isRunCommand ? <Terminal size={13} /> : source === 'MCP' ? <Globe size={13} /> : <Wrench size={13} />}
+            {isRunCommand
+              ? <Terminal size={13} />
+              : FILE_TOOL_ICONS[call.name] ?? (source === 'MCP' ? <Globe size={13} /> : <Wrench size={13} />)}
           </div>
           <div className="tool-call-card-title-wrap">
             <div className="tool-call-card-title">{prettyName}</div>

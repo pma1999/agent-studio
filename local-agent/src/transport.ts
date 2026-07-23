@@ -15,9 +15,10 @@
  */
 
 import WebSocket from 'ws';
+import type { DetectedShell } from './shellDetection.js';
 
 export type AgentToBackendMessage =
-  | { type: 'hello'; agentVersion: string; deviceName: string }
+  | { type: 'hello'; agentVersion: string; deviceName: string; platform?: string; shell?: DetectedShell }
   | { type: 'heartbeat' }
   | { type: 'command_awaiting_confirmation'; requestId: string }
   | {
@@ -36,15 +37,76 @@ export type AgentToBackendMessage =
       durationMs: number;
       blockedPattern?: string;
       confirmation?: 'approved' | 'declined' | 'timeout';
+    }
+  | {
+      type: 'read_file_response';
+      requestId: string;
+      ok: boolean;
+      error?: string;
+      content?: string;
+      totalLines?: number;
+      startLine?: number;
+      endLine?: number;
+      truncated?: boolean;
+    }
+  | {
+      type: 'write_file_response';
+      requestId: string;
+      ok: boolean;
+      error?: string;
+      bytesWritten?: number;
+      created?: boolean;
+    }
+  | {
+      type: 'edit_file_response';
+      requestId: string;
+      ok: boolean;
+      error?: string;
+      replacementsMade?: number;
+    }
+  | {
+      type: 'delete_file_response';
+      requestId: string;
+      ok: boolean;
+      error?: string;
+      kind?: 'file' | 'directory';
+      confirmation?: 'declined' | 'timeout';
+    }
+  | {
+      type: 'list_directory_response';
+      requestId: string;
+      ok: boolean;
+      error?: string;
+      entries?: Array<{ name: string; type: 'file' | 'directory' | 'symlink' | 'other'; sizeBytes?: number }>;
+      truncated?: boolean;
+      totalEntries?: number;
     };
 
 export type BackendToAgentMessage =
   | { type: 'hello_ack'; agentId: string }
   | { type: 'heartbeat_ack' }
   | { type: 'command_request'; requestId: string; command: string; cwd?: string; timeoutMs: number }
-  | { type: 'command_cancel'; requestId: string };
+  | { type: 'command_cancel'; requestId: string }
+  | { type: 'read_file_request'; requestId: string; path: string; offset?: number; limit?: number }
+  | { type: 'write_file_request'; requestId: string; path: string; content: string; hasBeenRead: boolean }
+  | {
+      type: 'edit_file_request';
+      requestId: string;
+      path: string;
+      oldString: string;
+      newString: string;
+      replaceAll?: boolean;
+      hasBeenRead: boolean;
+    }
+  | { type: 'delete_file_request'; requestId: string; path: string; recursive?: boolean }
+  | { type: 'list_directory_request'; requestId: string; path: string };
 
 export type CommandRequestMessage = Extract<BackendToAgentMessage, { type: 'command_request' }>;
+export type ReadFileRequestMessage = Extract<BackendToAgentMessage, { type: 'read_file_request' }>;
+export type WriteFileRequestMessage = Extract<BackendToAgentMessage, { type: 'write_file_request' }>;
+export type EditFileRequestMessage = Extract<BackendToAgentMessage, { type: 'edit_file_request' }>;
+export type DeleteFileRequestMessage = Extract<BackendToAgentMessage, { type: 'delete_file_request' }>;
+export type ListDirectoryRequestMessage = Extract<BackendToAgentMessage, { type: 'list_directory_request' }>;
 
 /** Matches the 20s heartbeat / 60s backend-timeout pair fixed in `global-constraints.md`. */
 export const HEARTBEAT_INTERVAL_MS = 20_000;
@@ -88,6 +150,77 @@ export function parseBackendMessage(raw: string): BackendToAgentMessage | null {
       return null;
     case 'command_cancel':
       return typeof message.requestId === 'string' ? { type: 'command_cancel', requestId: message.requestId } : null;
+    case 'read_file_request':
+      if (
+        typeof message.requestId === 'string' &&
+        typeof message.path === 'string' &&
+        (message.offset === undefined || typeof message.offset === 'number') &&
+        (message.limit === undefined || typeof message.limit === 'number')
+      ) {
+        return {
+          type: 'read_file_request',
+          requestId: message.requestId,
+          path: message.path,
+          offset: message.offset as number | undefined,
+          limit: message.limit as number | undefined,
+        };
+      }
+      return null;
+    case 'write_file_request':
+      if (
+        typeof message.requestId === 'string' &&
+        typeof message.path === 'string' &&
+        typeof message.content === 'string' &&
+        typeof message.hasBeenRead === 'boolean'
+      ) {
+        return {
+          type: 'write_file_request',
+          requestId: message.requestId,
+          path: message.path,
+          content: message.content,
+          hasBeenRead: message.hasBeenRead,
+        };
+      }
+      return null;
+    case 'edit_file_request':
+      if (
+        typeof message.requestId === 'string' &&
+        typeof message.path === 'string' &&
+        typeof message.oldString === 'string' &&
+        typeof message.newString === 'string' &&
+        (message.replaceAll === undefined || typeof message.replaceAll === 'boolean') &&
+        typeof message.hasBeenRead === 'boolean'
+      ) {
+        return {
+          type: 'edit_file_request',
+          requestId: message.requestId,
+          path: message.path,
+          oldString: message.oldString,
+          newString: message.newString,
+          replaceAll: message.replaceAll as boolean | undefined,
+          hasBeenRead: message.hasBeenRead,
+        };
+      }
+      return null;
+    case 'delete_file_request':
+      if (
+        typeof message.requestId === 'string' &&
+        typeof message.path === 'string' &&
+        (message.recursive === undefined || typeof message.recursive === 'boolean')
+      ) {
+        return {
+          type: 'delete_file_request',
+          requestId: message.requestId,
+          path: message.path,
+          recursive: message.recursive as boolean | undefined,
+        };
+      }
+      return null;
+    case 'list_directory_request':
+      if (typeof message.requestId === 'string' && typeof message.path === 'string') {
+        return { type: 'list_directory_request', requestId: message.requestId, path: message.path };
+      }
+      return null;
     default:
       return null;
   }
@@ -111,6 +244,15 @@ export interface ConnectAgentOptions {
   token: string;
   agentVersion: string;
   deviceName: string;
+  /**
+   * Detected once at startup (`createShellDetector()`) and passed to every
+   * `connectAgent()` call across reconnects — never re-detected per
+   * connection attempt. Optional here only to mirror the wire schema's own
+   * optionality (`global-constraints.md`); the real local agent always
+   * supplies both.
+   */
+  platform?: string;
+  shell?: DetectedShell;
   onMessage(message: BackendToAgentMessage): void;
   /** Fired once, right after the socket physically opens and `hello` is sent. */
   onOpen?(): void;
@@ -136,7 +278,19 @@ export function connectAgent(options: ConnectAgentOptions): AgentTransportHandle
   };
 
   socket.on('open', () => {
-    socket.send(JSON.stringify({ type: 'hello', agentVersion: options.agentVersion, deviceName: options.deviceName }));
+    socket.send(
+      JSON.stringify({
+        type: 'hello',
+        agentVersion: options.agentVersion,
+        deviceName: options.deviceName,
+        // JSON.stringify drops undefined-valued properties, so this stays a
+        // no-op extension when platform/shell are omitted (matching the
+        // wire schema's optionality) and always present in what the real
+        // local agent actually sends (index.ts always supplies both).
+        platform: options.platform,
+        shell: options.shell,
+      })
+    );
     heartbeatTimer = setInterval(() => {
       if (socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({ type: 'heartbeat' }));

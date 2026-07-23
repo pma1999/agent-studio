@@ -8,7 +8,7 @@ import db from '../db.js';
 import { getSettingValue } from '../routes/settings.js';
 import { isAgentConnected } from '../agentRelay/registry.js';
 import { getBuiltinDefinition, getBuiltinExecutor } from './registry.js';
-import { isRunCommandUsable } from './execCommand.js';
+import { buildRunCommandDisclosure, isRunCommandUsable } from './execCommand.js';
 import {
   createAndConnectMcpClient,
   listMcpTools,
@@ -87,6 +87,9 @@ function isUsable(t: ToolRow, userId: string): boolean {
       return !!key?.trim();
     }
     if (t.name === 'run_command') return isAgentConnected(userId) || isRunCommandUsable(userId);
+    if (['read_file', 'write_file', 'edit_file', 'delete_file', 'list_directory'].includes(t.name)) {
+      return isAgentConnected(userId);
+    }
     if (t.name === 'web_fetch') return true;
     return true;
   }
@@ -100,6 +103,29 @@ function isUsable(t: ToolRow, userId: string): boolean {
     return !!config.url?.trim();
   }
   return false;
+}
+
+export function buildResolvedBuiltinTool(row: ToolRow, userId: string): ResolvedTool | null {
+  const def = getBuiltinDefinition(row.name);
+  if (!def) return null;
+  const disclosure = row.name === 'run_command' ? buildRunCommandDisclosure(userId) : '';
+  const description = disclosure
+    ? `${def.function.description}\n\n${disclosure}`
+    : def.function.description;
+  return {
+    id: row.id,
+    name: row.name,
+    type: 'builtin',
+    config: row.config ? tryParse(row.config) : undefined,
+    openAIDef: {
+      type: 'function',
+      function: {
+        name: def.function.name,
+        description,
+        parameters: def.function.parameters,
+      },
+    },
+  };
 }
 
 export interface ResolveToolsResult {
@@ -212,22 +238,9 @@ export async function resolveToolsForAgent(agentId: string, userId: string): Pro
     }
 
     if (row.type === 'builtin') {
-      const def = getBuiltinDefinition(row.name);
-      if (!def) continue;
-      resolved.push({
-        id: row.id,
-        name: row.name,
-        type: 'builtin',
-        config: row.config ? tryParse(row.config) : undefined,
-        openAIDef: {
-          type: 'function',
-          function: {
-            name: def.function.name,
-            description: def.function.description,
-            parameters: def.function.parameters,
-          },
-        },
-      });
+      const builtin = buildResolvedBuiltinTool(row, userId);
+      if (!builtin) continue;
+      resolved.push(builtin);
     } else {
       resolved.push({
         id: row.id,
@@ -376,22 +389,9 @@ export async function resolveToolsFromIds(
       }
 
       if (row.type === 'builtin') {
-        const def = getBuiltinDefinition(row.name);
-        if (!def) continue;
-        resolved.push({
-          id: row.id,
-          name: row.name,
-          type: 'builtin',
-          config: row.config ? tryParse(row.config) : undefined,
-          openAIDef: {
-            type: 'function',
-            function: {
-              name: def.function.name,
-              description: def.function.description,
-              parameters: def.function.parameters,
-            },
-          },
-        });
+        const builtin = buildResolvedBuiltinTool(row, userId);
+        if (!builtin) continue;
+        resolved.push(builtin);
       } else {
         resolved.push({
           id: row.id,

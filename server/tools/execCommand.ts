@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { getSettingValue } from '../routes/settings.js';
 import {
   cancelCommandRequest,
+  getAgentShellInfo,
   isAgentConnected,
   sendCommandRequest,
 } from '../agentRelay/registry.js';
@@ -98,6 +99,43 @@ export function truncateCommandOutput(text: string): { text: string; truncated: 
 export function isRunCommandUsable(userId: string): boolean {
   const key = userId ? getSettingValue(userId, 'e2b_api_key') : '';
   return !!key?.trim();
+}
+
+function formatPlatform(platform: string): string {
+  const normalized = platform.trim().toLowerCase();
+  if (normalized === 'win32' || normalized === 'windows') return 'Windows';
+  if (normalized === 'darwin' || normalized === 'macos' || normalized === 'mac os') return 'macOS';
+  if (normalized === 'linux') return 'Linux';
+  if (normalized === 'freebsd') return 'FreeBSD';
+  return platform;
+}
+
+function localShellContrast(kind: string): string {
+  if (kind === 'pwsh' || kind === 'powershell') {
+    return 'PowerShell uses `;` to sequence commands, `$env:VAR` for environment variables, and `$(...)` for command substitution; POSIX shells commonly use `&&`, `$VAR`, and `2>/dev/null` for corresponding syntax.';
+  }
+  if (kind === 'cmd') {
+    return 'cmd uses `&` or `&&` to sequence commands, `%VAR%` for environment variables, and `2>NUL` to discard stderr; POSIX shells commonly use `&&`, `$VAR`, and `2>/dev/null` for corresponding syntax.';
+  }
+  return 'POSIX shells use `&&` to require a successful previous command, `$VAR` for environment variables, and `2>/dev/null` to discard stderr; PowerShell commonly uses `;`, `$env:VAR`, and `$(...)` for corresponding syntax.';
+}
+
+export function buildRunCommandDisclosure(userId: string): string {
+  const paragraphs: string[] = [];
+  if (isAgentConnected(userId)) {
+    const identity = getAgentShellInfo(userId);
+    if (identity?.platform && identity.shell?.kind) {
+      paragraphs.push(
+        `The connected local agent targets ${formatPlatform(identity.platform)} and uses the ${identity.shell.kind} shell. ${localShellContrast(identity.shell.kind)} Prefer the dedicated \`read_file\`, \`write_file\`, \`edit_file\`, and \`delete_file\` tools over shell redirection or heredocs for creating/editing files.`,
+      );
+    } else {
+      paragraphs.push('This agent version does not disclose its shell dialect; inspect output/errors and adjust syntax if a command fails.');
+    }
+  }
+  if (isRunCommandUsable(userId)) {
+    paragraphs.push('The `sandbox` backend is an ephemeral Linux VM running `/bin/bash` — use POSIX/bash syntax.');
+  }
+  return paragraphs.join('\n\n');
 }
 
 function resolveSandboxCwd(cwd: string | undefined): string {

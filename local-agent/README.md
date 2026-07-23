@@ -80,6 +80,60 @@ then restart the agent. Tier-1 commands (fork bombs, disk format, `diskpart`,
 `mkfs`, raw-disk writes) are always blocked regardless of this setting — there
 is no override for those.
 
+## How commands are run
+
+At startup, the agent detects the best available shell on this machine, once,
+and reuses that choice for every command until it is restarted (it never
+re-detects per command or per reconnect). Preference order:
+
+- **Windows**: `pwsh` (PowerShell 7+) -> `powershell` (Windows PowerShell
+  5.1) -> `cmd.exe` (last resort, always present).
+- **macOS/Linux** (future): `bash` -> `sh` (last resort, always present).
+
+When PowerShell is used, the command text is passed via PowerShell's
+`-EncodedCommand` flag (a base64-encoded form) rather than `-Command`. This is
+purely a robustness detail of how this process invokes the shell —
+`-EncodedCommand` sidesteps known quoting/parsing quirks in PowerShell's own
+front-end argument parser (particularly in `powershell.exe` 5.1) that plain
+`-Command` text can hit with embedded quotes or newlines. The model you're
+talking to only ever sees the plain command text; it never sees, and does not
+need to think about, this encoding.
+
+Agent Studio discloses which shell this agent detected (and this machine's
+platform) to the model dynamically each turn, so the model can tailor the
+commands it generates accordingly — see the relevant server-side task's notes
+for how that disclosure is built; it is not duplicated here.
+
+## File tools (read_file, write_file, edit_file, delete_file, list_directory)
+
+Besides `run_command`, Agent Studio can ask this agent to read, write, edit,
+delete, and list files directly. These follow the same workspace-root
+scoping as commands above: a path is resolved against the workspace root by
+default, and rejected outright if it resolves outside that root and
+`allowOutsideWorkspace` is not enabled. As with everything else in this
+document, that scoping is a convenience default, not a security sandbox — an
+absolute path, or `allowOutsideWorkspace: true`, can always reach outside it.
+
+**Read-before-write/edit.** `write_file` refuses to overwrite a file that
+already exists, and `edit_file` refuses to touch any existing file at all,
+unless that exact path has already been read (via `read_file`, or a prior
+successful write/edit to it) earlier in the same conversation. Creating a
+brand-new file with `write_file` never needs a prior read.
+
+**Delete confirmation.** Deleting a directory requires `recursive:true`
+(deleting a single file never does). Beyond that, three tiers apply, in this
+order:
+1. A delete entirely inside the workspace root, non-recursive or a small
+   recursive directory, runs immediately — no prompt.
+2. A delete that resolves outside the workspace root (only possible at all
+   with `allowOutsideWorkspace` enabled, per above), or a recursive directory
+   delete estimated at more than 50 files or 50MB, pauses and asks you to
+   confirm at this same console — the identical prompt `run_command`'s
+   destructive-command guard already uses.
+3. Anything hard-blocked by the workspace-root check above is never
+   confirmable; it is rejected outright, the same as an out-of-root `cwd` for
+   `run_command`.
+
 ## What this is not
 
 This is a seatbelt, not a sandbox. There is no OS-level confinement (no

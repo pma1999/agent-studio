@@ -11,12 +11,22 @@ process.env.DATABASE_PATH = testDbPath;
 const { default: db, migrate } = await import('../server/db.js');
 const {
   cancelCommandRequest,
+  getAgentShellInfo,
   registerAgentConnection,
   sendCommandRequest,
+  sendFileOpRequest,
   unregisterAgentConnection,
 } = await import('../server/agentRelay/registry.js');
-const { hashToken, validateAgentToken } = await import('../server/agentRelay/protocol.js');
+const {
+  AgentToBackendMessageSchema,
+  BackendToAgentMessageSchema,
+  hashToken,
+  validateAgentToken,
+} = await import('../server/agentRelay/protocol.js');
 const { exchangePairingCode, issuePairingCode, mountAgentTransport } = await import('../server/routes/agent.js');
+const { buildRunCommandDisclosure } = await import('../server/tools/execCommand.js');
+const { buildResolvedBuiltinTool } = await import('../server/tools/resolve.js');
+const { getBuiltinDefinition } = await import('../server/tools/registry.js');
 type AgentToBackendMessage = import('../server/agentRelay/protocol.js').AgentToBackendMessage;
 type BackendToAgentMessage = import('../server/agentRelay/protocol.js').BackendToAgentMessage;
 type AgentConnection = import('../server/agentRelay/registry.js').AgentConnection;
@@ -25,6 +35,7 @@ class FakeConnection implements AgentConnection {
   readonly sent: BackendToAgentMessage[] = [];
   private callbacks: Array<(message: AgentToBackendMessage) => void> = [];
   private connected = true;
+  identity: { platform?: string; shell?: { kind: string; execPath: string } } | undefined;
   onClosed: (() => void) | undefined;
 
   isConnected() { return this.connected; }
@@ -35,6 +46,7 @@ class FakeConnection implements AgentConnection {
     this.connected = false;
     this.onClosed?.();
   }
+  getIdentity() { return this.identity; }
   receive(message: AgentToBackendMessage) {
     for (const callback of this.callbacks) callback(message);
   }
@@ -56,6 +68,125 @@ async function expectRejectsPromptly(promise: Promise<unknown>) {
 }
 
 migrate();
+
+// All ten file-op wire variants accept the pinned camelCase shapes.
+{
+  const requests: BackendToAgentMessage[] = [
+    { type: 'read_file_request', requestId: 'schema-read', path: 'a.txt', offset: 1, limit: 10 },
+    { type: 'write_file_request', requestId: 'schema-write', path: 'a.txt', content: 'hello', hasBeenRead: true },
+    {
+      type: 'edit_file_request',
+      requestId: 'schema-edit',
+      path: 'a.txt',
+      oldString: 'hello',
+      newString: 'world',
+      replaceAll: true,
+      hasBeenRead: true,
+    },
+    { type: 'delete_file_request', requestId: 'schema-delete', path: 'a.txt', recursive: false },
+    { type: 'list_directory_request', requestId: 'schema-list', path: '.' },
+  ];
+  const responses: AgentToBackendMessage[] = [
+    {
+      type: 'read_file_response',
+      requestId: 'schema-read',
+      ok: true,
+      content: '1\thello',
+      totalLines: 1,
+      startLine: 1,
+      endLine: 1,
+      truncated: false,
+    },
+    { type: 'write_file_response', requestId: 'schema-write', ok: true, bytesWritten: 5, created: false },
+    { type: 'edit_file_response', requestId: 'schema-edit', ok: true, replacementsMade: 1 },
+    { type: 'delete_file_response', requestId: 'schema-delete', ok: false, confirmation: 'declined' },
+    {
+      type: 'list_directory_response',
+      requestId: 'schema-list',
+      ok: true,
+      entries: [{ name: 'a.txt', type: 'file', sizeBytes: 5 }],
+      truncated: false,
+      totalEntries: 1,
+    },
+  ];
+  for (const request of requests) assert.equal(BackendToAgentMessageSchema.safeParse(request).success, true);
+  for (const response of responses) assert.equal(AgentToBackendMessageSchema.safeParse(response).success, true);
+  assert.equal(BackendToAgentMessageSchema.safeParse({
+    type: 'read_file_request',
+    requestId: 'invalid-offset',
+    path: 'a.txt',
+    offset: 0,
+  }).success, false);
+  assert.equal(AgentToBackendMessageSchema.safeParse({
+    type: 'write_file_response',
+    requestId: 'strict-response',
+    ok: true,
+    bytes_written: 5,
+  }).success, false);
+}
+
+// Hello identity is retained for disclosure text, while older hello messages
+// and connections that never sent hello remain undisclosed.
+{
+  const neverHello = connect('user-never-hello');
+  assert.equal(getAgentShellInfo('user-never-hello'), undefined);
+  neverHello.close();
+
+  const oldAgent = connect('user-old-agent');
+  oldAgent.receive({ type: 'hello', agentVersion: 'old', deviceName: 'old agent' });
+  assert.equal(getAgentShellInfo('user-old-agent'), undefined);
+  oldAgent.close();
+
+  const knownAgent = connect('user-known-agent');
+  knownAgent.identity = { platform: 'win32', shell: { kind: 'pwsh', execPath: 'C:\\Program Files\\PowerShell\\pwsh.exe' } };
+  assert.deepEqual(getAgentShellInfo('user-known-agent'), knownAgent.identity);
+  knownAgent.close();
+}
+
+// Shell disclosure covers local known/unknown, sandbox-only, both, and neither.
+{
+  const localKnown = connect('user-disclosure-known');
+  localKnown.identity = { platform: 'win32', shell: { kind: 'pwsh', execPath: 'pwsh.exe' } };
+  const knownDisclosure = buildRunCommandDisclosure('user-disclosure-known');
+  assert.match(knownDisclosure, /Windows/);
+  assert.match(knownDisclosure, /pwsh/);
+  assert.match(knownDisclosure, /\$env:VAR/);
+  assert.match(knownDisclosure, /\$\(\.\.\.\)/);
+  assert.match(knownDisclosure, /read_file.*write_file.*edit_file.*delete_file/);
+  const resolvedRun = buildResolvedBuiltinTool({
+    id: 'run-command', name: 'run_command', description: '', parameters_schema: '{}', type: 'builtin', config: null,
+  }, 'user-disclosure-known');
+  assert.ok(resolvedRun?.openAIDef.function.description.endsWith(knownDisclosure));
+  const resolvedWebSearch = buildResolvedBuiltinTool({
+    id: 'web-search', name: 'web_search', description: '', parameters_schema: '{}', type: 'builtin', config: null,
+  }, 'user-disclosure-known');
+  assert.equal(resolvedWebSearch?.openAIDef.function.description, getBuiltinDefinition('web_search')?.function.description);
+  localKnown.close();
+
+  const localUnknown = connect('user-disclosure-unknown');
+  assert.match(buildRunCommandDisclosure('user-disclosure-unknown'), /does not disclose its shell dialect/);
+  localUnknown.close();
+
+  const sandboxUser = 'user-disclosure-sandbox';
+  db.prepare('INSERT INTO users (id, email, password_hash) VALUES (?, ?, ?)').run(sandboxUser, `${sandboxUser}@example.com`, 'test');
+  db.prepare('INSERT INTO settings (user_id, key, value) VALUES (?, ?, ?)').run(sandboxUser, 'e2b_api_key', 'test-key');
+  const sandboxDisclosure = buildRunCommandDisclosure(sandboxUser);
+  assert.match(sandboxDisclosure, /ephemeral Linux VM running `\/bin\/bash`/);
+  assert.match(sandboxDisclosure, /POSIX\/bash syntax/);
+
+  const bothUser = 'user-disclosure-both';
+  db.prepare('INSERT INTO users (id, email, password_hash) VALUES (?, ?, ?)').run(bothUser, `${bothUser}@example.com`, 'test');
+  db.prepare('INSERT INTO settings (user_id, key, value) VALUES (?, ?, ?)').run(bothUser, 'e2b_api_key', 'test-key');
+  const both = connect(bothUser);
+  both.identity = { platform: 'linux', shell: { kind: 'bash', execPath: '/bin/bash' } };
+  const bothDisclosure = buildRunCommandDisclosure(bothUser);
+  assert.match(bothDisclosure, /Linux/);
+  assert.match(bothDisclosure, /ephemeral Linux VM running `\/bin\/bash`/);
+  both.close();
+
+  const neitherDisclosure = buildRunCommandDisclosure('user-disclosure-neither');
+  assert.equal(neitherDisclosure, '');
+}
 
 // Matching response resolves and output chunks are streamed.
 {
@@ -129,6 +260,116 @@ migrate();
   timeoutConnection.close();
 }
 
+// File-op responses share the pending-request map and resolve without wire metadata.
+{
+  const connection = connect('user-file-resolve');
+  const request = sendFileOpRequest<{
+    ok: boolean;
+    content?: string;
+    totalLines?: number;
+    startLine?: number;
+    endLine?: number;
+    truncated?: boolean;
+  }>(
+    'user-file-resolve',
+    { type: 'read_file_request', requestId: 'file-request-resolve', path: 'notes.txt', offset: 1, limit: 20 },
+    500,
+  );
+  assert.deepEqual(connection.sent.at(-1), {
+    type: 'read_file_request',
+    requestId: 'file-request-resolve',
+    path: 'notes.txt',
+    offset: 1,
+    limit: 20,
+  });
+  connection.receive({
+    type: 'read_file_response',
+    requestId: 'file-request-resolve',
+    ok: true,
+    content: '1\thello',
+    totalLines: 1,
+    startLine: 1,
+    endLine: 1,
+    truncated: false,
+  });
+  assert.deepEqual(await request, {
+    ok: true,
+    content: '1\thello',
+    totalLines: 1,
+    startLine: 1,
+    endLine: 1,
+    truncated: false,
+  });
+  connection.close();
+}
+
+// File-op disconnect and replacement rejection use the shared immediate path.
+{
+  const connection = connect('user-file-disconnect');
+  const first = sendFileOpRequest(
+    'user-file-disconnect',
+    { type: 'list_directory_request', requestId: 'file-request-disconnect-1', path: '.' },
+    5_000,
+  );
+  const second = sendFileOpRequest(
+    'user-file-disconnect',
+    { type: 'write_file_request', requestId: 'file-request-disconnect-2', path: 'new.txt', content: 'x', hasBeenRead: false },
+    5_000,
+  );
+  connection.close();
+  await Promise.all([expectRejectsPromptly(first), expectRejectsPromptly(second)]);
+
+  const oldConnection = connect('user-file-replace');
+  const pending = sendFileOpRequest(
+    'user-file-replace',
+    { type: 'edit_file_request', requestId: 'file-request-replaced', path: 'a.txt', oldString: 'a', newString: 'b', hasBeenRead: true },
+    5_000,
+  );
+  connect('user-file-replace');
+  assert.equal(oldConnection.isConnected(), false);
+  await expectRejectsPromptly(pending);
+}
+
+// Delete confirmation resets the shared timeout; an unconfirmed file op does not.
+{
+  const resetConnection = connect('user-file-reset');
+  const resetRequest = sendFileOpRequest<{
+    ok: boolean;
+    kind?: 'file' | 'directory';
+    confirmation?: 'declined' | 'timeout';
+  }>(
+    'user-file-reset',
+    { type: 'delete_file_request', requestId: 'file-request-reset', path: 'large', recursive: true },
+    200,
+  );
+  setTimeout(() => resetConnection.receive({
+    type: 'command_awaiting_confirmation',
+    requestId: 'file-request-reset',
+  }), 150);
+  setTimeout(() => resetConnection.receive({
+    type: 'delete_file_response',
+    requestId: 'file-request-reset',
+    ok: true,
+    kind: 'directory',
+  }), 300);
+  assert.deepEqual(await resetRequest, { ok: true, kind: 'directory' });
+  resetConnection.close();
+
+  const timeoutConnection = connect('user-file-timeout');
+  const startedAt = Date.now();
+  await assert.rejects(
+    sendFileOpRequest(
+      'user-file-timeout',
+      { type: 'list_directory_request', requestId: 'file-request-timeout', path: '.' },
+      200,
+    ),
+    (error: unknown) => typeof error === 'object' && error !== null && 'error' in error
+      && (error as { error: string }).error === 'local agent command timed out',
+  );
+  assert.ok(Date.now() - startedAt >= 175, 'file request must retain its original timeout');
+  timeoutConnection.close();
+}
+
 // Pairing persists only a token hash, consumes the code once, and revocation invalidates validation.
 {
   const userId = 'relay-test-user';
@@ -148,7 +389,8 @@ migrate();
   assert.equal(validateAgentToken(paired.token), null);
 }
 
-// Real WebSocket upgrade: bearer auth, hello/heartbeat ack, and malformed input resilience.
+// Real WebSocket upgrade: bearer auth, hello/heartbeat ack, file-op validation,
+// and malformed input resilience.
 {
   const userId = 'relay-ws-user';
   db.prepare('INSERT INTO users (id, email, password_hash) VALUES (?, ?, ?)').run(userId, 'relay-ws@example.com', 'test');
@@ -162,27 +404,74 @@ migrate();
   const url = `ws://127.0.0.1:${address.port}/api/agent/connect`;
   const originalWarn = console.warn;
   const warnings: unknown[][] = [];
+  let observedIdentity: unknown;
   console.warn = (...args: unknown[]) => warnings.push(args);
 
   try {
     await new Promise<void>((resolve, reject) => {
       const socket = new WebSocket(url, { headers: { Authorization: `Bearer ${paired.token}` } });
       const seen = new Set<string>();
+      let fileRequestStarted = false;
+      let fileResponseResolved = false;
       const timer = setTimeout(() => reject(new Error('WebSocket acknowledgement timeout')), 1_000);
-      socket.on('open', () => {
-        socket.send('not-json');
-        socket.send(JSON.stringify({ type: 'hello', agentVersion: 'test', deviceName: 'WebSocket test device' }));
-        socket.send(JSON.stringify({ type: 'heartbeat' }));
-      });
-      socket.on('message', (raw) => {
-        seen.add((JSON.parse(raw.toString()) as { type: string }).type);
-        if (!seen.has('hello_ack') || !seen.has('heartbeat_ack')) return;
+      const finishIfComplete = () => {
+        if (!seen.has('hello_ack') || !seen.has('heartbeat_ack') || !fileResponseResolved) return;
+        observedIdentity = getAgentShellInfo(userId);
         clearTimeout(timer);
         socket.close();
         resolve();
+      };
+      socket.on('open', () => {
+        socket.send('not-json');
+        socket.send(JSON.stringify({
+          type: 'hello',
+          agentVersion: 'test',
+          deviceName: 'WebSocket test device',
+          platform: 'linux',
+          shell: { kind: 'bash', execPath: '/bin/bash' },
+        }));
+        socket.send(JSON.stringify({ type: 'heartbeat' }));
+      });
+      socket.on('message', (raw) => {
+        const message = JSON.parse(raw.toString()) as BackendToAgentMessage;
+        seen.add(message.type);
+        if (message.type === 'hello_ack' && !fileRequestStarted) {
+          fileRequestStarted = true;
+          sendFileOpRequest<{ ok: boolean; entries?: unknown[] }>(
+            userId,
+            { type: 'list_directory_request', requestId: 'ws-file-request', path: '.' },
+            500,
+          ).then((result) => {
+            assert.deepEqual(result, {
+              ok: true,
+              entries: [{ name: 'notes.txt', type: 'file', sizeBytes: 5 }],
+              truncated: false,
+              totalEntries: 1,
+            });
+            fileResponseResolved = true;
+            finishIfComplete();
+          }, reject);
+        }
+        if (message.type === 'list_directory_request') {
+          assert.deepEqual(message, {
+            type: 'list_directory_request',
+            requestId: 'ws-file-request',
+            path: '.',
+          });
+          socket.send(JSON.stringify({
+            type: 'list_directory_response',
+            requestId: message.requestId,
+            ok: true,
+            entries: [{ name: 'notes.txt', type: 'file', sizeBytes: 5 }],
+            truncated: false,
+            totalEntries: 1,
+          }));
+        }
+        finishIfComplete();
       });
       socket.on('error', reject);
     });
+    assert.deepEqual(observedIdentity, { platform: 'linux', shell: { kind: 'bash', execPath: '/bin/bash' } });
 
     await new Promise<void>((resolve, reject) => {
       const socket = new WebSocket(url, { headers: { Authorization: 'Bearer invalid-token' } });

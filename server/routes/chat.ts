@@ -933,12 +933,9 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
           res.write(`data: ${JSON.stringify({ tool_call: { id, name, arguments: argsStr, source } })}\n\n`);
 
           const startedAt = Date.now();
-          let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
-          if (name === 'run_command') {
-            keepaliveTimer = setInterval(() => {
-              if (!clientDisconnected && !res.writableEnded) res.write(': keepalive\n\n');
-            }, 15_000);
-          }
+          const keepaliveTimer = setInterval(() => {
+            if (!clientDisconnected && !res.writableEnded) res.write(': keepalive\n\n');
+          }, 15_000);
 
           let result;
           try {
@@ -951,9 +948,9 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
                   res.write(`data: ${JSON.stringify(buildToolOutputChunkEvent(id, chunk, outputSeq++))}\n\n`);
                 },
               })
-              : await runTool(resolvedTools, name, args, mcpClients, userId);
+              : await runTool(resolvedTools, name, args, mcpClients, userId, conversation_id);
           } finally {
-            if (keepaliveTimer) clearInterval(keepaliveTimer);
+            clearInterval(keepaliveTimer);
           }
           const durationMs = Date.now() - startedAt;
           toolCallCount++;

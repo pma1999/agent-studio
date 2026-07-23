@@ -9,7 +9,7 @@ import type { CouncilResponse, ToolExecution, ToolSource, ToolCallSpec, ToolResu
 
 function inferToolSource(name: string): ToolSource {
   if (name.startsWith('mcp_')) return 'mcp';
-  if (name === 'web_search' || name === 'get_current_time' || name === 'web_fetch' || name === 'run_command') return 'builtin';
+  if (name === 'web_search' || name === 'get_current_time' || name === 'web_fetch' || name === 'run_command' || name === 'read_file' || name === 'write_file' || name === 'edit_file' || name === 'delete_file' || name === 'list_directory') return 'builtin';
   if (name.startsWith('http_') || name.includes('_http')) return 'http';
   return 'unknown';
 }

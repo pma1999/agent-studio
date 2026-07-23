@@ -667,6 +667,104 @@ export function migrate() {
     `UPDATE tools SET description = ?, parameters_schema = ? WHERE name = 'run_command' AND type = 'builtin'`
   ).run(runCommandDesc, JSON.stringify(runCommandSchema));
 
+  // Migration: ensure every user has the local file-operation builtins. These
+  // rows are copied to newly registered users by auth.ts, so keep this seed and
+  // the registry definitions aligned manually.
+  const fileToolSeeds = [
+    {
+      name: 'read_file',
+      description: 'Read a text file from the connected local agent with line numbers (like cat -n) and offset/limit paging (defaults to the first 2000 lines). Binary files are rejected. Requires a connected local agent.',
+      schema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File path relative to the workspace root.' },
+          offset: { type: 'number', description: '1-based first line to read. Defaults to 1.' },
+          limit: { type: 'number', description: 'Maximum number of lines to read. Defaults to 2000.' },
+        },
+        required: ['path'],
+      },
+    },
+    {
+      name: 'write_file',
+      description: 'Create or overwrite a text file with the exact content provided (without shell quoting); parent directories are created automatically. Before overwriting an existing file, you must read it first with read_file. Requires a connected local agent.',
+      schema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File path relative to the workspace root.' },
+          content: { type: 'string', description: 'Exact text content to write.' },
+        },
+        required: ['path', 'content'],
+      },
+    },
+    {
+      name: 'edit_file',
+      description: 'Replace an exact, unique text match in a file; set replace_all to replace every match. You must read an existing file first with read_file before editing it. Requires a connected local agent.',
+      schema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File path relative to the workspace root.' },
+          old_string: { type: 'string', description: 'Exact text to find.' },
+          new_string: { type: 'string', description: 'Text to insert in place of the match.' },
+          replace_all: { type: 'boolean', description: 'Replace all matches instead of requiring an exact unique match.' },
+        },
+        required: ['path', 'old_string', 'new_string'],
+      },
+    },
+    {
+      name: 'delete_file',
+      description: 'Delete a file or directory; recursive is required for a non-empty directory. Deletes outside the workspace or large/recursive deletes require local human confirmation within 60 seconds. Requires a connected local agent.',
+      schema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File or directory path relative to the workspace root.' },
+          recursive: { type: 'boolean', description: 'Allow deletion of a directory and its contents.' },
+        },
+        required: ['path'],
+      },
+    },
+    {
+      name: 'list_directory',
+      description: 'List one level of a directory (non-recursively); defaults to the workspace root. Requires a connected local agent.',
+      schema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: "Directory path relative to the workspace root. Defaults to '.'." },
+        },
+        required: [],
+      },
+    },
+  ];
+  const existingFileToolStmt = db.prepare('SELECT id, type FROM tools WHERE user_id = ? AND name = ?');
+  const hasToolNameStmt = db.prepare('SELECT 1 FROM tools WHERE user_id = ? AND name = ?');
+  const renameCustomToolStmt = db.prepare('UPDATE tools SET name = ? WHERE id = ?');
+  const insertFileToolStmt = db.prepare(`
+    INSERT INTO tools (id, user_id, name, description, parameters_schema, type, config)
+    VALUES (?, ?, ?, ?, ?, 'builtin', NULL)
+  `);
+  for (const fileTool of fileToolSeeds) {
+    for (const { id: uid } of allUserIds) {
+      const existingTool = existingFileToolStmt.get(uid, fileTool.name) as { id: string; type: string } | undefined;
+      if (existingTool?.type === 'builtin') continue;
+      if (existingTool) {
+        const customNameBase = `${fileTool.name}_custom`;
+        let customName = customNameBase;
+        let suffix = 2;
+        while (hasToolNameStmt.get(uid, customName)) {
+          customName = `${customNameBase}_${suffix}`;
+          suffix += 1;
+        }
+        // Keep the custom row's id, config, schema, and description intact while
+        // freeing the builtin's canonical name under UNIQUE(user_id, name).
+        renameCustomToolStmt.run(customName, existingTool.id);
+      }
+      const { nanoid } = await_nanoid();
+      insertFileToolStmt.run(nanoid(), uid, fileTool.name, fileTool.description, JSON.stringify(fileTool.schema));
+    }
+    db.prepare(
+      `UPDATE tools SET description = ?, parameters_schema = ? WHERE name = ? AND type = 'builtin'`
+    ).run(fileTool.description, JSON.stringify(fileTool.schema), fileTool.name);
+  }
+
   // --- Model Council migrations ---
   migrateCouncilTables();
 

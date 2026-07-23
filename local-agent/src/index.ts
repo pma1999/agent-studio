@@ -10,6 +10,8 @@ import { createInterface } from 'node:readline/promises';
 import { loadConfig, saveConfig, getConfigPath, type LocalAgentConfig } from './config.js';
 import { connectAgent, type AgentTransportHandle, type BackendToAgentMessage } from './transport.js';
 import { createCommandExecutor, createConsoleConfirmer, type CommandExecutor } from './commandExecutor.js';
+import { createFileOpsExecutor, type FileOpsExecutor } from './fileOpsExecutor.js';
+import { createShellDetector } from './shellDetection.js';
 
 const AGENT_VERSION = '1.0.0';
 const DEFAULT_BACKEND_URL = 'http://localhost:3001';
@@ -163,6 +165,7 @@ async function runPairingFlow(): Promise<LocalAgentConfig> {
 function dispatch(
   message: BackendToAgentMessage,
   executor: CommandExecutor,
+  fileOpsExecutor: FileOpsExecutor,
   onHelloAck: (agentId: string) => void
 ): void {
   switch (message.type) {
@@ -178,6 +181,21 @@ function dispatch(
     case 'command_cancel':
       executor.handleCommandCancel(message.requestId);
       break;
+    case 'read_file_request':
+      void fileOpsExecutor.handleReadFileRequest(message);
+      break;
+    case 'write_file_request':
+      void fileOpsExecutor.handleWriteFileRequest(message);
+      break;
+    case 'edit_file_request':
+      void fileOpsExecutor.handleEditFileRequest(message);
+      break;
+    case 'delete_file_request':
+      void fileOpsExecutor.handleDeleteFileRequest(message);
+      break;
+    case 'list_directory_request':
+      void fileOpsExecutor.handleListDirectoryRequest(message);
+      break;
   }
 }
 
@@ -191,8 +209,25 @@ async function main(): Promise<void> {
 
   const confirmTier2 = createConsoleConfirmer(rl);
 
+  // Detected once, here, at startup — cached for the process lifetime and
+  // reused across every reconnect attempt below (never re-detected per
+  // connection, and never re-probed per command: `createShellDetector()`'s
+  // returned function memoizes its own result).
+  const detectShell = createShellDetector();
+  const shell = detectShell();
+  console.log(`[local-agent] detected shell: ${shell.kind} (${shell.execPath})`);
+
   let transportHandle: AgentTransportHandle | undefined;
   const executor = createCommandExecutor({
+    workspaceRoot: config.workspaceRoot,
+    allowOutsideWorkspace: config.allowOutsideWorkspace,
+    confirmTier2,
+    shell,
+    send: (message) => transportHandle?.send(message),
+  });
+  // Reuses the SAME confirmTier2 instance passed to createCommandExecutor
+  // above — never a second confirmer.
+  const fileOpsExecutor = createFileOpsExecutor({
     workspaceRoot: config.workspaceRoot,
     allowOutsideWorkspace: config.allowOutsideWorkspace,
     confirmTier2,
@@ -208,8 +243,10 @@ async function main(): Promise<void> {
         token: config.token,
         agentVersion: AGENT_VERSION,
         deviceName: os.hostname(),
+        platform: process.platform,
+        shell,
         onMessage: (message) => {
-          dispatch(message, executor, () => {
+          dispatch(message, executor, fileOpsExecutor, () => {
             backoffMs = INITIAL_BACKOFF_MS;
           });
         },

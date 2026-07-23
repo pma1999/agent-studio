@@ -135,7 +135,8 @@ export async function runTool(
   toolName: string,
   args: Record<string, unknown>,
   mcpClients?: Map<string, McpConnection>,
-  userId?: string
+  userId?: string,
+  conversationId?: string,
 ): Promise<RunToolResult> {
   let tool = resolvedTools.find((t) => t.name === toolName);
 
@@ -167,7 +168,7 @@ export async function runTool(
     if (tool.type === 'builtin') {
       const executor = getBuiltinExecutor(tool.name);
       if (!executor) return { output: JSON.stringify({ error: `Builtin tool not implemented: ${tool.name}` }), isError: true, source: 'builtin' };
-      const output = await executor(parsedArgs, tool.config, userId);
+      const output = await executor(parsedArgs, tool.config, userId, conversationId);
       return { output, isError: inferIsErrorOutput(output), source: 'builtin' };
     }
 

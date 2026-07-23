@@ -3,7 +3,16 @@ import { z } from 'zod';
 import db from '../db.js';
 
 export const AgentToBackendMessageSchema = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('hello'), agentVersion: z.string(), deviceName: z.string() }).strict(),
+  z.object({
+    type: z.literal('hello'),
+    agentVersion: z.string(),
+    deviceName: z.string(),
+    platform: z.string().optional(),
+    shell: z.object({
+      kind: z.enum(['pwsh', 'powershell', 'cmd', 'bash', 'sh']),
+      execPath: z.string(),
+    }).strict().optional(),
+  }).strict(),
   z.object({ type: z.literal('heartbeat') }).strict(),
   z.object({ type: z.literal('command_awaiting_confirmation'), requestId: z.string() }).strict(),
   z.object({
@@ -23,6 +32,53 @@ export const AgentToBackendMessageSchema = z.discriminatedUnion('type', [
     blockedPattern: z.string().optional(),
     confirmation: z.enum(['approved', 'declined', 'timeout']).optional(),
   }).strict(),
+  z.object({
+    type: z.literal('read_file_response'),
+    requestId: z.string(),
+    ok: z.boolean(),
+    error: z.string().optional(),
+    content: z.string().optional(),
+    totalLines: z.number().int().nonnegative().optional(),
+    startLine: z.number().int().positive().optional(),
+    endLine: z.number().int().nonnegative().optional(),
+    truncated: z.boolean().optional(),
+  }).strict(),
+  z.object({
+    type: z.literal('write_file_response'),
+    requestId: z.string(),
+    ok: z.boolean(),
+    error: z.string().optional(),
+    bytesWritten: z.number().int().nonnegative().optional(),
+    created: z.boolean().optional(),
+  }).strict(),
+  z.object({
+    type: z.literal('edit_file_response'),
+    requestId: z.string(),
+    ok: z.boolean(),
+    error: z.string().optional(),
+    replacementsMade: z.number().int().nonnegative().optional(),
+  }).strict(),
+  z.object({
+    type: z.literal('delete_file_response'),
+    requestId: z.string(),
+    ok: z.boolean(),
+    error: z.string().optional(),
+    kind: z.enum(['file', 'directory']).optional(),
+    confirmation: z.enum(['declined', 'timeout']).optional(),
+  }).strict(),
+  z.object({
+    type: z.literal('list_directory_response'),
+    requestId: z.string(),
+    ok: z.boolean(),
+    error: z.string().optional(),
+    entries: z.array(z.object({
+      name: z.string(),
+      type: z.enum(['file', 'directory', 'symlink', 'other']),
+      sizeBytes: z.number().int().nonnegative().optional(),
+    }).strict()).optional(),
+    truncated: z.boolean().optional(),
+    totalEntries: z.number().int().nonnegative().optional(),
+  }).strict(),
 ]);
 
 export const BackendToAgentMessageSchema = z.discriminatedUnion('type', [
@@ -36,6 +92,40 @@ export const BackendToAgentMessageSchema = z.discriminatedUnion('type', [
     timeoutMs: z.number().int().positive(),
   }).strict(),
   z.object({ type: z.literal('command_cancel'), requestId: z.string() }).strict(),
+  z.object({
+    type: z.literal('read_file_request'),
+    requestId: z.string(),
+    path: z.string(),
+    offset: z.number().int().positive().optional(),
+    limit: z.number().int().positive().optional(),
+  }).strict(),
+  z.object({
+    type: z.literal('write_file_request'),
+    requestId: z.string(),
+    path: z.string(),
+    content: z.string(),
+    hasBeenRead: z.boolean(),
+  }).strict(),
+  z.object({
+    type: z.literal('edit_file_request'),
+    requestId: z.string(),
+    path: z.string(),
+    oldString: z.string(),
+    newString: z.string(),
+    replaceAll: z.boolean().optional(),
+    hasBeenRead: z.boolean(),
+  }).strict(),
+  z.object({
+    type: z.literal('delete_file_request'),
+    requestId: z.string(),
+    path: z.string(),
+    recursive: z.boolean().optional(),
+  }).strict(),
+  z.object({
+    type: z.literal('list_directory_request'),
+    requestId: z.string(),
+    path: z.string(),
+  }).strict(),
 ]);
 
 export type AgentToBackendMessage = z.infer<typeof AgentToBackendMessageSchema>;

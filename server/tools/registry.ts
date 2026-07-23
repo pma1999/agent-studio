@@ -5,9 +5,16 @@
 
 import { runWebSearch, type WebSearchResult, type BraveSearchOptions } from './webSearch.js';
 import { runWebFetch } from './webFetch.js';
+import {
+  deleteFileTool,
+  editFileTool,
+  listDirectoryTool,
+  readFileTool,
+  writeFileTool,
+} from './execFileOps.js';
 import { getSettingValue } from '../routes/settings.js';
 
-export type ToolExecutor = (args: Record<string, unknown>, config?: unknown, userId?: string) => Promise<string>;
+export type ToolExecutor = (args: Record<string, unknown>, config?: unknown, userId?: string, conversationId?: string) => Promise<string>;
 
 export interface OpenAIToolDef {
   type: 'function';
@@ -96,11 +103,88 @@ Si la página objetivo parece bloqueada, muestra un captcha, un muro de pago o c
       },
     },
   },
+  read_file: {
+    type: 'function',
+    function: {
+      name: 'read_file',
+      description: 'Read a text file from the connected local agent with line numbers (like cat -n) and offset/limit paging (defaults to the first 2000 lines). Binary files are rejected. Requires a connected local agent.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File path relative to the workspace root.' },
+          offset: { type: 'number', description: '1-based first line to read. Defaults to 1.' },
+          limit: { type: 'number', description: 'Maximum number of lines to read. Defaults to 2000.' },
+        },
+        required: ['path'],
+      },
+    },
+  },
+  write_file: {
+    type: 'function',
+    function: {
+      name: 'write_file',
+      description: 'Create or overwrite a text file with the exact content provided (without shell quoting); parent directories are created automatically. Before overwriting an existing file, you must read it first with read_file. Requires a connected local agent.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File path relative to the workspace root.' },
+          content: { type: 'string', description: 'Exact text content to write.' },
+        },
+        required: ['path', 'content'],
+      },
+    },
+  },
+  edit_file: {
+    type: 'function',
+    function: {
+      name: 'edit_file',
+      description: 'Replace an exact, unique text match in a file; set replace_all to replace every match. You must read an existing file first with read_file before editing it. Requires a connected local agent.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File path relative to the workspace root.' },
+          old_string: { type: 'string', description: 'Exact text to find.' },
+          new_string: { type: 'string', description: 'Text to insert in place of the match.' },
+          replace_all: { type: 'boolean', description: 'Replace all matches instead of requiring an exact unique match.' },
+        },
+        required: ['path', 'old_string', 'new_string'],
+      },
+    },
+  },
+  delete_file: {
+    type: 'function',
+    function: {
+      name: 'delete_file',
+      description: 'Delete a file or directory; recursive is required for a non-empty directory. Deletes outside the workspace or large/recursive deletes require local human confirmation within 60 seconds. Requires a connected local agent.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File or directory path relative to the workspace root.' },
+          recursive: { type: 'boolean', description: 'Allow deletion of a directory and its contents.' },
+        },
+        required: ['path'],
+      },
+    },
+  },
+  list_directory: {
+    type: 'function',
+    function: {
+      name: 'list_directory',
+      description: 'List one level of a directory (non-recursively); defaults to the workspace root. Requires a connected local agent.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: "Directory path relative to the workspace root. Defaults to '.'." },
+        },
+        required: [],
+      },
+    },
+  },
   run_command: {
     type: 'function',
     function: {
       name: 'run_command',
-      description: "Execute a shell command in a real, persistent working environment (a paired local machine or an isolated cloud sandbox) to run scripts, install packages, inspect/edit files, or call CLIs. Returns stdout, stderr, and exit_code as JSON; a non-zero exit_code or non-empty stderr does not necessarily mean the command failed to run — inspect the output. Available backends: 'local' (the user's own paired machine — real files, installed tools, persists across calls) and 'sandbox' (an ephemeral isolated cloud VM — no access to the user's files, resets between conversations, requires the user's own sandbox account). Use backend='auto' (default) to let the system pick whichever is configured; specify 'local' or 'sandbox' only when the task specifically needs that environment's characteristics.",
+      description: "Execute a shell command in a real, persistent working environment (a paired local machine or an isolated cloud sandbox) to run scripts, install packages, inspect/edit files, or call CLIs. Returns stdout, stderr, and exit_code as JSON; a non-zero exit_code or non-empty stderr does not necessarily mean the command failed to run — inspect the output. Available backends: 'local' (the user's own paired machine — real files, installed tools, persists across calls) and 'sandbox' (an ephemeral isolated cloud VM — no access to the user's files, resets between conversations, requires the user's own sandbox account). Use backend='auto' (default) to let the system pick whichever is configured; specify 'local' or 'sandbox' only when the task specifically needs that environment's characteristics. Prefer the dedicated read_file/write_file/edit_file/delete_file tools over shell redirection or heredocs for creating/editing files.",
       parameters: {
         type: 'object',
         properties: {
@@ -173,6 +257,26 @@ const executors: Record<string, ToolExecutor> = {
       source: result.source,
       source_note: result.source_note,
     });
+  },
+
+  async read_file(args: Record<string, unknown>, _config?: unknown, userId?: string, conversationId?: string): Promise<string> {
+    return readFileTool(args, userId!, conversationId);
+  },
+
+  async write_file(args: Record<string, unknown>, _config?: unknown, userId?: string, conversationId?: string): Promise<string> {
+    return writeFileTool(args, userId!, conversationId);
+  },
+
+  async edit_file(args: Record<string, unknown>, _config?: unknown, userId?: string, conversationId?: string): Promise<string> {
+    return editFileTool(args, userId!, conversationId);
+  },
+
+  async delete_file(args: Record<string, unknown>, _config?: unknown, userId?: string, conversationId?: string): Promise<string> {
+    return deleteFileTool(args, userId!, conversationId);
+  },
+
+  async list_directory(args: Record<string, unknown>, _config?: unknown, userId?: string, conversationId?: string): Promise<string> {
+    return listDirectoryTool(args, userId!, conversationId);
   },
 
   async run_command(): Promise<string> {

@@ -52,6 +52,15 @@ function makeSpawnFn(): { spawnFn: SpawnFn; children: FakeChildProcess[] } {
   return { spawnFn, children };
 }
 
+/**
+ * Fixed to `cmd` in tests: with `spawnFn` faked out entirely (every test
+ * below injects its own `spawnFn` that ignores the `ShellInvocation` it
+ * receives and returns a `FakeChildProcess`), the specific detected shell
+ * never affects test behavior — only `buildShellInvocation`'s own dedicated
+ * coverage in `shellDetection.test.ts` exercises the encoding differences.
+ */
+const TEST_SHELL: CommandExecutorOptions['shell'] = { kind: 'cmd', execPath: 'C:\\Windows\\System32\\cmd.exe' };
+
 function makeExecutor(overrides: Partial<CommandExecutorOptions> & { spawnFn?: SpawnFn } = {}) {
   const sent: AgentToBackendMessage[] = [];
   const options: CommandExecutorOptions = {
@@ -59,6 +68,7 @@ function makeExecutor(overrides: Partial<CommandExecutorOptions> & { spawnFn?: S
     allowOutsideWorkspace: false,
     send: (message) => sent.push(message),
     confirmTier2: async () => 'approved',
+    shell: TEST_SHELL,
     ...overrides,
   };
   return { executor: createCommandExecutor(options), sent };

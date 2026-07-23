@@ -5,6 +5,7 @@ export interface AgentConnection {
   send(msg: BackendToAgentMessage): void;
   onMessage(cb: (msg: AgentToBackendMessage) => void): void;
   close(reason?: string): void;
+  getIdentity?(): { platform?: string; shell?: { kind: string; execPath: string } } | undefined;
 }
 
 type CommandResult = {
@@ -21,7 +22,7 @@ type PendingRequest = {
   connection: AgentConnection;
   timeoutMs: number;
   timer: NodeJS.Timeout;
-  resolve: (result: CommandResult) => void;
+  resolve: (result: any) => void;
   reject: (error: { error: string }) => void;
   onOutputChunk: (chunk: { stream: 'stdout' | 'stderr'; text: string }) => void;
 };
@@ -71,6 +72,19 @@ function handleMessage(connection: AgentConnection, message: AgentToBackendMessa
     const { type: _type, requestId: _requestId, ...result } = message;
     pending.resolve(result);
   }
+
+  if (
+    message.type === 'read_file_response'
+    || message.type === 'write_file_response'
+    || message.type === 'edit_file_response'
+    || message.type === 'delete_file_response'
+    || message.type === 'list_directory_response'
+  ) {
+    clearTimeout(pending.timer);
+    pendingRequests.delete(message.requestId);
+    const { type: _type, requestId: _requestId, ...result } = message;
+    pending.resolve(result);
+  }
 }
 
 export function registerAgentConnection(userId: string, connection: AgentConnection): void {
@@ -101,6 +115,13 @@ export function getAgentConnection(userId: string): AgentConnection | undefined 
 
 export function isAgentConnected(userId: string): boolean {
   return getAgentConnection(userId) !== undefined;
+}
+
+export function getAgentShellInfo(userId: string): {
+  platform?: string;
+  shell?: { kind: string; execPath: string };
+} | undefined {
+  return getAgentConnection(userId)?.getIdentity?.();
 }
 
 export function sendCommandRequest(
@@ -136,6 +157,41 @@ export function sendCommandRequest(
     } catch {
       clearTimeout(pending.timer);
       pendingRequests.delete(requestId);
+      reject({ error: 'local agent disconnected mid-command' });
+    }
+  });
+}
+
+export function sendFileOpRequest<T extends Record<string, unknown>>(
+  userId: string,
+  request: BackendToAgentMessage & { requestId: string },
+  timeoutMs: number,
+): Promise<T> {
+  const connection = getAgentConnection(userId);
+  if (!connection) {
+    return Promise.reject({ error: 'local agent is not connected' });
+  }
+  if (pendingRequests.has(request.requestId)) {
+    return Promise.reject({ error: 'duplicate local agent request id' });
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    const pending = {
+      userId,
+      connection,
+      timeoutMs,
+      timer: undefined as unknown as NodeJS.Timeout,
+      resolve,
+      reject,
+      onOutputChunk: () => {},
+    };
+    pending.timer = startTimeout(request.requestId, pending);
+    pendingRequests.set(request.requestId, pending);
+    try {
+      connection.send(request);
+    } catch {
+      clearTimeout(pending.timer);
+      pendingRequests.delete(request.requestId);
       reject({ error: 'local agent disconnected mid-command' });
     }
   });

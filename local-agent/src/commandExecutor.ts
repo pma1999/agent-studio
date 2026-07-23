@@ -9,6 +9,7 @@
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { scanCommand, isPathWithinRoot } from '../../shared/commandSafety.js';
+import { buildShellInvocation, type DetectedShell, type ShellInvocation } from './shellDetection.js';
 import type { AgentToBackendMessage, CommandRequestMessage } from './transport.js';
 
 /** Same allowlist-baseline principle as task-03's `mcp/client.ts` `SAFE_STDIO_ENV_KEYS`. */
@@ -70,24 +71,42 @@ export interface MinimalChildProcess {
   kill(signal?: NodeJS.Signals | number): boolean;
 }
 
+/**
+ * Reworked (task-01) to take the already-built `ShellInvocation` rather than
+ * a bare command string + `shell: true`. This is what lets pwsh/bash spawn
+ * via explicit argv (`useShellTrue: false`) while `cmd` keeps today's exact
+ * `spawn(command, {shell:true, cwd, env})` path (`useShellTrue: true`) — see
+ * `shellDetection.ts`'s `buildShellInvocation`.
+ */
 export type SpawnFn = (
-  command: string,
-  options: { shell: true; cwd: string; env: NodeJS.ProcessEnv }
+  invocation: ShellInvocation,
+  options: { cwd: string; env: NodeJS.ProcessEnv }
 ) => MinimalChildProcess;
 
 export type KillTreeFn = (child: MinimalChildProcess) => void;
 
-const defaultSpawnFn: SpawnFn = (command, options) => spawn(command, options) as unknown as MinimalChildProcess;
+const defaultSpawnFn: SpawnFn = (invocation, options) => {
+  if (invocation.useShellTrue) {
+    // Last-resort cmd.exe path: today's exact, unmodified call — Node's own
+    // shell:true quoting for cmd.exe is correct and must not be hand-rolled.
+    return spawn(invocation.command, { shell: true, cwd: options.cwd, env: options.env }) as unknown as MinimalChildProcess;
+  }
+  return spawn(invocation.file, invocation.args, { cwd: options.cwd, env: options.env }) as unknown as MinimalChildProcess;
+};
 
 /**
  * Best-effort process-tree kill. Plain `child.kill()` is not sufficient here:
- * `shell: true` spawns an intermediary shell (`cmd.exe` via `COMSPEC` on
- * Windows) whose own children do not reliably receive a signal sent to the
- * shell process itself, so a killed shell can leave its real child (e.g. the
- * `npm.cmd` -> `node.exe` it launched) still running. On Windows we instead
- * use `taskkill /pid <pid> /t /f` (`/t` = kill the whole process tree) via a
- * follow-up spawn, per the named risk in the task brief. Non-Windows keeps a
- * SIGTERM-then-SIGKILL grace period for when cross-platform support lands.
+ * the spawned shell (`pwsh.exe`/`powershell.exe`/`cmd.exe` on Windows,
+ * whichever `createShellDetector()` picked — see `shellDetection.ts`) is
+ * itself only an intermediary, and its own children do not reliably receive
+ * a signal sent to that shell process itself, so a killed shell can leave
+ * its real child (e.g. the `npm.cmd` -> `node.exe` it launched) still
+ * running. On Windows we instead use `taskkill /pid <pid> /t /f` (`/t` =
+ * kill the whole process tree) via a follow-up spawn, per the named risk in
+ * the task brief — empirically verified (task-01 report) to still kill the
+ * full tree regardless of which shell is the immediate child. Non-Windows
+ * keeps a SIGTERM-then-SIGKILL grace period for when cross-platform support
+ * lands.
  */
 export const defaultKillTree: KillTreeFn = (child) => {
   if (!child.pid) return;
@@ -106,6 +125,8 @@ export interface CommandExecutorOptions {
   allowOutsideWorkspace: boolean;
   send: SendFn;
   confirmTier2: ConfirmFn;
+  /** Detected once at startup (`createShellDetector()`) and reused for every command. */
+  shell: DetectedShell;
   spawnFn?: SpawnFn;
   killTreeFn?: KillTreeFn;
   /** Overridable for tests; defaults to `DEFAULT_MAX_OUTPUT_CHARS_PER_STREAM`. */
@@ -176,7 +197,8 @@ export function createCommandExecutor(options: CommandExecutorOptions): CommandE
     let stderrCapped = false;
     let finalized = false;
 
-    const child = spawnFn(request.command, { shell: true, cwd: resolvedCwd, env: buildSafeEnv() });
+    const invocation = buildShellInvocation(options.shell, request.command);
+    const child = spawnFn(invocation, { cwd: resolvedCwd, env: buildSafeEnv() });
     activeChildren.set(request.requestId, child);
 
     const backstop = setTimeout(() => killTreeFn(child), request.timeoutMs);

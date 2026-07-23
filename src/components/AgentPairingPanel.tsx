@@ -142,8 +142,8 @@ export function AgentPairingPanel() {
 
       <p style={{ fontSize: '0.8125rem', color: 'var(--text-muted)', margin: 0, lineHeight: 1.6 }}>
         Pair your own Windows machine so agents can use the run_command tool's "local"
-        backend — real files, installed tools, and state that persists between calls, not
-        an ephemeral sandbox.
+        backend and the file tools (read, write, edit, delete, list) — real files,
+        installed tools, and state that persists between calls, not an ephemeral sandbox.
       </p>
 
       <div style={{

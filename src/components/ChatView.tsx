@@ -54,7 +54,7 @@ const EFFORT_OPTIONS: { value: ReasoningEffort; label: string; short: string }[]
   { value: 'xhigh', label: 'Maximum', short: 'Max' },
 ];
 
-const BUILTIN_TOOL_NAMES = new Set(['web_search', 'get_current_time', 'web_fetch', 'run_command']);
+const BUILTIN_TOOL_NAMES = new Set(['web_search', 'get_current_time', 'web_fetch', 'run_command', 'read_file', 'write_file', 'edit_file', 'delete_file', 'list_directory']);
 
 function inferToolSource(name: string): ToolSource {
   if (name.startsWith('mcp_')) return 'mcp';

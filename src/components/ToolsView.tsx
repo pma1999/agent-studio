@@ -12,6 +12,11 @@ const BUILTIN_OPTIONS = [
   { value: 'get_current_time', label: 'Current Time', desc: 'Get current date/time in ISO format' },
   { value: 'web_fetch', label: 'Web Fetch', desc: 'Fetch URL content as markdown/text via Jina Reader (optional API key in Settings)' },
   { value: 'run_command', label: 'Run Command', desc: 'Execute shell commands via a paired local machine or cloud sandbox' },
+  { value: 'read_file', label: 'Read File', desc: 'Read a file from a paired local machine, with line numbers' },
+  { value: 'write_file', label: 'Write File', desc: 'Create or overwrite a file on a paired local machine' },
+  { value: 'edit_file', label: 'Edit File', desc: 'Replace an exact text match in a file on a paired local machine' },
+  { value: 'delete_file', label: 'Delete File', desc: 'Delete a file or directory on a paired local machine' },
+  { value: 'list_directory', label: 'List Directory', desc: 'List the contents of a directory on a paired local machine' },
 ];
 
 const PARAM_TYPES = [
@@ -330,7 +335,7 @@ export function ToolsView() {
               </div>
             </div>
             <div style={{ display: 'flex', gap: '8px', flexShrink: 0 }}>
-              {tool.type !== 'builtin' || (tool.name !== 'web_search' && tool.name !== 'get_current_time' && tool.name !== 'web_fetch' && tool.name !== 'run_command') ? (
+              {tool.type !== 'builtin' || (tool.name !== 'web_search' && tool.name !== 'get_current_time' && tool.name !== 'web_fetch' && tool.name !== 'run_command' && tool.name !== 'read_file' && tool.name !== 'write_file' && tool.name !== 'edit_file' && tool.name !== 'delete_file' && tool.name !== 'list_directory') ? (
                 <>
                   <button
                     type="button"

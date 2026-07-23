@@ -32,6 +32,7 @@ class PairingError extends Error {
 
 class WebSocketAgentConnection implements AgentConnection {
   private callbacks: Array<(message: AgentToBackendMessage) => void> = [];
+  private identity: { platform?: string; shell?: { kind: string; execPath: string } } | undefined;
 
   constructor(private readonly socket: WebSocket) {
     socket.on('message', (raw: RawData, isBinary: boolean) => {
@@ -68,6 +69,16 @@ class WebSocketAgentConnection implements AgentConnection {
 
   onMessage(callback: (message: AgentToBackendMessage) => void): void {
     this.callbacks.push(callback);
+  }
+
+  setIdentity(message: Extract<AgentToBackendMessage, { type: 'hello' }>): void {
+    this.identity = message.platform !== undefined || message.shell !== undefined
+      ? { platform: message.platform, shell: message.shell }
+      : undefined;
+  }
+
+  getIdentity() {
+    return this.identity;
   }
 
   close(reason = 'connection closed'): void {
@@ -204,6 +215,7 @@ export function mountAgentTransport(server: Server): void {
 
     connection.onMessage((message) => {
       if (message.type === 'hello') {
+        connection.setIdentity(message);
         connection.send({ type: 'hello_ack', agentId: identity.agentId });
         return;
       }
