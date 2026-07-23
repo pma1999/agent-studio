@@ -4,6 +4,7 @@ import db from '../db.js';
 import { getSettingValue } from './settings.js';
 import { resolveToolsForAgent, resolveToolsFromIds, toOpenRouterTools, runTool, appendToolInstructionsIfNeeded, getConversationToolOverride, selectToolResolutionSource } from '../tools/index.js';
 import { annotationsFromWebSearchResults } from '../tools/registry.js';
+import { runCommandTool } from '../tools/execCommand.js';
 import { parseReasoningToolCalls } from '../utils/parseReasoningToolCalls.js';
 import type { McpConnection } from '../mcp/index.js';
 import { AuthRequest } from '../middleware/auth.js';
@@ -79,6 +80,18 @@ const MAX_PDF_ATTACHMENTS = 5;
 const MAX_PDF_BASE64_BYTES = 20 * 1024 * 1024; // 20 MB
 const PDF_ENGINES = ['pdf-text', 'mistral-ocr', 'native'] as const;
 type PDFEngine = (typeof PDF_ENGINES)[number];
+
+function readNonNegativeNumberEnv(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+export const MAX_TOOL_CALLS_PER_TURN = readNonNegativeNumberEnv('MAX_TOOL_CALLS_PER_TURN', 25);
+export const MAX_TOOL_TIME_MS_PER_TURN = readNonNegativeNumberEnv('MAX_TOOL_TIME_MS_PER_TURN', 3_600_000);
+
+export function isToolBudgetExceeded(toolCallCount: number, toolTimeMs: number): boolean {
+  return toolCallCount >= MAX_TOOL_CALLS_PER_TURN || toolTimeMs >= MAX_TOOL_TIME_MS_PER_TURN;
+}
 
 function isPDFEngine(s: unknown): s is PDFEngine {
   return typeof s === 'string' && PDF_ENGINES.includes(s as PDFEngine);
@@ -553,6 +566,20 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         provider.id === 'deepseek' ? effectiveModel : (actualModelFromResponse ?? effectiveModel),
         processedByAgentId
       );
+      return assistantMsgId;
+    };
+
+    const updateAssistantMessage = (assistantMsgId: string, content: string, reasoning: string, anns: unknown[]) => {
+      db.prepare(`
+        UPDATE messages
+        SET content = ?, annotations = ?, reasoning_content = ?
+        WHERE id = ?
+      `).run(
+        content || '',
+        anns.length > 0 ? JSON.stringify(anns) : null,
+        reasoning || null,
+        assistantMsgId
+      );
     };
 
     const sendDoneEvent = (anns: unknown[]) => {
@@ -660,6 +687,8 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     abortController = new AbortController();
     let iteration = 0;
     let lastFinishReason: string | null = null;
+    let toolCallCount = 0;
+    let toolTimeMs = 0;
 
     while (true) {
       actualModelFromResponse = null;
@@ -849,6 +878,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         }
       }
 
+      let cappedToolCallMessageId: string | null = null;
       if (toolCallsArray.length > 0) {
         messages.push({
           role: 'assistant',
@@ -857,7 +887,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
           ...(fullReasoning.trim() ? { [assistantReasoningField(provider.id)]: fullReasoning } : {}),
         });
 
-        saveAssistantMessage(fullContent, fullReasoning, JSON.stringify(toolCallsArray), []);
+        const assistantMsgId = saveAssistantMessage(fullContent, fullReasoning, JSON.stringify(toolCallsArray), []);
 
         for (const tc of toolCallsArray) {
           const id = tc.id;
@@ -875,8 +905,27 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
           res.write(`data: ${JSON.stringify({ tool_call: { id, name, arguments: argsStr, source } })}\n\n`);
 
           const startedAt = Date.now();
-          const result = await runTool(resolvedTools, name, args, mcpClients, userId);
+          let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
+          if (name === 'run_command') {
+            keepaliveTimer = setInterval(() => {
+              if (!clientDisconnected && !res.writableEnded) res.write(': keepalive\n\n');
+            }, 15_000);
+          }
+
+          let result;
+          try {
+            result = name === 'run_command'
+              ? await runCommandTool(args, userId, {
+                signal: abortController?.signal ?? new AbortController().signal,
+                onOutputChunk: () => {},
+              })
+              : await runTool(resolvedTools, name, args, mcpClients, userId);
+          } finally {
+            if (keepaliveTimer) clearInterval(keepaliveTimer);
+          }
           const durationMs = Date.now() - startedAt;
+          toolCallCount++;
+          toolTimeMs += durationMs;
           res.write(`data: ${JSON.stringify({
             tool_result: {
               id,
@@ -885,6 +934,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
               result: result.output,
               duration_ms: durationMs,
               source: result.source,
+              ...(name === 'run_command' && result.metadata ? { metadata: result.metadata } : {}),
             },
           })}\n\n`);
 
@@ -898,7 +948,14 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         }
 
         iteration++;
-        continue;
+        if (isToolBudgetExceeded(toolCallCount, toolTimeMs)) {
+          cappedToolCallMessageId = assistantMsgId;
+          const budgetMessage = '\n\n_Tool-call budget for this turn was reached; stopping here._';
+          fullContent += budgetMessage;
+          res.write(`data: ${JSON.stringify({ content: budgetMessage })}\n\n`);
+        } else {
+          continue;
+        }
       }
 
       // finish_reason stop or null or no tool_calls: final text response
@@ -921,7 +978,9 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
           }
         }
       }
-      if (fullContent || fullReasoning) {
+      if (cappedToolCallMessageId) {
+        updateAssistantMessage(cappedToolCallMessageId, fullContent, fullReasoning, finalAnnots);
+      } else if (fullContent || fullReasoning) {
         saveAssistantMessage(fullContent, fullReasoning, null, finalAnnots);
       }
       sendDoneEvent(finalAnnots);

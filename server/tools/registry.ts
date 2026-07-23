@@ -96,6 +96,23 @@ Si la página objetivo parece bloqueada, muestra un captcha, un muro de pago o c
       },
     },
   },
+  run_command: {
+    type: 'function',
+    function: {
+      name: 'run_command',
+      description: "Execute a shell command in a real, persistent working environment (a paired local machine or an isolated cloud sandbox) to run scripts, install packages, inspect/edit files, or call CLIs. Returns stdout, stderr, and exit_code as JSON; a non-zero exit_code or non-empty stderr does not necessarily mean the command failed to run — inspect the output. Available backends: 'local' (the user's own paired machine — real files, installed tools, persists across calls) and 'sandbox' (an ephemeral isolated cloud VM — no access to the user's files, resets between conversations, requires the user's own sandbox account). Use backend='auto' (default) to let the system pick whichever is configured; specify 'local' or 'sandbox' only when the task specifically needs that environment's characteristics.",
+      parameters: {
+        type: 'object',
+        properties: {
+          command: { type: 'string', description: 'The shell command to execute.' },
+          cwd: { type: 'string', description: 'Working directory relative to the workspace root. Omit to use the default workspace root.' },
+          backend: { type: 'string', description: "'auto' (default), 'local', or 'sandbox'." },
+          timeout_seconds: { type: 'number', description: 'Max seconds to wait (default 120, hard ceiling 1800).' },
+        },
+        required: ['command'],
+      },
+    },
+  },
 };
 
 const executors: Record<string, ToolExecutor> = {
@@ -156,6 +173,10 @@ const executors: Record<string, ToolExecutor> = {
       source: result.source,
       source_note: result.source_note,
     });
+  },
+
+  async run_command(): Promise<string> {
+    return JSON.stringify({ error: 'run_command requires the interactive execution context; not available from Model Council in v1.' });
   },
 };
 

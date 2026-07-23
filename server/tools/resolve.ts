@@ -7,6 +7,7 @@
 import db from '../db.js';
 import { getSettingValue } from '../routes/settings.js';
 import { getBuiltinDefinition, getBuiltinExecutor } from './registry.js';
+import { isRunCommandUsable } from './execCommand.js';
 import {
   createAndConnectMcpClient,
   listMcpTools,
@@ -84,6 +85,7 @@ function isUsable(t: ToolRow, userId: string): boolean {
       const key = userId ? getSettingValue(userId, 'search_api_key') : '';
       return !!key?.trim();
     }
+    if (t.name === 'run_command') return isRunCommandUsable(userId);
     if (t.name === 'web_fetch') return true;
     return true;
   }
@@ -272,7 +274,7 @@ export async function resolveToolsForAgent(agentId: string, userId: string): Pro
     let connection: McpConnection | null = null;
     for (let attempt = 0; attempt <= 1; attempt++) {
       try {
-        connection = await createAndConnectMcpClient({ transport, config });
+        connection = await createAndConnectMcpClient({ transport, config }, { userId });
         break;
       } catch (err) {
         if (attempt < 1) {
@@ -434,7 +436,7 @@ export async function resolveToolsFromIds(
     let connection: McpConnection | null = null;
     for (let attempt = 0; attempt <= 1; attempt++) {
       try {
-        connection = await createAndConnectMcpClient({ transport, config });
+        connection = await createAndConnectMcpClient({ transport, config }, { userId });
         break;
       } catch (err) {
         if (attempt < 1) {

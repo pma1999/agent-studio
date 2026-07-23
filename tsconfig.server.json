@@ -6,10 +6,10 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "strict": true,
-    "outDir": "./dist/server",
-    "rootDir": "./server",
+    "outDir": "./dist",
+    "rootDir": ".",
     "resolveJsonModule": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["server"]
+  "include": ["server", "shared"]
 }

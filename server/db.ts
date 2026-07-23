@@ -640,8 +640,58 @@ export function migrate() {
     `UPDATE tools SET parameters_schema = ? WHERE name = 'web_fetch' AND type = 'builtin'`
   ).run(JSON.stringify(webFetchSchema));
 
+  // Migration: ensure every user has the run_command builtin. Usability is
+  // gated separately by resolve.ts on that user's e2b_api_key.
+  const runCommandDesc = "Execute a shell command in a real, persistent working environment (a paired local machine or an isolated cloud sandbox) to run scripts, install packages, inspect/edit files, or call CLIs. Returns stdout, stderr, and exit_code as JSON; a non-zero exit_code or non-empty stderr does not necessarily mean the command failed to run — inspect the output. Available backends: 'local' (the user's own paired machine — real files, installed tools, persists across calls) and 'sandbox' (an ephemeral isolated cloud VM — no access to the user's files, resets between conversations, requires the user's own sandbox account). Use backend='auto' (default) to let the system pick whichever is configured; specify 'local' or 'sandbox' only when the task specifically needs that environment's characteristics.";
+  const runCommandSchema = {
+    type: 'object',
+    properties: {
+      command: { type: 'string', description: 'The shell command to execute.' },
+      cwd: { type: 'string', description: 'Working directory relative to the workspace root. Omit to use the default workspace root.' },
+      backend: { type: 'string', description: "'auto' (default), 'local', or 'sandbox'." },
+      timeout_seconds: { type: 'number', description: 'Max seconds to wait (default 120, hard ceiling 1800).' },
+    },
+    required: ['command'],
+  };
+  const hasRunCommandStmt = db.prepare('SELECT 1 FROM tools WHERE user_id = ? AND name = ?');
+  const insertRunCommandStmt = db.prepare(`
+    INSERT INTO tools (id, user_id, name, description, parameters_schema, type, config)
+    VALUES (?, ?, 'run_command', ?, ?, 'builtin', NULL)
+  `);
+  for (const { id: uid } of allUserIds) {
+    if (hasRunCommandStmt.get(uid, 'run_command')) continue;
+    const { nanoid } = await_nanoid();
+    insertRunCommandStmt.run(nanoid(), uid, runCommandDesc, JSON.stringify(runCommandSchema));
+  }
+  db.prepare(
+    `UPDATE tools SET description = ?, parameters_schema = ? WHERE name = 'run_command' AND type = 'builtin'`
+  ).run(runCommandDesc, JSON.stringify(runCommandSchema));
+
   // --- Model Council migrations ---
   migrateCouncilTables();
+
+  // --- Tool execution audit log (run_command and future exec-shaped tools) ---
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS tool_executions (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      conversation_id TEXT,
+      tool_call_id TEXT,
+      tool_name TEXT NOT NULL,
+      backend TEXT NOT NULL CHECK(backend IN ('local','e2b','mcp-stdio')),
+      command TEXT,
+      cwd TEXT,
+      exit_code INTEGER,
+      duration_ms INTEGER,
+      blocked_pattern TEXT,
+      confirmation_required INTEGER DEFAULT 0,
+      confirmation_result TEXT CHECK(confirmation_result IN ('approved','declined','timeout') OR confirmation_result IS NULL),
+      is_error INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_tool_executions_user_id ON tool_executions(user_id);
+    CREATE INDEX IF NOT EXISTS idx_tool_executions_conversation_id ON tool_executions(conversation_id);
+  `);
 }
 
 function migrateCouncilTables() {

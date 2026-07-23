@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { CheckCircle, AlertCircle, ExternalLink, Zap, Coins, BarChart3, Loader2, Globe, KeyRound, Database, MessageSquare, Brain, Check, ChevronDown, Sparkles, Lightbulb, SlidersHorizontal, Wrench, Plug, Link } from 'lucide-react';
+import { CheckCircle, AlertCircle, ExternalLink, Zap, Coins, BarChart3, Loader2, Globe, KeyRound, Database, MessageSquare, Brain, Check, ChevronDown, Sparkles, Lightbulb, SlidersHorizontal, Wrench, Plug, Link, Box } from 'lucide-react';
 import { useStore } from '../stores/store';
 import { settingsApi, toolsApi, mcpServersApi, deepseekApi } from '../api/client';
 import type { ProviderRoutingConfig, ReasoningEffort, Tool, McpServer } from '../types';
@@ -266,6 +266,8 @@ function ProviderKeySection({
 
 const OPENROUTER_ACCENT = '#8b5cf6';
 const AUTO_CONVERSATION_TITLES_SETTING_KEY = 'auto_conversation_titles_enabled';
+const E2B_ALLOW_INTERNET_SETTING_KEY = 'e2b_allow_internet';
+const E2B_ACCENT = 'var(--state-warning)';
 
 /** DeepSeek direct-provider API key section. Reuses ProviderKeySection with live key validation. */
 function DeepSeekSection() {
@@ -1512,6 +1514,11 @@ export function SettingsPanel() {
   const [searchSaving, setSearchSaving] = useState(false);
   const [jinaApiKey, setJinaApiKey] = useState('');
   const [jinaSaving, setJinaSaving] = useState(false);
+  const [e2bApiKey, setE2bApiKey] = useState('');
+  const [e2bSaving, setE2bSaving] = useState(false);
+  const [e2bAllowInternet, setE2bAllowInternet] = useState(false);
+  const [e2bInternetSaving, setE2bInternetSaving] = useState(false);
+  const [e2bInternetSaveState, setE2bInternetSaveState] = useState<'idle' | 'saved' | 'error'>('idle');
 
   useEffect(() => {
     if (settingsOpen) {
@@ -1519,6 +1526,8 @@ export function SettingsPanel() {
         setSearchApiKey(s.search_api_key || '');
         setSearchProvider(s.search_provider || 'exa');
         setJinaApiKey(s.jina_api_key || '');
+        setE2bApiKey(s.e2b_api_key || '');
+        setE2bAllowInternet(s.e2b_allow_internet === 'true');
       }).catch(() => {});
     }
   }, [settingsOpen]);
@@ -1539,6 +1548,38 @@ export function SettingsPanel() {
       await settingsApi.set('jina_api_key', jinaApiKey);
     } finally {
       setJinaSaving(false);
+    }
+  };
+
+  const saveE2bApiKey = async () => {
+    // An unedited masked value (contains '****') means the field still shows the saved
+    // key unchanged — never write it back as the real key, or it would overwrite the
+    // stored key with the mask itself. Empty string still passes, so clearing works.
+    if (e2bApiKey.includes('****')) return;
+    setE2bSaving(true);
+    try {
+      await settingsApi.set('e2b_api_key', e2bApiKey);
+    } finally {
+      setE2bSaving(false);
+    }
+  };
+
+  const handleE2bInternetToggle = async (enabled: boolean) => {
+    if (e2bInternetSaving) return;
+    const previous = e2bAllowInternet;
+    setE2bAllowInternet(enabled);
+    setE2bInternetSaving(true);
+    setE2bInternetSaveState('idle');
+    try {
+      await settingsApi.set(E2B_ALLOW_INTERNET_SETTING_KEY, String(enabled));
+      setE2bInternetSaveState('saved');
+      window.setTimeout(() => setE2bInternetSaveState('idle'), 1600);
+    } catch (err) {
+      console.error('Failed to save E2B internet access setting:', err);
+      setE2bAllowInternet(previous);
+      setE2bInternetSaveState('error');
+    } finally {
+      setE2bInternetSaving(false);
     }
   };
 
@@ -1655,6 +1696,88 @@ export function SettingsPanel() {
           <Button variant="primary" onClick={saveJinaSettings} disabled={jinaSaving}>
             {jinaSaving ? 'Saving…' : 'Save Jina settings'}
           </Button>
+        </div>
+
+        {/* Divider */}
+        <div style={{ height: '1px', background: 'var(--border)' }} />
+
+        {/* Cloud Sandbox (E2B) — for the run_command tool's "sandbox" backend */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <div style={{
+              width: '28px', height: '28px', borderRadius: 'var(--radius-sm)',
+              background: 'var(--state-warning-soft)', border: '1px solid rgb(var(--amber-rgb) / 0.3)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center', color: E2B_ACCENT,
+            }}>
+              <Box size={15} />
+            </div>
+            <h4 style={{ fontFamily: 'var(--font-display)', fontSize: '1rem', fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>
+              Cloud Sandbox (E2B)
+            </h4>
+          </div>
+          <p style={{ fontSize: '0.8125rem', color: 'var(--text-muted)', margin: 0, lineHeight: 1.6 }}>
+            When an agent's run_command tool uses the "sandbox" backend, the command runs in an
+            isolated cloud VM from E2B — not on your machine, and not billed to Agent Studio. It's
+            billed to your own E2B account, so a key is required before the sandbox backend works
+            at all; without one, only a paired local machine can run commands.{' '}
+            <a
+              href="https://e2b.dev"
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ color: E2B_ACCENT, textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '3px' }}
+            >
+              Get a key at e2b.dev <ExternalLink size={11} />
+            </a>
+          </p>
+          <div style={{ flex: '1 1 200px' }}>
+            <Input
+              label="E2B API Key"
+              type="password"
+              value={e2bApiKey}
+              onChange={(e) => setE2bApiKey(e.target.value)}
+              placeholder="Required for the sandbox backend — leave blank to disable it"
+              style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: '0.8125rem' }}
+            />
+          </div>
+          <Button variant="primary" onClick={saveE2bApiKey} disabled={e2bSaving}>
+            {e2bSaving ? 'Saving…' : 'Save E2B key'}
+          </Button>
+
+          <div style={{
+            padding: '12px',
+            background: 'var(--bg-surface)',
+            border: '1px solid var(--border)',
+            borderRadius: 'var(--radius-sm)',
+            marginTop: '4px',
+          }}>
+            <PremiumToggle
+              checked={e2bAllowInternet}
+              onChange={handleE2bInternetToggle}
+              disabled={e2bInternetSaving}
+              size="sm"
+              color={E2B_ACCENT}
+              label={
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                  <span>Allow sandbox internet access</span>
+                  <span style={{
+                    fontSize: '0.6875rem',
+                    lineHeight: 1,
+                    fontFamily: 'var(--font-mono)',
+                    fontWeight: 600,
+                    color: e2bInternetSaveState === 'error'
+                      ? 'var(--error)'
+                      : e2bAllowInternet
+                        ? E2B_ACCENT
+                        : 'var(--text-muted)',
+                    whiteSpace: 'nowrap',
+                  }}>
+                    {e2bInternetSaving ? 'Saving...' : e2bInternetSaveState === 'saved' ? 'Saved' : e2bAllowInternet ? 'On' : 'Off'}
+                  </span>
+                </span>
+              }
+              description="Off by default. Turning this on lets code running in the sandbox reach the open internet — for example to install packages or call an API. Private network ranges stay blocked automatically, whether this is on or off. The sandbox's cloud metadata endpoint cannot be fully blocked by this setting — Agent Studio makes a best-effort attempt to close it from inside the sandbox, but this is not a guarantee."
+            />
+          </div>
         </div>
 
         {/* Divider */}

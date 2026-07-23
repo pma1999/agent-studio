@@ -8,6 +8,8 @@ import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import type { McpServerConfig, McpTransport } from './types.js';
 import { isMcpConfigUrl, isMcpConfigStdio } from './types.js';
+import { scanCommand } from '../../shared/commandSafety.js';
+import { logToolExecution } from '../tools/execAudit.js';
 
 const MCP_CLIENT_NAME = 'agent-studio';
 const MCP_CLIENT_VERSION = '1.0.0';
@@ -15,10 +17,68 @@ const CONNECT_TIMEOUT_MS = 15_000;
 const TOOL_CALL_TIMEOUT_MS = 60_000;
 const MAX_TEXT_RESULT_CHARS = 64_000;
 const TOOL_CACHE_TTL_MS = 30_000;
+const SAFE_STDIO_ENV_KEYS = [
+  'PATH',
+  'SystemRoot',
+  'windir',
+  'TEMP',
+  'TMP',
+  'HOME',
+  'USERPROFILE',
+  'APPDATA',
+  'LOCALAPPDATA',
+  'LANG',
+  'TMPDIR',
+] as const;
+
+const MCP_STDIO_AUDIT_TOOL_NAME = 'mcp_stdio_connect';
 
 export interface McpConnection {
   client: Client;
   close(): Promise<void>;
+}
+
+/**
+ * Build the intentionally small environment inherited by MCP stdio servers.
+ * Caller-provided values are applied last so server configuration wins over
+ * the host baseline for the same key.
+ */
+export function buildSafeEnv(configEnv?: Record<string, string>): Record<string, string> {
+  const safeEnv: Record<string, string> = {};
+  for (const key of SAFE_STDIO_ENV_KEYS) {
+    const value = process.env[key];
+    if (value !== undefined) safeEnv[key] = value;
+  }
+  return { ...safeEnv, ...(configEnv ?? {}) };
+}
+
+interface McpStdioAuditContext {
+  userId: string;
+  conversationId?: string;
+}
+
+function auditMcpStdioConnection(
+  auditContext: McpStdioAuditContext | undefined,
+  details: {
+    command: string;
+    cwd?: string;
+    blockedPattern?: string;
+    durationMs?: number;
+    isError?: boolean;
+  }
+): void {
+  if (!auditContext) return;
+  logToolExecution({
+    userId: auditContext.userId,
+    conversationId: auditContext.conversationId,
+    toolName: MCP_STDIO_AUDIT_TOOL_NAME,
+    backend: 'mcp-stdio',
+    command: details.command,
+    cwd: details.cwd ?? null,
+    durationMs: details.durationMs,
+    blockedPattern: details.blockedPattern,
+    isError: details.isError,
+  });
 }
 
 async function closeQuietly(close: () => Promise<void>, label: string): Promise<void> {
@@ -138,7 +198,7 @@ async function connectUrlTransport(
 export async function createAndConnectMcpClient(server: {
   transport: McpTransport;
   config: McpServerConfig;
-}): Promise<McpConnection> {
+}, auditContext?: McpStdioAuditContext): Promise<McpConnection> {
   if (server.transport === 'url') {
     if (!isMcpConfigUrl(server.config)) throw new Error('URL transport requires config.url');
     const urlStr = server.config.url?.trim();
@@ -158,20 +218,47 @@ export async function createAndConnectMcpClient(server: {
     const command = server.config.command?.trim();
     if (!command) throw new Error('config.command is required for stdio transport');
 
+    const verdict = scanCommand(command, null, false);
+    if (verdict.tier === 1) {
+      auditMcpStdioConnection(auditContext, {
+        command,
+        cwd: server.config.cwd,
+        blockedPattern: verdict.label,
+        isError: true,
+      });
+      throw new Error(`Refused: command matches a blocked pattern (${verdict.label ?? 'tier-1'})`);
+    }
+
     const transport = new StdioClientTransport({
       command,
       args: Array.isArray(server.config.args) ? server.config.args : [],
-      env: server.config.env ? { ...(process.env as Record<string, string>), ...server.config.env } : undefined,
+      env: buildSafeEnv(server.config.env),
       cwd: server.config.cwd || undefined,
     });
     const client = createMcpClient(command);
+    const startedAt = Date.now();
 
-    await withTimeout(
-      client.connect(transport),
-      CONNECT_TIMEOUT_MS,
-      `MCP stdio connection timed out after ${CONNECT_TIMEOUT_MS}ms`,
-      () => transport.close()
-    );
+    try {
+      await withTimeout(
+        client.connect(transport),
+        CONNECT_TIMEOUT_MS,
+        `MCP stdio connection timed out after ${CONNECT_TIMEOUT_MS}ms`,
+        () => transport.close()
+      );
+      auditMcpStdioConnection(auditContext, {
+        command,
+        cwd: server.config.cwd,
+        durationMs: Date.now() - startedAt,
+      });
+    } catch (err) {
+      auditMcpStdioConnection(auditContext, {
+        command,
+        cwd: server.config.cwd,
+        durationMs: Date.now() - startedAt,
+        isError: true,
+      });
+      throw err;
+    }
 
     return {
       client,
