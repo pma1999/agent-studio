@@ -19,6 +19,7 @@ import mcpServersRouter from './routes/mcpServers.js';
 import { exportRouter, importRouter } from './routes/exportImport.js';
 import chatCouncilRouter from './routes/chatCouncil.js';
 import councilMembersRouter from './routes/councilMembers.js';
+import { mountWsProbe } from './routes/agentProbe.js';
 
 const app = express();
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3001;
@@ -135,6 +136,11 @@ const server = app.listen(PORT, '0.0.0.0', () => {
 
 // Graceful shutdown: handles SIGTERM/SIGINT, drains SSE streams, closes DB.
 setupGracefulShutdown(server, db);
+
+// Temporary WebSocket viability probe (task-04) — off unless explicitly enabled.
+if (process.env.ENABLE_WS_PROBE === 'true') {
+  mountWsProbe(server);
+}
 
 server.on('error', (err: NodeJS.ErrnoException) => {
   if (err.code === 'EADDRINUSE') {

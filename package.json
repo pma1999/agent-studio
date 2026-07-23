@@ -18,7 +18,8 @@
     "test": "tsx scripts/test-provider-routing.ts && tsx scripts/test-conversation-titles.ts && tsx scripts/test-web-fetch-detection.ts && tsx scripts/test-conversation-tool-overrides.ts",
     "db:restore": "node scripts/restore-db-from-stdin.mjs",
     "db:migrate-local": "node scripts/migrate-local-db.mjs",
-    "test:web-fetch": "node scripts/test-web-fetch.mjs"
+    "test:web-fetch": "node scripts/test-web-fetch.mjs",
+    "test:ws-probe": "node scripts/test-ws-probe.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
@@ -40,6 +41,7 @@
     "react-markdown": "^9.0.1",
     "rehype-highlight": "^7.0.1",
     "remark-gfm": "^4.0.0",
+    "ws": "^8.18.0",
     "zod": "^4.3.6",
     "zustand": "^5.0.2"
   },
@@ -53,6 +55,7 @@
     "@types/jsonwebtoken": "^9.0.10",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
+    "@types/ws": "^8.5.13",
     "@vitejs/plugin-react": "^4.3.4",
     "concurrently": "^9.1.0",
     "tsx": "^4.19.2",
