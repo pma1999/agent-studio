@@ -231,7 +231,7 @@ router.post('/:id/test', async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ ok: false, error: 'Invalid transport' });
     }
 
-    const connection = await createAndConnectMcpClient({ transport, config });
+    const connection = await createAndConnectMcpClient({ transport, config }, { userId });
     try {
       const tools = await listMcpTools(connection.client, '');
 

@@ -38,6 +38,23 @@ export function buildSafeEnv(): NodeJS.ProcessEnv {
 export const DEFAULT_CONFIRMATION_TIMEOUT_MS = 60_000;
 const KILL_GRACE_PERIOD_MS = 3_000;
 
+/**
+ * Ceiling on how much stdout/stderr this local agent will accumulate in
+ * memory *and* forward live over the WS relay, per stream, per command
+ * (ARC-02). This is deliberately larger than the backend's own
+ * `MAX_COMMAND_OUTPUT_CHARS` (64,000, in `server/tools/execCommand.ts`)
+ * because this is the raw, pre-truncation capture point: the backend still
+ * truncates (head+tail) whatever we send it down to its own final display
+ * limit, so this cap only exists to stop a single runaway command (`yes`, an
+ * infinite-loop script, a very verbose/looping build) from growing this
+ * process's own memory or flooding the relay connection without bound for as
+ * long as its own timeout allows (up to 1800s server-side). 2,000,000 chars
+ * (~2MB) per stream is comfortably above anything a legitimate command's
+ * useful output would need, while bounding worst-case per-command memory to a
+ * few MB regardless of how long a misbehaving process keeps writing.
+ */
+export const DEFAULT_MAX_OUTPUT_CHARS_PER_STREAM = 2_000_000;
+
 export type SendFn = (message: AgentToBackendMessage) => void;
 export type ConfirmFn = (command: string) => Promise<'approved' | 'declined' | 'timeout'>;
 
@@ -91,11 +108,21 @@ export interface CommandExecutorOptions {
   confirmTier2: ConfirmFn;
   spawnFn?: SpawnFn;
   killTreeFn?: KillTreeFn;
+  /** Overridable for tests; defaults to `DEFAULT_MAX_OUTPUT_CHARS_PER_STREAM`. */
+  maxOutputCharsPerStream?: number;
 }
 
 export interface CommandExecutor {
   handleCommandRequest(request: CommandRequestMessage): Promise<void>;
   handleCommandCancel(requestId: string): void;
+  /**
+   * Called when the transport connection to the backend has dropped (ARC-04):
+   * kills every still-running child process tied to an in-flight request on
+   * that now-dead connection, the same way `command_cancel` already kills a
+   * process today, so a command doesn't keep running locally after the
+   * backend has already given up on it.
+   */
+  handleDisconnect(): void;
 }
 
 /** Minimal shape of `readline/promises`'s `Interface.question` that a fake can satisfy in tests. */
@@ -133,6 +160,7 @@ export function createConsoleConfirmer(rl: QuestionerLike, timeoutMs = DEFAULT_C
 export function createCommandExecutor(options: CommandExecutorOptions): CommandExecutor {
   const spawnFn = options.spawnFn ?? defaultSpawnFn;
   const killTreeFn = options.killTreeFn ?? defaultKillTree;
+  const maxOutputCharsPerStream = options.maxOutputCharsPerStream ?? DEFAULT_MAX_OUTPUT_CHARS_PER_STREAM;
   const activeChildren = new Map<string, MinimalChildProcess>();
 
   function executeCommand(
@@ -144,6 +172,8 @@ export function createCommandExecutor(options: CommandExecutorOptions): CommandE
     let seq = 0;
     let stdoutAll = '';
     let stderrAll = '';
+    let stdoutCapped = false;
+    let stderrCapped = false;
     let finalized = false;
 
     const child = spawnFn(request.command, { shell: true, cwd: resolvedCwd, env: buildSafeEnv() });
@@ -151,16 +181,47 @@ export function createCommandExecutor(options: CommandExecutorOptions): CommandE
 
     const backstop = setTimeout(() => killTreeFn(child), request.timeoutMs);
 
-    child.stdout?.on('data', (chunk) => {
+    /**
+     * Shared handler for both streams (ARC-02): bounds in-memory
+     * accumulation AND live-relayed volume together, since both are driven by
+     * the same `data` events. Once a stream's ceiling is hit, one truncation
+     * marker is appended/relayed and every further chunk for that stream is
+     * silently dropped (the process itself keeps running to completion or
+     * the timeout backstop, whichever comes first — only capture/relay
+     * stops).
+     */
+    const handleStreamData = (stream: 'stdout' | 'stderr', chunk: Buffer | string) => {
+      const capped = stream === 'stdout' ? stdoutCapped : stderrCapped;
+      if (capped) return;
+
       const text = chunk.toString();
-      stdoutAll += text;
-      options.send({ type: 'command_output_chunk', requestId: request.requestId, stream: 'stdout', text, seq: seq++ });
-    });
-    child.stderr?.on('data', (chunk) => {
-      const text = chunk.toString();
-      stderrAll += text;
-      options.send({ type: 'command_output_chunk', requestId: request.requestId, stream: 'stderr', text, seq: seq++ });
-    });
+      const current = stream === 'stdout' ? stdoutAll : stderrAll;
+      const remaining = maxOutputCharsPerStream - current.length;
+      const textToKeep = text.length <= remaining ? text : text.slice(0, Math.max(0, remaining));
+
+      if (textToKeep.length > 0) {
+        if (stream === 'stdout') stdoutAll += textToKeep;
+        else stderrAll += textToKeep;
+        options.send({ type: 'command_output_chunk', requestId: request.requestId, stream, text: textToKeep, seq: seq++ });
+      }
+
+      if (text.length > remaining) {
+        const marker =
+          `\n[local-agent] ${stream} truncated locally after ${maxOutputCharsPerStream} characters; ` +
+          `the command kept running, but further ${stream} was not captured or relayed.`;
+        if (stream === 'stdout') {
+          stdoutAll += marker;
+          stdoutCapped = true;
+        } else {
+          stderrAll += marker;
+          stderrCapped = true;
+        }
+        options.send({ type: 'command_output_chunk', requestId: request.requestId, stream, text: marker, seq: seq++ });
+      }
+    };
+
+    child.stdout?.on('data', (chunk) => handleStreamData('stdout', chunk));
+    child.stderr?.on('data', (chunk) => handleStreamData('stderr', chunk));
 
     const finalize = (exitCode: number | null) => {
       if (finalized) return;
@@ -253,5 +314,15 @@ export function createCommandExecutor(options: CommandExecutorOptions): CommandE
     killTreeFn(child);
   }
 
-  return { handleCommandRequest, handleCommandCancel };
+  function handleDisconnect(): void {
+    // Snapshot the keys first: killTreeFn is best-effort/async (real kills
+    // resolve later via the child's own 'close' event, which is what removes
+    // an entry from activeChildren), so iterating the live map directly would
+    // be safe here regardless, but a snapshot keeps the intent explicit.
+    for (const requestId of [...activeChildren.keys()]) {
+      handleCommandCancel(requestId);
+    }
+  }
+
+  return { handleCommandRequest, handleCommandCancel, handleDisconnect };
 }

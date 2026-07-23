@@ -225,6 +225,75 @@ async function main() {
     console.log('(bonus) command_cancel kills the active child and still resolves with a command_response: OK');
   }
 
+  // (ARC-02) in-memory accumulation and live-relayed chunk volume are both
+  // capped per stream, with a truncation marker appended once the ceiling is
+  // hit, and further data for that stream is dropped rather than growing
+  // without bound.
+  {
+    const { spawnFn, children } = makeSpawnFn();
+    const { executor, sent } = makeExecutor({ spawnFn, maxOutputCharsPerStream: 20 });
+    await executor.handleCommandRequest({ type: 'command_request', requestId: 'r-cap', command: 'echo hi', timeoutMs: 5_000 });
+    const child = children[0];
+    child.stdout.emit('data', Buffer.from('a'.repeat(15))); // under the cap: kept in full
+    child.stdout.emit('data', Buffer.from('b'.repeat(15))); // pushes past the 20-char cap: truncated + marker
+    child.stdout.emit('data', Buffer.from('c'.repeat(15))); // arrives after capped: must be dropped entirely
+    child.emit('close', 0);
+
+    const stdoutChunks = sent.filter((m) => m.type === 'command_output_chunk' && m.stream === 'stdout') as Extract<
+      AgentToBackendMessage,
+      { type: 'command_output_chunk' }
+    >[];
+    // Expect exactly 3 relayed stdout chunks: the first data event kept in
+    // full, the truncated remainder of the second event (5 chars fit the
+    // remaining capacity), and a separate truncation-marker chunk — the
+    // third data event (all "c"s) must not produce any chunk at all.
+    assert.equal(stdoutChunks.length, 3, 'no further chunks may be relayed once the per-stream cap is hit');
+    assert.equal(stdoutChunks[0].text, 'a'.repeat(15));
+    assert.equal(stdoutChunks[1].text, 'b'.repeat(5), 'the second chunk must be truncated to the remaining capacity');
+    assert.ok(stdoutChunks[2].text.includes('truncated locally'), 'a truncation marker must be relayed once the cap is hit');
+    assert.ok(
+      !sent.some((m) => m.type === 'command_output_chunk' && m.text.includes('c'.repeat(15))),
+      'no bytes from the third (post-cap) data event may leak through'
+    );
+
+    const response = findResponse(sent);
+    // The final command_response's accumulated stdout must be exactly the
+    // 20 real characters that fit under the cap (never the full 45 the
+    // process actually wrote — the third data event's "c"s must never reach
+    // the accumulator), plus the truncation marker.
+    assert.ok(response.stdout.startsWith('a'.repeat(15) + 'b'.repeat(5)), 'kept prefix must match what was under the cap');
+    assert.ok(!response.stdout.includes('c'.repeat(15)), 'no output beyond the cap may reach the final command_response');
+    assert.ok(response.stdout.includes('truncated locally'), 'the final command_response must carry a truncated-locally indicator');
+    console.log('(ARC-02) per-stream output accumulation and relay are both capped: OK');
+  }
+
+  // (ARC-04) disconnect kills every active child process rather than letting
+  // it keep running with no live connection to report back to.
+  {
+    const { spawnFn, children } = makeSpawnFn();
+    const killedPids: number[] = [];
+    const killTreeFn: KillTreeFn = (child) => {
+      killedPids.push(child.pid!);
+    };
+    const { executor } = makeExecutor({ spawnFn, killTreeFn });
+    await executor.handleCommandRequest({ type: 'command_request', requestId: 'r-disc-1', command: 'echo one', timeoutMs: 5_000 });
+    await executor.handleCommandRequest({ type: 'command_request', requestId: 'r-disc-2', command: 'echo two', timeoutMs: 5_000 });
+    assert.equal(children.length, 2, 'both commands must have spawned before disconnect');
+
+    executor.handleDisconnect();
+
+    assert.deepEqual(
+      killedPids.sort(),
+      children.map((c) => c.pid).sort(),
+      'handleDisconnect must kill every active child tied to in-flight requests'
+    );
+    // Simulate the OS actually tearing the processes down after the kill
+    // signal; must not throw or hang even with no live connection left.
+    children[0].emit('close', 1);
+    children[1].emit('close', 1);
+    console.log('(ARC-04) disconnect kills every active child process: OK');
+  }
+
   console.log('\ncommandExecutor: all tests passed');
 }
 

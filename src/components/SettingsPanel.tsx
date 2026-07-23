@@ -1828,7 +1828,7 @@ export function SettingsPanel() {
           lineHeight: 1.6,
           fontStyle: 'italic',
         }}>
-          API keys are stored locally and never leave your machine. Each agent uses a model chosen in the agent editor (OpenRouter).
+          API keys are sent to and stored on your Agent Studio server (encrypted at rest), not kept purely on this device. Each agent uses a model chosen in the agent editor (OpenRouter).
         </p>
       </div>
     </Modal>

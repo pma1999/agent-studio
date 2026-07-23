@@ -22,6 +22,64 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const LOOPBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1']);
+
+/** Strips the `[...]` bracket notation `new URL().hostname` uses for IPv6 literals. */
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  return LOOPBACK_HOSTNAMES.has(normalized);
+}
+
+/**
+ * ARC-03: `transport.ts`'s `toWebSocketUrl` silently downgrades any
+ * non-`https:` scheme to plaintext `ws:`. For the documented v1 topology
+ * (pairing to the Railway-hosted, HTTPS backend) that never matters — but
+ * nothing previously stopped a user from pointing this at a genuinely remote
+ * `http://` host, which would send the pairing code, and the durable bearer
+ * token this pairing exchange itself returns, in clear text. Loopback hosts
+ * (a backend running on this same machine) are exempt: there is no network
+ * hop for anything to intercept in that case.
+ */
+async function checkBackendTransportSecurity(backendUrl: string): Promise<void> {
+  let parsed: URL;
+  try {
+    parsed = new URL(backendUrl);
+  } catch {
+    return; // an invalid URL will surface its own clear error later (fetch/connect)
+  }
+  if (parsed.protocol === 'https:') return; // upgrades to wss: in transport.ts — safe
+  if (isLoopbackHostname(parsed.hostname)) return; // no network to intercept
+
+  console.log('\n' + '='.repeat(70));
+  console.log('SECURITY WARNING — PLAINTEXT CONNECTION TO A REMOTE HOST');
+  console.log('='.repeat(70));
+  console.log(
+    `The backend URL you entered ("${backendUrl}") is not "https://", and its\n` +
+      `host ("${parsed.hostname}") is not this machine (localhost/127.0.0.1/::1).\n` +
+      `That means this agent would connect over plain, unencrypted "ws://" — the\n` +
+      `pairing code, and then the long-lived bearer token this pairing exchange\n` +
+      `is about to return (reused for every command this agent ever executes),\n` +
+      `would be sent in clear text over the network. Anyone positioned to\n` +
+      `observe that traffic (a shared network, a compromised router, etc.)\n` +
+      `could capture that token and gain the same remote command-execution\n` +
+      `access this agent has, until the pairing is explicitly revoked.\n`
+  );
+  console.log(
+    `If this backend is only reachable over "http://" today, prefer serving it\n` +
+      `over "https://" instead before pairing. Only continue over plaintext if\n` +
+      `you understand and accept this risk (e.g. a private network you\n` +
+      `personally control end-to-end).\n`
+  );
+  console.log('='.repeat(70));
+  const ack = (await rl.question('Type "yes, plaintext" to accept this risk and continue, or anything else to cancel: '))
+    .trim()
+    .toLowerCase();
+  if (ack !== 'yes, plaintext') {
+    console.log('\nPairing cancelled — plaintext-transport warning was not accepted. No token was saved.');
+    process.exit(1);
+  }
+}
+
 function printSecurityWarning(workspaceRoot: string): void {
   console.log('\n' + '='.repeat(70));
   console.log('SECURITY WARNING — READ BEFORE CONTINUING');
@@ -57,6 +115,7 @@ async function runPairingFlow(): Promise<LocalAgentConfig> {
 
   const backendUrlInput = (await rl.question(`Backend URL [${DEFAULT_BACKEND_URL}]: `)).trim();
   const backendUrl = backendUrlInput || DEFAULT_BACKEND_URL;
+  await checkBackendTransportSecurity(backendUrl);
 
   const workspaceInput = (await rl.question(`Workspace root directory [${process.cwd()}]: `)).trim();
   const workspaceRoot = path.resolve(workspaceInput || process.cwd());
@@ -157,6 +216,11 @@ async function main(): Promise<void> {
         onClose: (reason) => {
           console.log(`[local-agent] disconnected: ${reason}`);
           transportHandle = undefined;
+          // ARC-04: the backend has already given up on every pending
+          // request tied to this now-dead connection (rejected on its own
+          // side in registry.ts); don't let the matching child processes
+          // keep running locally with nothing left to report back to.
+          executor.handleDisconnect();
           resolve();
         },
       });
