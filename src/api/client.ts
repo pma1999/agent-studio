@@ -266,6 +266,18 @@ export interface StreamToolResultData {
   result?: string;
   duration_ms?: number;
   source?: ToolSource;
+  /** Additive, `run_command`-only. Same value as the tool's own JSON output's
+   *  `backend`/`exit_code` for a successful/failed execution, but also present for
+   *  refusals (blocked/declined/timeout), where the JSON output has no `backend` field. */
+  metadata?: { backend: 'local' | 'e2b'; exit_code: number | null };
+}
+
+// Local-agent `run_command` live output chunk (local backend only; never emitted for E2B).
+export interface StreamToolOutputChunkData {
+  id: string;
+  stream: 'stdout' | 'stderr';
+  text: string;
+  seq: number;
 }
 
 export interface StreamConversationTitleData {
@@ -291,6 +303,9 @@ export async function streamChat(
   providerRouting?: ProviderRoutingConfig | null,
   invokeAgentId?: string,
   onConversationTitle?: (data: StreamConversationTitleData) => void,
+  // Appended last (not inserted earlier): every existing call site uses positional
+  // arguments and would silently break if this shifted the position of any prior one.
+  onToolOutputChunk?: (data: StreamToolOutputChunkData) => void,
 ): Promise<void> {
   try {
     const body: Record<string, unknown> = { conversation_id: conversationId, content };
@@ -415,6 +430,10 @@ export async function streamChat(
           if (parsed.tool_result && onToolResult) {
             onToolResult(parsed.tool_result as StreamToolResultData);
           }
+          // Live output chunk (run_command, local backend only)
+          if (parsed.tool_output_chunk && onToolOutputChunk) {
+            onToolOutputChunk(parsed.tool_output_chunk as StreamToolOutputChunkData);
+          }
           // Done event with rich metadata
           if (parsed.done) {
             onDone(parsed as StreamDoneData);
@@ -467,6 +486,32 @@ export const settingsApi = {
   set: (key: string, value: string) => request<{ key: string; value: string }>(`/settings/${key}`, {
     method: 'PUT',
     body: JSON.stringify({ value }),
+  }),
+};
+
+// Local Agent pairing (named `agentPairingApi`, not `agentsApi` — that name is already
+// taken by the unrelated AI-agent CRUD API above)
+export interface PairingCodeResponse {
+  code: string;
+  expires_at: string;
+}
+
+export interface PairedDevice {
+  id: string;
+  device_name: string;
+  created_at: string;
+  last_seen_at: string | null;
+  revoked_at: string | null;
+  connected: boolean;
+}
+
+export const agentPairingApi = {
+  createPairingCode: () => request<PairingCodeResponse>('/agent/pairing-codes', {
+    method: 'POST',
+  }),
+  listPairings: () => request<PairedDevice[]>('/agent/pairings'),
+  unpair: (id: string) => request<{ ok: true }>(`/agent/pairings/${id}`, {
+    method: 'DELETE',
   }),
 };
 

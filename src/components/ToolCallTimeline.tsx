@@ -7,12 +7,16 @@ import {
   ChevronRight,
   CircleDashed,
   Clock3,
+  Cloud,
   Code2,
   Globe,
+  Laptop,
+  ShieldAlert,
   Sparkles,
+  Terminal,
   Wrench,
 } from 'lucide-react';
-import type { ToolExecution, ToolSource } from '../types';
+import type { ToolExecution, ToolOutputChunk, ToolSource } from '../types';
 
 interface ToolCallTimelineProps {
   calls: ToolExecution[];
@@ -51,6 +55,107 @@ function formatDuration(durationMs?: number): string | null {
   if (durationMs === undefined || durationMs < 0) return null;
   if (durationMs < 1000) return `${durationMs} ms`;
   return `${(durationMs / 1000).toFixed(1)} s`;
+}
+
+type RunCommandRefusal =
+  | { kind: 'blocked'; detail: string }
+  | { kind: 'declined' }
+  | { kind: 'timeout' };
+
+interface RunCommandInfo {
+  /** Only set once a real backend actually ran the command (success or non-zero exit) —
+   *  never for a refusal, which never reached a backend. Derived by parsing `call.result`
+   *  identically for the live and reconstructed-history paths (the one field both share)
+   *  rather than from `call.metadata`, which is never persisted and would otherwise make a
+   *  refusal show a badge live that a page reload could not reproduce. */
+  backend: 'local' | 'e2b' | null;
+  refusal: RunCommandRefusal | null;
+  exitCode: number | null;
+}
+
+const EMPTY_RUN_COMMAND_INFO: RunCommandInfo = { backend: null, refusal: null, exitCode: null };
+
+function getRunCommandInfo(call: ToolExecution): RunCommandInfo {
+  if (call.name !== 'run_command' || call.result === undefined) return EMPTY_RUN_COMMAND_INFO;
+  const parsed = tryParseJson(call.result);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return EMPTY_RUN_COMMAND_INFO;
+  const body = parsed as Record<string, unknown>;
+
+  const blocked = body.blocked;
+  if (blocked && typeof blocked === 'object' && !Array.isArray(blocked)) {
+    const { tier, pattern } = blocked as { tier?: unknown; pattern?: unknown };
+    const detail = `Tier ${typeof tier === 'number' ? tier : '?'}${typeof pattern === 'string' && pattern ? ` — ${pattern}` : ''}`;
+    return { backend: null, refusal: { kind: 'blocked', detail }, exitCode: null };
+  }
+  if (body.confirmation === 'declined') return { backend: null, refusal: { kind: 'declined' }, exitCode: null };
+  if (body.confirmation === 'timeout') return { backend: null, refusal: { kind: 'timeout' }, exitCode: null };
+
+  const backend = body.backend === 'local' || body.backend === 'e2b' ? body.backend : null;
+  const exitCode = typeof body.exit_code === 'number' ? body.exit_code : null;
+  return { backend, refusal: null, exitCode };
+}
+
+function refusalCopy(refusal: RunCommandRefusal): { label: string; detail?: string } {
+  switch (refusal.kind) {
+    case 'blocked':
+      return { label: 'Blocked by safety policy', detail: refusal.detail };
+    case 'declined':
+      return { label: 'Declined by user' };
+    case 'timeout':
+      return { label: 'Confirmation timed out' };
+  }
+}
+
+function BackendBadge({ backend }: { backend: 'local' | 'e2b' }) {
+  return backend === 'local' ? (
+    <span className="tool-call-badge">
+      <Laptop size={10} />
+      Local
+    </span>
+  ) : (
+    <span className="tool-call-badge">
+      <Cloud size={10} />
+      Sandbox
+    </span>
+  );
+}
+
+function LiveTerminalPanel({ liveOutput }: { liveOutput?: ToolOutputChunk[] }) {
+  const containerRef = React.useRef<HTMLDivElement>(null);
+  const chunks = liveOutput || [];
+
+  React.useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [chunks.length]);
+
+  return (
+    <div className="tool-call-panel tool-call-terminal-panel">
+      <div className="tool-call-panel-header">
+        <span className="tool-call-panel-title">
+          <Terminal size={12} />
+          Live output
+        </span>
+        <span className="tool-call-terminal-live">
+          <span className="tool-telemetry-live-dot" />
+          Streaming
+        </span>
+      </div>
+      <div ref={containerRef} className="tool-call-terminal">
+        {chunks.length === 0 ? (
+          <span className="tool-call-terminal-empty">Waiting for output…</span>
+        ) : (
+          chunks.map((chunk, i) => (
+            <span key={i} className={`tool-call-terminal-${chunk.stream}`}>
+              {chunk.text}
+            </span>
+          ))
+        )}
+        <span className="tool-call-terminal-cursor" aria-hidden="true" />
+      </div>
+    </div>
+  );
 }
 
 function DataPanel({
@@ -108,6 +213,8 @@ function ToolCallCard({
   const duration = formatDuration(call.duration_ms);
   const source = sourceLabel(call.source, call.name);
   const prettyName = prettifyToolName(call.name);
+  const isRunCommand = call.name === 'run_command';
+  const { backend, refusal, exitCode } = React.useMemo(() => getRunCommandInfo(call), [call]);
 
   React.useEffect(() => {
     if (call.status === 'running') {
@@ -115,8 +222,9 @@ function ToolCallCard({
     }
   }, [call.status]);
 
-  const statusMeta =
-    call.status === 'running'
+  const statusMeta = refusal
+    ? { icon: <ShieldAlert size={14} />, label: refusalCopy(refusal).label, className: 'refused' }
+    : call.status === 'running'
       ? { icon: <CircleDashed size={14} className="tool-call-spin" />, label: 'Running', className: 'running' }
       : call.status === 'error'
         ? { icon: <AlertCircle size={14} />, label: 'Error', className: 'error' }
@@ -137,12 +245,13 @@ function ToolCallCard({
       >
         <div className="tool-call-card-left">
           <div className="tool-call-card-icon">
-            {source === 'MCP' ? <Globe size={13} /> : <Wrench size={13} />}
+            {isRunCommand ? <Terminal size={13} /> : source === 'MCP' ? <Globe size={13} /> : <Wrench size={13} />}
           </div>
           <div className="tool-call-card-title-wrap">
             <div className="tool-call-card-title">{prettyName}</div>
             <div className="tool-call-card-subtitle">
               <span className="tool-call-badge">{source}</span>
+              {backend && <BackendBadge backend={backend} />}
               <span className={`tool-call-status ${statusMeta.className}`}>
                 {statusMeta.icon}
                 {statusMeta.label}
@@ -152,6 +261,9 @@ function ToolCallCard({
                   <Clock3 size={11} />
                   {duration}
                 </span>
+              )}
+              {!refusal && exitCode !== null && (
+                <span className="tool-call-duration">exit {exitCode}</span>
               )}
             </div>
           </div>
@@ -171,7 +283,12 @@ function ToolCallCard({
             className="tool-call-card-body"
           >
             <DataPanel title="Request" value={call.arguments || '{}'} accent="request" />
-            {call.result !== undefined ? (
+            {refusal?.kind === 'blocked' && (
+              <p className="tool-call-refusal-detail">{refusalCopy(refusal).detail}</p>
+            )}
+            {call.status === 'running' && isRunCommand ? (
+              <LiveTerminalPanel liveOutput={call.liveOutput} />
+            ) : call.result !== undefined ? (
               <DataPanel title="Result" value={call.result || ''} accent="result" />
             ) : (
               <div className="tool-call-pending-result">

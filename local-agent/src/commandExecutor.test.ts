@@ -1,0 +1,234 @@
+/**
+ * Plain-script test (repo convention: `tsx`, `node:assert`, no test-framework
+ * dependency — matches `scripts/test-command-safety.ts` et al.) covering the
+ * behaviors called out in the task brief's Tests section:
+ *   (a) a Tier-1 command never reaches `child_process.spawn`.
+ *   (b) a Tier-2 command sends `command_awaiting_confirmation` before
+ *       blocking on console input, and respects both the `yes` and timeout
+ *       paths (including a direct, simulated-stdin test of the real
+ *       `createConsoleConfirmer` console module).
+ *   (c) a `cwd` resolving outside `AGENT_WORKSPACE_ROOT` is rejected when
+ *       `allowOutsideWorkspace` is false and allowed when true.
+ *   (d) stdout/stderr are emitted as multiple `command_output_chunk`
+ *       messages as they arrive, not buffered into one.
+ * Plus a bonus cancellation check (killTreeFn invoked, a command_response
+ * still follows) since it is cheap and directly exercises a named risk.
+ */
+
+import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import path from 'node:path';
+import {
+  createCommandExecutor,
+  createConsoleConfirmer,
+  type CommandExecutorOptions,
+  type KillTreeFn,
+  type MinimalChildProcess,
+  type QuestionerLike,
+  type SpawnFn,
+} from './commandExecutor.js';
+import type { AgentToBackendMessage } from './transport.js';
+
+const WORKSPACE = path.resolve('C:\\agent-studio-test-workspace');
+
+class FakeChildProcess extends EventEmitter implements MinimalChildProcess {
+  pid = 4242;
+  exitCode: number | null = null;
+  signalCode: NodeJS.Signals | null = null;
+  stdout = new EventEmitter();
+  stderr = new EventEmitter();
+  kill(): boolean {
+    return true;
+  }
+}
+
+function makeSpawnFn(): { spawnFn: SpawnFn; children: FakeChildProcess[] } {
+  const children: FakeChildProcess[] = [];
+  const spawnFn: SpawnFn = () => {
+    const child = new FakeChildProcess();
+    children.push(child);
+    return child;
+  };
+  return { spawnFn, children };
+}
+
+function makeExecutor(overrides: Partial<CommandExecutorOptions> & { spawnFn?: SpawnFn } = {}) {
+  const sent: AgentToBackendMessage[] = [];
+  const options: CommandExecutorOptions = {
+    workspaceRoot: WORKSPACE,
+    allowOutsideWorkspace: false,
+    send: (message) => sent.push(message),
+    confirmTier2: async () => 'approved',
+    ...overrides,
+  };
+  return { executor: createCommandExecutor(options), sent };
+}
+
+function findResponse(sent: AgentToBackendMessage[]) {
+  return sent.find((m) => m.type === 'command_response') as Extract<AgentToBackendMessage, { type: 'command_response' }>;
+}
+
+async function main() {
+  // (a) Tier-1 command never reaches spawn.
+  {
+    let spawnCalled = false;
+    const spawnFn: SpawnFn = () => {
+      spawnCalled = true;
+      throw new Error('spawn must not be called for a Tier-1 command');
+    };
+    const { executor, sent } = makeExecutor({ spawnFn });
+    await executor.handleCommandRequest({ type: 'command_request', requestId: 'r-tier1', command: 'diskpart', timeoutMs: 5_000 });
+    assert.equal(spawnCalled, false, 'Tier-1 command reached spawn');
+    const response = findResponse(sent);
+    assert.ok(response, 'expected a command_response for a Tier-1 command');
+    assert.equal(response.blockedPattern, 'diskpart');
+    assert.equal(response.confirmation, undefined);
+    console.log('(a) Tier-1 command never reaches spawn: OK');
+  }
+
+  // (b1) Tier-2: command_awaiting_confirmation is sent before console read is invoked.
+  {
+    const order: string[] = [];
+    const { spawnFn, children } = makeSpawnFn();
+    const { executor } = makeExecutor({
+      send: (message) => order.push(`send:${message.type}`),
+      confirmTier2: async () => {
+        order.push('confirm:called');
+        return 'approved';
+      },
+      spawnFn,
+    });
+    await executor.handleCommandRequest({
+      type: 'command_request',
+      requestId: 'r-order',
+      command: 'git push --force origin main',
+      timeoutMs: 5_000,
+    });
+    children[0]?.emit('close', 0); // let the approved execution finish so no timer is left pending
+    assert.deepEqual(
+      order.slice(0, 2),
+      ['send:command_awaiting_confirmation', 'confirm:called'],
+      'command_awaiting_confirmation must be sent before blocking on console input'
+    );
+    console.log('(b1) command_awaiting_confirmation precedes console read: OK');
+  }
+
+  // (b2) Tier-2 approved ("yes") path executes and reports confirmation: 'approved'.
+  {
+    const { spawnFn, children } = makeSpawnFn();
+    const { executor, sent } = makeExecutor({ confirmTier2: async () => 'approved', spawnFn });
+    await executor.handleCommandRequest({
+      type: 'command_request',
+      requestId: 'r-approved',
+      command: 'git push --force origin main',
+      timeoutMs: 5_000,
+    });
+    assert.equal(children.length, 1, 'approved Tier-2 command must execute');
+    children[0].emit('close', 0);
+    const response = findResponse(sent);
+    assert.equal(response.confirmation, 'approved');
+    assert.equal(response.exitCode, 0);
+    console.log('(b2) Tier-2 approved path executes: OK');
+  }
+
+  // (b3) Tier-2 timeout path never executes and reports confirmation: 'timeout'.
+  {
+    let spawnCalled = false;
+    const spawnFn: SpawnFn = () => {
+      spawnCalled = true;
+      throw new Error('must not spawn on timeout');
+    };
+    const { executor, sent } = makeExecutor({ confirmTier2: async () => 'timeout', spawnFn });
+    await executor.handleCommandRequest({
+      type: 'command_request',
+      requestId: 'r-timeout',
+      command: 'git push --force origin main',
+      timeoutMs: 5_000,
+    });
+    assert.equal(spawnCalled, false, 'declined/timed-out Tier-2 command must not execute');
+    const response = findResponse(sent);
+    assert.equal(response.confirmation, 'timeout');
+    assert.equal(response.exitCode, null);
+    console.log('(b3) Tier-2 timeout path skips execution: OK');
+  }
+
+  // (b4) Direct, simulated-stdin coverage of the real console confirmer.
+  {
+    const yesRl: QuestionerLike = { question: async () => 'yes' };
+    assert.equal(await createConsoleConfirmer(yesRl, 1_000)('rm -rf /'), 'approved');
+
+    const noRl: QuestionerLike = { question: async () => 'nope' };
+    assert.equal(await createConsoleConfirmer(noRl, 1_000)('rm -rf /'), 'declined');
+
+    const neverAnswersRl: QuestionerLike = {
+      question: (_query, options) =>
+        new Promise((_resolve, reject) => {
+          options?.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+        }),
+    };
+    assert.equal(await createConsoleConfirmer(neverAnswersRl, 20)('rm -rf /'), 'timeout');
+    console.log('(b4) createConsoleConfirmer yes/declined/timeout (simulated stdin): OK');
+  }
+
+  // (c) cwd resolving outside the workspace root.
+  {
+    const { spawnFn, children } = makeSpawnFn();
+    const { executor, sent } = makeExecutor({ allowOutsideWorkspace: false, spawnFn });
+    await executor.handleCommandRequest({ type: 'command_request', requestId: 'r-cwd-blocked', command: 'echo hi', cwd: '..', timeoutMs: 5_000 });
+    assert.equal(children.length, 0, 'cwd outside workspace root must be rejected when allowOutsideWorkspace is false');
+    assert.equal(findResponse(sent).blockedPattern, 'cwd-outside-workspace');
+    console.log('(c1) cwd outside workspace root rejected by default: OK');
+  }
+  {
+    const { spawnFn, children } = makeSpawnFn();
+    const { executor, sent } = makeExecutor({ allowOutsideWorkspace: true, spawnFn });
+    await executor.handleCommandRequest({ type: 'command_request', requestId: 'r-cwd-allowed', command: 'echo hi', cwd: '..', timeoutMs: 5_000 });
+    assert.equal(children.length, 1, 'cwd outside workspace root must be allowed when allowOutsideWorkspace is true');
+    children[0].emit('close', 0);
+    assert.equal(findResponse(sent).blockedPattern, undefined);
+    console.log('(c2) cwd outside workspace root allowed with allowOutsideWorkspace: OK');
+  }
+
+  // (d) stdout/stderr streamed as multiple chunk messages, not buffered.
+  {
+    const { spawnFn, children } = makeSpawnFn();
+    const { executor, sent } = makeExecutor({ spawnFn });
+    await executor.handleCommandRequest({ type: 'command_request', requestId: 'r-stream', command: 'echo hi', timeoutMs: 5_000 });
+    const child = children[0];
+    child.stdout.emit('data', Buffer.from('line one\n'));
+    child.stdout.emit('data', Buffer.from('line two\n'));
+    child.stderr.emit('data', Buffer.from('a warning\n'));
+    child.emit('close', 0);
+
+    const chunks = sent.filter((m) => m.type === 'command_output_chunk');
+    assert.equal(chunks.length, 3, 'each data event must produce its own command_output_chunk message');
+    const response = findResponse(sent);
+    assert.equal(response.stdout, 'line one\nline two\n');
+    assert.equal(response.stderr, 'a warning\n');
+    assert.equal(response.exitCode, 0);
+    console.log('(d) stdout/stderr streamed incrementally as separate chunks: OK');
+  }
+
+  // (bonus) cancellation invokes killTreeFn and a command_response still follows.
+  {
+    const { spawnFn, children } = makeSpawnFn();
+    let killedPid: number | undefined;
+    const killTreeFn: KillTreeFn = (child) => {
+      killedPid = child.pid;
+    };
+    const { executor, sent } = makeExecutor({ spawnFn, killTreeFn });
+    await executor.handleCommandRequest({ type: 'command_request', requestId: 'r-cancel', command: 'echo hi', timeoutMs: 5_000 });
+    executor.handleCommandCancel('r-cancel');
+    assert.equal(killedPid, children[0].pid, 'cancel must invoke killTreeFn on the request active child');
+    children[0].emit('close', 1); // simulate the process actually terminating after the kill signal
+    assert.ok(findResponse(sent), 'a command_response must still be sent after cancellation');
+    console.log('(bonus) command_cancel kills the active child and still resolves with a command_response: OK');
+  }
+
+  console.log('\ncommandExecutor: all tests passed');
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

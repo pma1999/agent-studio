@@ -14,6 +14,7 @@ import { PremiumToggle } from './ui/PremiumToggle';
 import { PremiumEmojiPicker } from './ui/PremiumEmojiPicker';
 import { PremiumSelect } from './ui/PremiumSelect';
 import { ExportImportButtons } from './ExportImportButtons';
+import { AgentPairingPanel } from './AgentPairingPanel';
 import {
   generateCodeVerifier,
   generateState,
@@ -1779,6 +1780,12 @@ export function SettingsPanel() {
             />
           </div>
         </div>
+
+        {/* Divider */}
+        <div style={{ height: '1px', background: 'var(--border)' }} />
+
+        {/* Local Agent — pairing for the run_command tool's "local" backend */}
+        <AgentPairingPanel />
 
         {/* Divider */}
         <div style={{ height: '1px', background: 'var(--border)' }} />

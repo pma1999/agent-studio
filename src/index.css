@@ -1698,6 +1698,10 @@ button:hover .conv-delete-btn,
   border-color: rgba(122, 184, 143, 0.3);
 }
 
+.tool-call-card.refused {
+  border-color: rgb(var(--amber-rgb) / 0.4);
+}
+
 .tool-call-card-header {
   width: 100%;
   border: none;
@@ -1762,6 +1766,7 @@ button:hover .conv-delete-btn,
 .tool-call-badge {
   display: inline-flex;
   align-items: center;
+  gap: 4px;
   font-size: 0.62rem;
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -1789,6 +1794,10 @@ button:hover .conv-delete-btn,
 
 .tool-call-status.error {
   color: var(--error);
+}
+
+.tool-call-status.refused {
+  color: var(--state-warning);
 }
 
 .tool-call-duration {
@@ -1889,8 +1898,76 @@ button:hover .conv-delete-btn,
   color: var(--text-muted);
 }
 
+.tool-call-refusal-detail {
+  margin: 0 10px 10px;
+  padding: 7px 10px;
+  border: 1px dashed rgb(var(--amber-rgb) / 0.4);
+  border-radius: 7px;
+  background: var(--state-warning-soft);
+  color: var(--state-warning);
+  font-size: 0.72rem;
+  font-family: var(--font-mono);
+}
+
 .tool-call-spin {
   animation: toolSpin 1s linear infinite;
+}
+
+/* ---------- run_command live terminal ---------- */
+
+@keyframes toolCursorBlink {
+  0%, 45% { opacity: 1; }
+  50%, 95% { opacity: 0; }
+  100% { opacity: 1; }
+}
+
+.tool-call-terminal-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.62rem;
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--accent);
+}
+
+.tool-call-terminal {
+  margin: 0;
+  padding: 9px 10px 10px;
+  background: rgb(var(--black-rgb) / 0.4);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 220px;
+  min-height: 46px;
+  overflow-y: auto;
+}
+
+.tool-call-terminal-stdout {
+  color: var(--text-primary);
+}
+
+.tool-call-terminal-stderr {
+  color: var(--state-danger);
+}
+
+.tool-call-terminal-empty {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.tool-call-terminal-cursor {
+  display: inline-block;
+  width: 6px;
+  height: 12px;
+  margin-left: 1px;
+  vertical-align: text-bottom;
+  background: var(--accent);
+  animation: toolCursorBlink 1s step-end infinite;
 }
 
 @media (max-width: 767px) {
@@ -1906,6 +1983,43 @@ button:hover .conv-delete-btn,
     white-space: normal;
     line-height: 1.35;
   }
+}
+
+/* ---------- Local Agent pairing ---------- */
+
+@keyframes agentConnectedPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgb(var(--green-rgb) / 0.35); }
+  50% { box-shadow: 0 0 0 4px rgb(var(--green-rgb) / 0); }
+}
+
+.agent-pairing-code {
+  font-family: var(--font-mono);
+  font-size: 1.5rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  color: var(--text-primary);
+}
+
+.agent-pairing-countdown-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--surface-inset);
+  overflow: hidden;
+}
+
+.agent-pairing-countdown-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 1s linear;
+}
+
+.agent-pairing-connected-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--state-success);
+  animation: agentConnectedPulse 1.8s ease-in-out infinite;
 }
 
 /* ---------- Touch targets (mobile) ---------- */

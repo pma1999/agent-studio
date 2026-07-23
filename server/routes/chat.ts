@@ -5,6 +5,7 @@ import { getSettingValue } from './settings.js';
 import { resolveToolsForAgent, resolveToolsFromIds, toOpenRouterTools, runTool, appendToolInstructionsIfNeeded, getConversationToolOverride, selectToolResolutionSource } from '../tools/index.js';
 import { annotationsFromWebSearchResults } from '../tools/registry.js';
 import { runCommandTool } from '../tools/execCommand.js';
+import type { RunToolResult } from '../tools/run.js';
 import { parseReasoningToolCalls } from '../utils/parseReasoningToolCalls.js';
 import type { McpConnection } from '../mcp/index.js';
 import { AuthRequest } from '../middleware/auth.js';
@@ -91,6 +92,33 @@ export const MAX_TOOL_TIME_MS_PER_TURN = readNonNegativeNumberEnv('MAX_TOOL_TIME
 
 export function isToolBudgetExceeded(toolCallCount: number, toolTimeMs: number): boolean {
   return toolCallCount >= MAX_TOOL_CALLS_PER_TURN || toolTimeMs >= MAX_TOOL_TIME_MS_PER_TURN;
+}
+
+export function buildToolOutputChunkEvent(
+  id: string,
+  chunk: { stream: 'stdout' | 'stderr'; text: string },
+  seq: number,
+) {
+  return { tool_output_chunk: { id, stream: chunk.stream, text: chunk.text, seq } };
+}
+
+export function buildToolResultEvent(
+  id: string,
+  name: string,
+  result: RunToolResult,
+  durationMs: number,
+) {
+  return {
+    tool_result: {
+      id,
+      name,
+      ok: !result.isError,
+      result: result.output,
+      duration_ms: durationMs,
+      source: result.source,
+      ...(name === 'run_command' && result.metadata ? { metadata: result.metadata } : {}),
+    },
+  };
 }
 
 function isPDFEngine(s: unknown): s is PDFEngine {
@@ -914,10 +942,14 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
 
           let result;
           try {
+            let outputSeq = 0;
             result = name === 'run_command'
               ? await runCommandTool(args, userId, {
                 signal: abortController?.signal ?? new AbortController().signal,
-                onOutputChunk: () => {},
+                onOutputChunk: (chunk) => {
+                  if (clientDisconnected || res.writableEnded) return;
+                  res.write(`data: ${JSON.stringify(buildToolOutputChunkEvent(id, chunk, outputSeq++))}\n\n`);
+                },
               })
               : await runTool(resolvedTools, name, args, mcpClients, userId);
           } finally {
@@ -926,17 +958,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
           const durationMs = Date.now() - startedAt;
           toolCallCount++;
           toolTimeMs += durationMs;
-          res.write(`data: ${JSON.stringify({
-            tool_result: {
-              id,
-              name,
-              ok: !result.isError,
-              result: result.output,
-              duration_ms: durationMs,
-              source: result.source,
-              ...(name === 'run_command' && result.metadata ? { metadata: result.metadata } : {}),
-            },
-          })}\n\n`);
+          res.write(`data: ${JSON.stringify(buildToolResultEvent(id, name, result, durationMs))}\n\n`);
 
           messages.push({ role: 'tool', tool_call_id: id, content: result.output });
 

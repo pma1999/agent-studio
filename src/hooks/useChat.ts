@@ -39,6 +39,7 @@ export function useChat() {
     selectedAgentId,
     upsertStreamingToolCall,
     completeStreamingToolCall,
+    appendStreamingToolOutputChunk,
     resetStreamingActivityEvents,
     // Council state
     councilEnabled,
@@ -277,8 +278,9 @@ export function useChat() {
       providerRouting,
       invokeAgentId,
       (data) => updateConversationTitle(data.conversation_id, data.title),
+      (data) => appendStreamingToolOutputChunk(data),
     );
-  }, [activeConversationId, isStreaming, addMessage, setIsStreaming, setStreamingContent, appendStreamingContent, appendStreamingContentEvent, setAbortController, setStreamStartTime, setReasoningContent, appendReasoningContent, appendStreamingReasoningEvent, reasoningOverride, upsertStreamingToolCall, completeStreamingToolCall, resetStreamingActivityEvents, loadMessages, loadConversations, updateConversationTitle, selectedAgentId]);
+  }, [activeConversationId, isStreaming, addMessage, setIsStreaming, setStreamingContent, appendStreamingContent, appendStreamingContentEvent, setAbortController, setStreamStartTime, setReasoningContent, appendReasoningContent, appendStreamingReasoningEvent, reasoningOverride, upsertStreamingToolCall, completeStreamingToolCall, appendStreamingToolOutputChunk, resetStreamingActivityEvents, loadMessages, loadConversations, updateConversationTitle, selectedAgentId]);
 
   const cancelStream = useCallback(() => {
     const controller = useStore.getState().abortController;

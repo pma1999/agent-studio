@@ -692,6 +692,21 @@ export function migrate() {
     CREATE INDEX IF NOT EXISTS idx_tool_executions_user_id ON tool_executions(user_id);
     CREATE INDEX IF NOT EXISTS idx_tool_executions_conversation_id ON tool_executions(conversation_id);
   `);
+
+  // --- Paired local agents (raw tokens are never persisted) ---
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS paired_agents (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      device_name TEXT NOT NULL,
+      token_hash TEXT UNIQUE NOT NULL,
+      created_at TEXT DEFAULT (datetime('now')),
+      last_seen_at TEXT,
+      revoked_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_paired_agents_user_id ON paired_agents(user_id);
+    CREATE INDEX IF NOT EXISTS idx_paired_agents_token_hash ON paired_agents(token_hash);
+  `);
 }
 
 function migrateCouncilTables() {

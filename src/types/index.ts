@@ -166,6 +166,13 @@ export type ToolSource = 'builtin' | 'http' | 'mcp' | 'unknown';
 
 export type ToolExecutionStatus = 'running' | 'done' | 'error';
 
+/** One `tool_output_chunk` SSE frame for a live-streaming `run_command` execution. */
+export interface ToolOutputChunk {
+  stream: 'stdout' | 'stderr';
+  text: string;
+  seq: number;
+}
+
 export interface ToolExecution {
   id: string;
   name: string;
@@ -175,6 +182,14 @@ export interface ToolExecution {
   ok?: boolean;
   duration_ms?: number;
   source?: ToolSource;
+  /** Additive per-tool metadata from `tool_result` (e.g. `run_command`'s `{backend, exit_code}`).
+   *  Only ever populated on the live-streaming path — never persisted, so reconstructed/reloaded
+   *  history has no `metadata` and derives the same information by parsing `result` instead. */
+  metadata?: Record<string, unknown>;
+  /** Accumulating buffer of `tool_output_chunk` frames for a live `run_command` execution,
+   *  appended in arrival (== `seq`) order. Only present while streaming; absent once history
+   *  is reconstructed from persisted messages. */
+  liveOutput?: ToolOutputChunk[];
 }
 
 export interface StreamingReasoningEvent {

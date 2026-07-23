@@ -97,7 +97,8 @@ interface AppState {
   appendStreamingContentEvent: (chunk: string) => void;
   appendStreamingReasoningEvent: (chunk: string) => void;
   upsertStreamingToolCall: (data: { id: string; name: string; arguments: string; source?: ToolSource }) => void;
-  completeStreamingToolCall: (data: { id: string; name: string; ok: boolean; result?: string; duration_ms?: number; source?: ToolSource }) => void;
+  completeStreamingToolCall: (data: { id: string; name: string; ok: boolean; result?: string; duration_ms?: number; source?: ToolSource; metadata?: Record<string, unknown> }) => void;
+  appendStreamingToolOutputChunk: (data: { id: string; stream: 'stdout' | 'stderr'; text: string; seq: number }) => void;
   resetStreamingActivityEvents: () => void;
 
   // Settings
@@ -451,6 +452,7 @@ export const useStore = create<AppState>((set, get) => ({
               result: data.result,
               duration_ms: data.duration_ms,
               source: data.source || 'unknown',
+              metadata: data.metadata,
             },
           },
         ],
@@ -470,6 +472,30 @@ export const useStore = create<AppState>((set, get) => ({
         result: data.result,
         duration_ms: data.duration_ms,
         source: data.source || prev.tool.source,
+        metadata: data.metadata,
+      },
+    };
+    return { streamingActivityEvents: next };
+  }),
+  appendStreamingToolOutputChunk: (data) => set((state) => {
+    const idx = state.streamingActivityEvents.findIndex(
+      (ev) => ev.type === 'tool' && ev.tool.id === data.id
+    );
+    // A chunk arriving before its tool_call event would be a backend-ordering bug outside
+    // this store's control (chat.ts always emits tool_call before dispatching); no-op rather
+    // than fabricate a placeholder execution with an unknown name/arguments.
+    if (idx === -1) return {};
+    const next = [...state.streamingActivityEvents];
+    const prev = next[idx];
+    if (prev.type !== 'tool') return {};
+    next[idx] = {
+      ...prev,
+      tool: {
+        ...prev.tool,
+        liveOutput: [
+          ...(prev.tool.liveOutput || []),
+          { stream: data.stream, text: data.text, seq: data.seq },
+        ],
       },
     };
     return { streamingActivityEvents: next };

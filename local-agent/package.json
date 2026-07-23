@@ -1,0 +1,25 @@
+{
+  "name": "agent-studio-local-agent",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Standalone console application that pairs a user's own PC with Agent Studio and executes commands locally.",
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/local-agent/src/index.js",
+    "dev": "tsx src/index.ts",
+    "test": "tsx src/commandExecutor.test.ts"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}

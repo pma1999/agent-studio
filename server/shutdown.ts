@@ -21,6 +21,7 @@ let shuttingDown = false;
 /** Active SSE response objects. We notify them on shutdown so the frontend
  *  can display a friendly message instead of a raw connection error.       */
 const activeStreams = new Set<Response>();
+const shutdownHooks = new Set<() => void>();
 
 // ---------------------------------------------------------------------------
 // Public helpers
@@ -40,6 +41,12 @@ export function trackStream(res: Response): void {
 /** Unregister an SSE response (called when the handler finishes normally). */
 export function untrackStream(res: Response): void {
   activeStreams.delete(res);
+}
+
+/** Register a synchronous best-effort notification/cleanup hook. */
+export function registerShutdownHook(hook: () => void): () => void {
+  shutdownHooks.add(hook);
+  return () => shutdownHooks.delete(hook);
 }
 
 // ---------------------------------------------------------------------------
@@ -81,6 +88,14 @@ export function setupGracefulShutdown(server: Server, db: Database.Database): vo
 
     // 1. Notify all active SSE clients so the frontend can react.
     drainStreams();
+    for (const hook of shutdownHooks) {
+      try {
+        hook();
+      } catch (error) {
+        console.error('[shutdown] Hook error:', error);
+      }
+    }
+    shutdownHooks.clear();
 
     // 2. Stop accepting new connections.
     server.close(() => {

@@ -1,6 +1,12 @@
 import { Sandbox, type CommandResult, type SandboxOpts } from 'e2b';
+import { nanoid } from 'nanoid';
 import { z } from 'zod';
 import { getSettingValue } from '../routes/settings.js';
+import {
+  cancelCommandRequest,
+  isAgentConnected,
+  sendCommandRequest,
+} from '../agentRelay/registry.js';
 import { logToolExecution } from './execAudit.js';
 import type { RunToolResult } from './run.js';
 import { scanCommand } from '../../shared/commandSafety.js';
@@ -11,7 +17,7 @@ const MAX_TIMEOUT_SECONDS = 1_800;
 const MAX_SANDBOX_TIMEOUT_MS = 3_550_000;
 const E2B_DEFAULT_CWD = '/home/user';
 const CLIENT_DISCONNECT_ERROR = 'Command cancelled because the client disconnected.';
-const LOCAL_BACKEND_ERROR = "backend 'local' is not available yet — no local agent support is configured for this deployment.";
+const LOCAL_BACKEND_ERROR = 'local agent is not connected';
 const E2B_METADATA_MITIGATION_TIMEOUT_MS = 2_000;
 const E2B_NETWORK_DENY_OUT = [
   '10.0.0.0/8',
@@ -117,6 +123,14 @@ function isCommandResult(value: unknown): value is CommandResult {
 }
 
 function errorMessage(error: unknown): string {
+  if (
+    error
+    && typeof error === 'object'
+    && 'error' in error
+    && typeof (error as { error?: unknown }).error === 'string'
+  ) {
+    return (error as { error: string }).error;
+  }
   return error instanceof Error ? error.message : String(error);
 }
 
@@ -200,22 +214,32 @@ export async function runCommandTool(
   const startedAt = Date.now();
   const rawCommand = typeof args?.command === 'string' ? args.command : null;
   let auditLogged = false;
+  let selectedBackend: 'local' | 'e2b' = 'e2b';
+  let auditCwd: string | null = null;
 
   const finish = (
     output: Record<string, unknown>,
     isError: boolean,
-    details: { exitCode?: number | null; blockedPattern?: string | null } = {}
+    details: {
+      exitCode?: number | null;
+      blockedPattern?: string | null;
+      confirmationRequired?: boolean;
+      confirmationResult?: 'approved' | 'declined' | 'timeout' | null;
+    } = {}
   ): RunToolResult => {
     if (!auditLogged) {
       auditLogged = true;
       logToolExecution({
         userId,
         toolName: 'run_command',
-        backend: 'e2b',
+        backend: selectedBackend,
         command: rawCommand,
+        cwd: auditCwd,
         exitCode: details.exitCode ?? null,
         durationMs: Date.now() - startedAt,
         blockedPattern: details.blockedPattern ?? null,
+        confirmationRequired: details.confirmationRequired,
+        confirmationResult: details.confirmationResult ?? null,
         isError,
       });
     }
@@ -223,7 +247,7 @@ export async function runCommandTool(
       output: JSON.stringify(output),
       isError,
       source: 'builtin',
-      metadata: { backend: 'e2b', exit_code: details.exitCode ?? null },
+      metadata: { backend: selectedBackend, exit_code: details.exitCode ?? null },
     };
   };
 
@@ -234,6 +258,10 @@ export async function runCommandTool(
   }
 
   const { command, cwd, backend, timeout_seconds: requestedTimeoutSeconds } = parsed.data;
+  selectedBackend = backend === 'local' || (backend === 'auto' && isAgentConnected(userId))
+    ? 'local'
+    : 'e2b';
+  auditCwd = cwd ?? null;
   const verdict = scanCommand(command, null, true);
   if (verdict.tier === 1) {
     return finish(
@@ -243,13 +271,87 @@ export async function runCommandTool(
     );
   }
 
-  // TODO(task-09): replace this early return with the connected local-agent check and relay call.
-  if (backend === 'local') {
-    return finish({ error: LOCAL_BACKEND_ERROR }, true);
+  const timeoutSeconds = Math.min(requestedTimeoutSeconds, MAX_TIMEOUT_SECONDS);
+  const timeoutMs = Math.max(1, Math.floor(timeoutSeconds * 1000));
+
+  if (selectedBackend === 'local') {
+    if (!isAgentConnected(userId)) {
+      return finish({ error: LOCAL_BACKEND_ERROR }, true);
+    }
+    if (ctx.signal.aborted) {
+      return finish({ error: CLIENT_DISCONNECT_ERROR }, true);
+    }
+
+    const requestId = `command_${nanoid()}`;
+    let removeAbortListener = () => {};
+    try {
+      const commandPromise = sendCommandRequest(
+        userId,
+        requestId,
+        command,
+        cwd,
+        timeoutMs,
+        ctx.onOutputChunk,
+      );
+      const abortPromise = new Promise<never>((_, reject) => {
+        const onAbort = () => {
+          try {
+            cancelCommandRequest(userId, requestId);
+          } catch (error) {
+            console.error('[run_command] failed to cancel local command:', error);
+          }
+          reject(new Error(CLIENT_DISCONNECT_ERROR));
+        };
+        ctx.signal.addEventListener('abort', onAbort, { once: true });
+        removeAbortListener = () => ctx.signal.removeEventListener('abort', onAbort);
+        if (ctx.signal.aborted) onAbort();
+      });
+
+      const result = await Promise.race([commandPromise, abortPromise]);
+      const resultDetails = {
+        exitCode: result.exitCode ?? null,
+        blockedPattern: result.blockedPattern ?? null,
+        confirmationRequired: result.confirmation !== undefined,
+        confirmationResult: result.confirmation ?? null,
+      };
+      if (result.confirmation === 'declined' || result.confirmation === 'timeout') {
+        return finish(
+          {
+            error: result.confirmation === 'declined'
+              ? 'Command confirmation was declined; the command was not executed.'
+              : 'Command confirmation timed out; the command was not executed.',
+            confirmation: result.confirmation,
+          },
+          true,
+          resultDetails,
+        );
+      }
+
+      const stdout = truncateCommandOutput(String(result.stdout ?? ''));
+      const stderr = truncateCommandOutput(String(result.stderr ?? ''));
+      return finish(
+        {
+          stdout: stdout.text,
+          stderr: stderr.text,
+          exit_code: result.exitCode ?? null,
+          backend: 'local',
+          resolved_cwd: cwd?.trim() || '(workspace root)',
+          timeout_seconds_applied: timeoutSeconds,
+          truncated: stdout.truncated || stderr.truncated,
+        },
+        false,
+        resultDetails,
+      );
+    } catch (error) {
+      if (ctx.signal.aborted || errorMessage(error) === CLIENT_DISCONNECT_ERROR) {
+        return finish({ error: CLIENT_DISCONNECT_ERROR }, true);
+      }
+      return finish({ error: errorMessage(error) }, true);
+    } finally {
+      removeAbortListener();
+    }
   }
 
-  const timeoutSeconds = Math.min(requestedTimeoutSeconds, MAX_TIMEOUT_SECONDS);
-  const timeoutMs = timeoutSeconds * 1000;
   const sandboxTimeoutMs = Math.min(timeoutMs + 30_000, MAX_SANDBOX_TIMEOUT_MS);
   const resolvedCwd = resolveSandboxCwd(cwd);
   let sandbox: Sandbox | null = null;

@@ -6,6 +6,7 @@
 
 import db from '../db.js';
 import { getSettingValue } from '../routes/settings.js';
+import { isAgentConnected } from '../agentRelay/registry.js';
 import { getBuiltinDefinition, getBuiltinExecutor } from './registry.js';
 import { isRunCommandUsable } from './execCommand.js';
 import {
@@ -85,7 +86,7 @@ function isUsable(t: ToolRow, userId: string): boolean {
       const key = userId ? getSettingValue(userId, 'search_api_key') : '';
       return !!key?.trim();
     }
-    if (t.name === 'run_command') return isRunCommandUsable(userId);
+    if (t.name === 'run_command') return isAgentConnected(userId) || isRunCommandUsable(userId);
     if (t.name === 'web_fetch') return true;
     return true;
   }

@@ -116,7 +116,7 @@ export function ChatView() {
           ? `r:${ev.id}:${ev.content.length}`
           : ev.type === 'content'
             ? `c:${ev.id}:${ev.content.length}`
-            : `t:${ev.tool.id}:${ev.tool.status}:${(ev.tool.result || '').length}`
+            : `t:${ev.tool.id}:${ev.tool.status}:${(ev.tool.result || '').length}:${ev.tool.liveOutput?.length || 0}`
       ))
       .join('|')
   ), [streamingActivityEvents]);
