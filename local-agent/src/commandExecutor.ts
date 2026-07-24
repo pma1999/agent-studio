@@ -45,13 +45,55 @@ const SAFE_ENV_KEYS = [
   'PATHEXT',
 ] as const;
 
+/**
+ * Fixed, non-host-derived env additions merged into every `buildSafeEnv()`
+ * result (quick-local-agent-python-utf8) — deliberately *not* a name added to
+ * `SAFE_ENV_KEYS` above, because `SAFE_ENV_KEYS` only forwards a value that
+ * already exists in this agent's own `process.env`; that would make the fix
+ * depend on the host machine already having `PYTHONIOENCODING` set, which is
+ * precisely the "works on my PC but not the user's" gap this exists to close.
+ *
+ * Root cause: a `run_command`-executed Python script that prints emoji
+ * (`🔍`, `📦`, `✅`, ...) can crash with `UnicodeEncodeError:
+ * 'charmap' codec can't encode character ...`. This happens *inside* the
+ * spawned Python process itself, before any byte reaches this agent's own
+ * Node code (`handleStreamData` below already decodes stdout/stderr as UTF-8
+ * via `chunk.toString()`, which is correct and unrelated to this bug): when a
+ * Python process's stdout/stderr is a redirected pipe rather than a real
+ * console (exactly what `spawn()` gives every child here), CPython on
+ * Windows falls back to `locale.getpreferredencoding(False)` — the system's
+ * legacy ANSI codepage (e.g. `cp1252`) — to decide how `print()` encodes
+ * text, and that codepage cannot represent most emoji. This is independent
+ * of which shell (`pwsh`/`powershell`/`cmd`) or shell version launched
+ * Python: a shell's own good Unicode handling for its own text does not
+ * change what encoding a *grandchild* process (python.exe) defaults to for
+ * itself.
+ *
+ * `PYTHONIOENCODING=utf-8:replace` forces any Python child (script,
+ * one-liner, whatever the model runs) to always encode stdout/stderr as
+ * UTF-8 with a non-crashing replace-on-error handler, regardless of the host
+ * machine's console codepage, redirected-pipe status, or installed
+ * shell/version — so this never needs to be set on the host, and does not
+ * require the user or the executed script to do anything special. Node
+ * already decodes the resulting bytes as UTF-8 by default, so this is
+ * consistent end-to-end. Harmless on a run that never invokes Python: the
+ * variable is simply ignored by every other interpreter/shell.
+ *
+ * Do not strip this as unused/dead-looking config — see the `PATHEXT`
+ * comment above for why a fixed env entry like this can be silently
+ * load-bearing without any visible local symptom if removed.
+ */
+const FIXED_SAFE_ENV: Readonly<NodeJS.ProcessEnv> = {
+  PYTHONIOENCODING: 'utf-8:replace',
+};
+
 export function buildSafeEnv(): NodeJS.ProcessEnv {
   const safeEnv: NodeJS.ProcessEnv = {};
   for (const key of SAFE_ENV_KEYS) {
     const value = process.env[key];
     if (value !== undefined) safeEnv[key] = value;
   }
-  return safeEnv;
+  return { ...safeEnv, ...FIXED_SAFE_ENV };
 }
 
 export const DEFAULT_CONFIRMATION_TIMEOUT_MS = 60_000;

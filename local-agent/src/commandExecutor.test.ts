@@ -23,6 +23,11 @@
  * for this exact class of PowerShell bug (a unit-level assertion on the env
  * object alone cannot prove PowerShell actually launches/waits/captures
  * stdio from a native child correctly).
+ *
+ * Plus (quick-local-agent-python-utf8): a real-process regression test for
+ * the `PYTHONIOENCODING`-omission bug (a Python child crashing with
+ * `UnicodeEncodeError` when printing emoji to a redirected pipe) — same
+ * real-spawn, win32-gated, graceful-skip pattern as the PATHEXT check above.
  */
 
 import assert from 'node:assert/strict';
@@ -39,7 +44,7 @@ import {
   type QuestionerLike,
   type SpawnFn,
 } from './commandExecutor.js';
-import { buildShellInvocation } from './shellDetection.js';
+import { buildShellInvocation, createShellDetector } from './shellDetection.js';
 import type { AgentToBackendMessage } from './transport.js';
 
 const WORKSPACE = path.resolve('C:\\agent-studio-test-workspace');
@@ -349,6 +354,78 @@ async function main() {
     }
   } else {
     console.log('(skip) PATHEXT regression check: not on win32');
+  }
+
+  // (PYTHONIOENCODING regression, quick-local-agent-python-utf8) real-process
+  // check: a real Python process spawned through the exact buildSafeEnv() +
+  // buildShellInvocation() + spawn path (not a mocked SpawnFn) that prints an
+  // emoji must not raise UnicodeEncodeError. Mirrors the PATHEXT real-process
+  // check above (real spawn, real buildSafeEnv()/buildShellInvocation(),
+  // win32-gated, graceful skip if the interpreter isn't installed) because
+  // this exact bug class — a Python child falling back to the host's legacy
+  // console codepage once its stdout/stderr become a redirected pipe — is
+  // invisible to unit tests that mock spawnFn/fake children.
+  if (process.platform === 'win32') {
+    const pythonLauncher = ['python', 'py'].find((candidate) => {
+      const probe = spawnSync(candidate, ['--version']);
+      return !probe.error && probe.status === 0;
+    });
+    if (!pythonLauncher) {
+      console.log('(skip) PYTHONIOENCODING regression check: no python/py interpreter installed on this machine');
+    } else {
+      // Negative control, run first: informational, not asserted as a hard
+      // failure. It normally reproduces the crash this fix exists to prevent
+      // when PYTHONIOENCODING is absent from the child's env (i.e.
+      // buildSafeEnv() before this fix) — an emoji printed to a redirected
+      // pipe with only PATH forwarded, the same shape buildSafeEnv() produced
+      // previously. But whether this reproduces is itself host-codepage-
+      // dependent (e.g. a machine with Windows' "Use Unicode UTF-8 for
+      // worldwide language support" beta setting enabled has ACP/OEMCP already
+      // at 65001, so the unpatched control would *not* crash there either) —
+      // asserting a specific host codepage here would reintroduce exactly the
+      // machine-dependence this fix exists to eliminate, so it is logged, not
+      // asserted. The positive assertions below (via buildSafeEnv()) are the
+      // actual regression guard and hold regardless of host codepage.
+      const emojiPrintCommand = `${pythonLauncher} -c "print(chr(0x2705))"`;
+      const controlChild = realSpawn(pythonLauncher, ['-c', 'print(chr(0x2705))'], { env: { PATH: process.env.PATH } });
+      let controlStderr = '';
+      const controlExitCode: number | null = await new Promise((resolve) => {
+        controlChild.stderr.on('data', (d) => (controlStderr += d));
+        controlChild.on('close', (code) => resolve(code));
+      });
+      if (controlExitCode !== 0 && controlStderr.includes('UnicodeEncodeError')) {
+        console.log('(control) confirmed: without PYTHONIOENCODING, this machine reproduces UnicodeEncodeError on an emoji print to a piped stdout');
+      } else {
+        console.log(
+          "(note) this machine's default codepage already encodes UTF-8 (or otherwise did not crash without PYTHONIOENCODING); " +
+            'negative control inconclusive here, proceeding to the positive assertions'
+        );
+      }
+
+      // The actual fix, exercised through the real spawn path: buildSafeEnv()
+      // + buildShellInvocation() + spawn, using whichever shell this machine
+      // actually detects (pwsh/powershell/cmd), running the emoji-printing
+      // Python one-liner.
+      const shell = createShellDetector()();
+      const invocation = buildShellInvocation(shell, emojiPrintCommand);
+      const env = buildSafeEnv();
+      const child = invocation.useShellTrue
+        ? realSpawn(invocation.command, { shell: true, env })
+        : realSpawn(invocation.file, invocation.args, { env });
+      let stdout = '';
+      let stderr = '';
+      const exitCode: number | null = await new Promise((resolve) => {
+        child.stdout!.on('data', (d) => (stdout += d));
+        child.stderr!.on('data', (d) => (stderr += d));
+        child.on('close', (code) => resolve(code));
+      });
+      assert.equal(exitCode, 0, `python via buildSafeEnv()/buildShellInvocation() must exit 0 when printing an emoji, got stderr: ${stderr.slice(0, 500)}`);
+      assert.ok(!stderr.includes('UnicodeEncodeError'), `stderr must not contain UnicodeEncodeError: ${stderr.slice(0, 500)}`);
+      assert.ok(stdout.includes('✅'), `stdout must contain the actual emoji when decoded as UTF-8, got: ${JSON.stringify(stdout)}`);
+      console.log(`(PYTHONIOENCODING) ${pythonLauncher} via ${shell.kind}: buildSafeEnv() lets an emoji-printing Python one-liner run and report output without a UnicodeEncodeError: OK`);
+    }
+  } else {
+    console.log('(skip) PYTHONIOENCODING regression check: not on win32');
   }
 
   console.log('\ncommandExecutor: all tests passed');
