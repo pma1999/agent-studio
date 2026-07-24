@@ -1,7 +1,7 @@
-import { Bot, MessageSquare, Wrench, Plug, Users, type LucideIcon } from 'lucide-react';
+import { Bot, MessageSquare, Wrench, Plug, Users, Layers, type LucideIcon } from 'lucide-react';
 import type { View } from '../types';
 
-export type NavView = Extract<View, 'chat' | 'agents' | 'councils' | 'tools' | 'mcp'>;
+export type NavView = Extract<View, 'chat' | 'agents' | 'councils' | 'tools' | 'mcp' | 'skills'>;
 
 export interface NavItem {
   id: NavView;
@@ -16,4 +16,5 @@ export const navItems: NavItem[] = [
   { id: 'councils', label: 'Councils', icon: Users },
   { id: 'tools', label: 'Tools', icon: Wrench },
   { id: 'mcp', label: 'MCP', icon: Plug },
+  { id: 'skills', label: 'Skills', icon: Layers },
 ];

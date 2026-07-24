@@ -1,12 +1,13 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { AtSign, Bot, X, Sparkles } from 'lucide-react';
-import type { Agent } from '../../types';
+import { AtSign, Bot, X, Sparkles, Layers } from 'lucide-react';
+import type { Agent, Skill } from '../../types';
 
 interface PremiumMentionInputProps {
   value: string;
-  onChange: (value: string, invokeAgentId?: string) => void;
+  onChange: (value: string, invokeAgentId?: string, invokeSkillNames?: string[]) => void;
   agents: Agent[];
+  skills: Skill[];
   placeholder?: string;
   disabled?: boolean;
   maxRows?: number;
@@ -23,10 +24,17 @@ interface Mention {
   endIndex: number;
 }
 
+interface SkillMention {
+  skill: Skill;
+  startIndex: number;
+  endIndex: number;
+}
+
 export function PremiumMentionInput({
   value,
   onChange,
   agents,
+  skills,
   placeholder = 'Type a message... Use @ to invoke an agent',
   disabled = false,
   maxRows = 10,
@@ -43,6 +51,10 @@ export function PremiumMentionInput({
   const [mentionStartPos, setMentionStartPos] = useState<number | null>(null);
   const [activeMention, setActiveMention] = useState<Mention | null>(null);
   const [dropdownPos, setDropdownPos] = useState({ top: 0, left: 0, width: 0 });
+  const [showSkillDropdown, setShowSkillDropdown] = useState(false);
+  const [skillQuery, setSkillQuery] = useState('');
+  const [skillHighlightedIndex, setSkillHighlightedIndex] = useState(0);
+  const [skillStartPos, setSkillStartPos] = useState<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -78,6 +90,37 @@ export function PremiumMentionInput({
     }
   }, [mentions]);
 
+  // Extract every `/skill-name` mention from text (unlike extractMentions/activeMention,
+  // every match matters here, not just the last — there is no floating badge for skills,
+  // so we don't need singular "active" tracking, only the deduplicated name list below).
+  const extractSkillMentions = useCallback((text: string): SkillMention[] => {
+    const skillMentions: SkillMention[] = [];
+    const skillRegex = /(?:^|\s)\/([a-z0-9-]+)/gi;
+    let match;
+    while ((match = skillRegex.exec(text)) !== null) {
+      const skillName = match[1];
+      const skill = skills.find(
+        (s) => s.name.toLowerCase() === skillName.toLowerCase()
+      );
+      if (skill) {
+        const slashIndex = match[0].startsWith('/') ? match.index : match.index + 1;
+        skillMentions.push({
+          skill,
+          startIndex: slashIndex,
+          endIndex: slashIndex + 1 + skillName.length,
+        });
+      }
+    }
+    return skillMentions;
+  }, [skills]);
+
+  // Deduplicated skill names currently mentioned in `text` — computed fresh at every
+  // onChange call site rather than duplicating the dedup logic at each one.
+  const currentSkillNames = useCallback((text: string): string[] | undefined => {
+    const names = Array.from(new Set(extractSkillMentions(text).map((m) => m.skill.name)));
+    return names.length > 0 ? names : undefined;
+  }, [extractSkillMentions]);
+
   // Calculate dropdown position
   const updateDropdownPosition = useCallback(() => {
     if (containerRef.current) {
@@ -108,36 +151,71 @@ export function PremiumMentionInput({
       .slice(0, 6);
   }, [agents, mentionQuery]);
 
+  // Filter skills based on skill query
+  const filteredSkills = useMemo(() => {
+    if (!skillQuery) return skills.slice(0, 6);
+    const query = skillQuery.toLowerCase();
+    return skills
+      .filter(
+        (skill) =>
+          skill.name.toLowerCase().includes(query) ||
+          (skill.description?.toLowerCase() || '').includes(query)
+      )
+      .sort((a, b) => {
+        const aNameMatch = a.name.toLowerCase().startsWith(query) ? 2 : a.name.toLowerCase().includes(query) ? 1 : 0;
+        const bNameMatch = b.name.toLowerCase().startsWith(query) ? 2 : b.name.toLowerCase().includes(query) ? 1 : 0;
+        return bNameMatch - aNameMatch;
+      })
+      .slice(0, 6);
+  }, [skills, skillQuery]);
+
   // Handle input changes
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const newValue = e.target.value;
     const newCursorPos = e.target.selectionStart;
     setCursorPosition(newCursorPos);
-    onChange(newValue, activeMention?.agent.id);
+    onChange(newValue, activeMention?.agent.id, currentSkillNames(newValue));
 
-    // Check if we're in a mention context
+    // Check if we're in a mention (@) or skill (/) context. The two trigger
+    // characters are mutually exclusive at any one cursor position — whichever
+    // one last occurs closer to the cursor wins.
     const textBeforeCursor = newValue.slice(0, newCursorPos);
     const lastAtIndex = textBeforeCursor.lastIndexOf('@');
+    const lastSlashIndex = textBeforeCursor.lastIndexOf('/');
 
-    if (lastAtIndex !== -1) {
-      const textAfterAt = textBeforeCursor.slice(lastAtIndex + 1);
-      const hasSpaceAfterAt = textAfterAt.includes(' ');
+    const textAfterAt = lastAtIndex !== -1 ? textBeforeCursor.slice(lastAtIndex + 1) : '';
+    const hasSpaceAfterAt = textAfterAt.includes(' ');
+    const atActive = lastAtIndex !== -1 && !hasSpaceAfterAt && newCursorPos > lastAtIndex;
 
-      if (!hasSpaceAfterAt && newCursorPos > lastAtIndex) {
-        setMentionQuery(textAfterAt);
-        setMentionStartPos(lastAtIndex);
-        setShowMentionDropdown(true);
-        setHighlightedIndex(0);
-        updateDropdownPosition();
-      } else {
-        setShowMentionDropdown(false);
-        setMentionQuery('');
-        setMentionStartPos(null);
-      }
+    const textAfterSlash = lastSlashIndex !== -1 ? textBeforeCursor.slice(lastSlashIndex + 1) : '';
+    const hasSpaceAfterSlash = textAfterSlash.includes(' ');
+    const slashActive = lastSlashIndex !== -1 && !hasSpaceAfterSlash && newCursorPos > lastSlashIndex;
+
+    if (atActive && (!slashActive || lastAtIndex > lastSlashIndex)) {
+      setMentionQuery(textAfterAt);
+      setMentionStartPos(lastAtIndex);
+      setShowMentionDropdown(true);
+      setHighlightedIndex(0);
+      setShowSkillDropdown(false);
+      setSkillQuery('');
+      setSkillStartPos(null);
+      updateDropdownPosition();
+    } else if (slashActive && (!atActive || lastSlashIndex > lastAtIndex)) {
+      setSkillQuery(textAfterSlash);
+      setSkillStartPos(lastSlashIndex);
+      setShowSkillDropdown(true);
+      setSkillHighlightedIndex(0);
+      setShowMentionDropdown(false);
+      setMentionQuery('');
+      setMentionStartPos(null);
+      updateDropdownPosition();
     } else {
       setShowMentionDropdown(false);
       setMentionQuery('');
       setMentionStartPos(null);
+      setShowSkillDropdown(false);
+      setSkillQuery('');
+      setSkillStartPos(null);
     }
   };
 
@@ -147,7 +225,7 @@ export function PremiumMentionInput({
       const beforeMention = value.slice(0, mentionStartPos);
       const afterCursor = value.slice(cursorPosition);
       const newValue = `${beforeMention}@${agent.name} ${afterCursor}`;
-      onChange(newValue, agent.id);
+      onChange(newValue, agent.id, currentSkillNames(newValue));
       setShowMentionDropdown(false);
       setMentionQuery('');
       setMentionStartPos(null);
@@ -161,7 +239,29 @@ export function PremiumMentionInput({
         }
       }, 0);
     }
-  }, [mentionStartPos, value, cursorPosition, onChange]);
+  }, [mentionStartPos, value, cursorPosition, onChange, currentSkillNames]);
+
+  // Select a skill from the dropdown — mirrors selectAgent exactly.
+  const selectSkill = useCallback((skill: Skill) => {
+    if (skillStartPos !== null) {
+      const beforeSkill = value.slice(0, skillStartPos);
+      const afterCursor = value.slice(cursorPosition);
+      const newValue = `${beforeSkill}/${skill.name} ${afterCursor}`;
+      onChange(newValue, activeMention?.agent.id, currentSkillNames(newValue));
+      setShowSkillDropdown(false);
+      setSkillQuery('');
+      setSkillStartPos(null);
+
+      // Focus and set cursor position after the skill mention
+      setTimeout(() => {
+        if (textareaRef.current) {
+          const newCursorPos = skillStartPos + skill.name.length + 2; // +2 for / and space
+          textareaRef.current.focus();
+          textareaRef.current.setSelectionRange(newCursorPos, newCursorPos);
+        }
+      }, 0);
+    }
+  }, [skillStartPos, value, cursorPosition, onChange, activeMention, currentSkillNames]);
 
   // Handle keyboard navigation
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -188,6 +288,29 @@ export function PremiumMentionInput({
           setShowMentionDropdown(false);
           break;
       }
+    } else if (showSkillDropdown && filteredSkills.length > 0) {
+      switch (e.key) {
+        case 'ArrowDown':
+          e.preventDefault();
+          setSkillHighlightedIndex((prev) =>
+            prev < filteredSkills.length - 1 ? prev + 1 : prev
+          );
+          break;
+        case 'ArrowUp':
+          e.preventDefault();
+          setSkillHighlightedIndex((prev) => (prev > 0 ? prev - 1 : 0));
+          break;
+        case 'Enter':
+          e.preventDefault();
+          if (filteredSkills[skillHighlightedIndex]) {
+            selectSkill(filteredSkills[skillHighlightedIndex]);
+          }
+          break;
+        case 'Escape':
+          e.preventDefault();
+          setShowSkillDropdown(false);
+          break;
+      }
     } else if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       if (onSubmit && !submitDisabled) {
@@ -211,7 +334,7 @@ export function PremiumMentionInput({
   // Update position on window resize/scroll
   useEffect(() => {
     const handleResize = () => {
-      if (showMentionDropdown) {
+      if (showMentionDropdown || showSkillDropdown) {
         updateDropdownPosition();
       }
     };
@@ -221,13 +344,14 @@ export function PremiumMentionInput({
       window.removeEventListener('resize', handleResize);
       window.removeEventListener('scroll', handleResize, true);
     };
-  }, [showMentionDropdown, updateDropdownPosition]);
+  }, [showMentionDropdown, showSkillDropdown, updateDropdownPosition]);
 
-  // Close dropdown on click outside
+  // Close dropdowns on click outside
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
         setShowMentionDropdown(false);
+        setShowSkillDropdown(false);
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
@@ -239,7 +363,8 @@ export function PremiumMentionInput({
     if (activeMention) {
       const before = value.slice(0, activeMention.startIndex);
       const after = value.slice(activeMention.endIndex);
-      onChange(before + after, undefined);
+      const newValue = before + after;
+      onChange(newValue, undefined, currentSkillNames(newValue));
     }
   };
 
@@ -488,6 +613,155 @@ export function PremiumMentionInput({
                     )}
                   </div>
                   <Bot size={16} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
+                </motion.button>
+              ))}
+            </div>
+
+            {/* Footer */}
+            <div
+              style={{
+                padding: '10px 14px',
+                borderTop: '1px solid var(--border)',
+                background: 'var(--bg-surface)',
+                flexShrink: 0,
+              }}
+            >
+              <span
+                style={{
+                  fontSize: '0.6875rem',
+                  color: 'var(--text-muted)',
+                }}
+              >
+                Use ↑↓ to navigate, Enter to select, Esc to close
+              </span>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Skill Dropdown - same fixed-position structure as the agent mention dropdown */}
+      <AnimatePresence>
+        {showSkillDropdown && filteredSkills.length > 0 && (
+          <motion.div
+            className="mention-dropdown"
+            role="listbox"
+            aria-label="Invoke skill"
+            initial={{ opacity: 0, y: 10, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 10, scale: 0.96 }}
+            transition={{ duration: 0.15 }}
+            style={{
+              position: 'fixed',
+              top: Math.max(8, dropdownPos.top - 280),
+              left: dropdownPos.left,
+              width: typeof window !== 'undefined' ? Math.min(dropdownPos.width, window.innerWidth - 24) : dropdownPos.width,
+              maxHeight: '280px',
+              background: 'var(--bg-elevated)',
+              border: '1px solid var(--border-light)',
+              borderRadius: 'var(--radius-lg)',
+              boxShadow: '0 20px 50px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.05)',
+              zIndex: 99999,
+              overflow: 'hidden',
+              display: 'flex',
+              flexDirection: 'column',
+            }}
+          >
+            {/* Header */}
+            <div
+              style={{
+                padding: '12px 14px',
+                borderBottom: '1px solid var(--border)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                background: 'var(--bg-surface)',
+                flexShrink: 0,
+              }}
+            >
+              <Layers size={14} style={{ color: 'var(--accent)' }} />
+              <span
+                style={{
+                  fontSize: '0.6875rem',
+                  fontWeight: 600,
+                  color: 'var(--text-muted)',
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.04em',
+                }}
+              >
+                Invoke Skill
+              </span>
+            </div>
+
+            {/* Skill List */}
+            <div style={{ overflow: 'auto', flex: 1, padding: '4px' }}>
+              {filteredSkills.map((skill, index) => (
+                <motion.button
+                  key={skill.id}
+                  type="button"
+                  role="option"
+                  aria-selected={index === skillHighlightedIndex}
+                  className="mention-dropdown-item"
+                  onClick={() => selectSkill(skill)}
+                  onMouseEnter={() => setSkillHighlightedIndex(index)}
+                  style={{
+                    width: '100%',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '12px',
+                    padding: '10px 12px',
+                    marginBottom: '2px',
+                    background: index === skillHighlightedIndex ? 'var(--bg-hover)' : 'transparent',
+                    border: 'none',
+                    borderRadius: 'var(--radius-md)',
+                    borderLeft: `3px solid ${index === skillHighlightedIndex ? 'var(--accent)' : 'transparent'}`,
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                    transition: 'all 0.1s ease',
+                  }}
+                >
+                  <div
+                    style={{
+                      width: '36px',
+                      height: '36px',
+                      borderRadius: 'var(--radius-md)',
+                      background: 'var(--accent-muted)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      fontSize: '1.25rem',
+                      flexShrink: 0,
+                    }}
+                  >
+                    <Layers size={16} style={{ color: 'var(--accent)' }} />
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div
+                      style={{
+                        fontSize: '0.875rem',
+                        fontWeight: 600,
+                        color: 'var(--text-primary)',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {skill.name}
+                    </div>
+                    {skill.description && (
+                      <div
+                        style={{
+                          fontSize: '0.75rem',
+                          color: 'var(--text-muted)',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                          marginTop: '2px',
+                        }}
+                      >
+                        {skill.description}
+                      </div>
+                    )}
+                  </div>
                 </motion.button>
               ))}
             </div>

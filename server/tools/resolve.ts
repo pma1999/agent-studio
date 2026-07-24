@@ -15,6 +15,7 @@ import {
   type McpConnection,
 } from '../mcp/index.js';
 import type { McpServerConfig } from '../mcp/types.js';
+import type { ResolvedSkill } from '../skills/resolve.js';
 
 export interface ResolvedToolMcpConfig {
   mcp_server_id: string;
@@ -40,9 +41,10 @@ export interface ResolvedToolMcpMetaConfig {
 export interface ResolvedTool {
   id: string;
   name: string;
-  type: 'builtin' | 'http' | 'mcp';
+  type: 'builtin' | 'http' | 'mcp' | 'skill';
   config: unknown;
   mcpCatalog?: McpToolCatalogEntry[];
+  skillCatalog?: ResolvedSkill[];
   openAIDef: {
     type: 'function';
     function: {

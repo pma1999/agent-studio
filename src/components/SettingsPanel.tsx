@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { CheckCircle, AlertCircle, ExternalLink, Zap, Coins, BarChart3, Loader2, Globe, KeyRound, Database, MessageSquare, Brain, Check, ChevronDown, Sparkles, Lightbulb, SlidersHorizontal, Wrench, Plug, Link, Box } from 'lucide-react';
+import { CheckCircle, AlertCircle, ExternalLink, Zap, Coins, BarChart3, Loader2, Globe, KeyRound, Database, MessageSquare, Brain, Check, ChevronDown, Sparkles, Lightbulb, SlidersHorizontal, Wrench, Plug, Layers, Link, Box } from 'lucide-react';
 import { useStore } from '../stores/store';
-import { settingsApi, toolsApi, mcpServersApi, deepseekApi } from '../api/client';
-import type { ProviderRoutingConfig, ReasoningEffort, Tool, McpServer } from '../types';
+import { settingsApi, toolsApi, mcpServersApi, skillsApi, deepseekApi } from '../api/client';
+import type { ProviderRoutingConfig, ReasoningEffort, Tool, McpServer, Skill } from '../types';
 import { DEEPSEEK_ACCENT } from '../utils/providers';
 import { Modal } from './ui/Modal';
 import { Input } from './ui/Input';
@@ -331,10 +331,12 @@ function GeneralChatSettingsSection() {
   const [localEmoji, setLocalEmoji] = useState('💬');
   const [localToolIds, setLocalToolIds] = useState<string[]>([]);
   const [localMcpServerIds, setLocalMcpServerIds] = useState<string[]>([]);
+  const [localSkillIds, setLocalSkillIds] = useState<string[]>([]);
   const [localToolChoice, setLocalToolChoice] = useState<'auto' | 'none'>('auto');
   const [localParallelToolCalls, setLocalParallelToolCalls] = useState(true);
   const [allTools, setAllTools] = useState<Tool[]>([]);
   const [allMcpServers, setAllMcpServers] = useState<McpServer[]>([]);
+  const [allSkills, setAllSkills] = useState<Skill[]>([]);
 
   // Load settings on mount
   useEffect(() => {
@@ -346,6 +348,7 @@ function GeneralChatSettingsSection() {
     if (generalChatSettings) {
       toolsApi.list().then(setAllTools).catch(() => setAllTools([]));
       mcpServersApi.list().then(setAllMcpServers).catch(() => setAllMcpServers([]));
+      skillsApi.list().then(setAllSkills).catch(() => setAllSkills([]));
     }
   }, [generalChatSettings]);
 
@@ -360,6 +363,7 @@ function GeneralChatSettingsSection() {
       setLocalEmoji(generalChatSettings.emoji || '💬');
       setLocalToolIds(generalChatSettings.tool_ids ?? []);
       setLocalMcpServerIds(generalChatSettings.mcp_server_ids ?? []);
+      setLocalSkillIds(generalChatSettings.skill_ids ?? []);
       setLocalToolChoice(generalChatSettings.tool_choice ?? 'auto');
       setLocalParallelToolCalls((generalChatSettings.parallel_tool_calls ?? 1) !== 0);
     }
@@ -377,6 +381,7 @@ function GeneralChatSettingsSection() {
         emoji: localEmoji,
         tool_ids: localToolIds,
         mcp_server_ids: localMcpServerIds,
+        skill_ids: localSkillIds,
         tool_choice: localToolChoice,
         parallel_tool_calls: localParallelToolCalls ? 1 : 0,
       });
@@ -388,6 +393,7 @@ function GeneralChatSettingsSection() {
   const hasToolMcpChanges = generalChatSettings && (
     JSON.stringify([...(generalChatSettings.tool_ids ?? [])].sort()) !== JSON.stringify([...localToolIds].sort()) ||
     JSON.stringify([...(generalChatSettings.mcp_server_ids ?? [])].sort()) !== JSON.stringify([...localMcpServerIds].sort()) ||
+    JSON.stringify([...(generalChatSettings.skill_ids ?? [])].sort()) !== JSON.stringify([...localSkillIds].sort()) ||
     (generalChatSettings.tool_choice ?? 'auto') !== localToolChoice ||
     ((generalChatSettings.parallel_tool_calls ?? 1) !== 0) !== localParallelToolCalls
   );
@@ -734,6 +740,70 @@ function GeneralChatSettingsSection() {
         </div>
       )}
 
+      {/* Skills (assign which skills General Chat can use) */}
+      {allSkills.length > 0 && (
+        <div style={{
+          border: '1px solid var(--border)',
+          borderRadius: 'var(--radius-sm)',
+          overflow: 'hidden',
+        }}>
+          <div style={{
+            padding: '10px 12px',
+            background: 'var(--bg-elevated)',
+            borderBottom: '1px solid var(--border)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            fontSize: '0.8125rem',
+            fontWeight: 500,
+            color: 'var(--text-secondary)',
+          }}>
+            <Layers size={14} />
+            Skills
+          </div>
+          <div style={{ padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+            {allSkills.map((skill) => {
+              const checked = localSkillIds.includes(skill.id);
+              return (
+                <label
+                  key={skill.id}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '10px',
+                    cursor: 'pointer',
+                    fontSize: '0.8125rem',
+                    color: 'var(--text-primary)',
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => {
+                      if (checked) setLocalSkillIds(localSkillIds.filter((id) => id !== skill.id));
+                      else setLocalSkillIds([...localSkillIds, skill.id]);
+                    }}
+                    style={{ width: '16px', height: '16px', accentColor: 'var(--accent)' }}
+                  />
+                  <span style={{ fontWeight: 500, flexShrink: 0 }}>{skill.name}</span>
+                  <span style={{
+                    color: 'var(--text-muted)',
+                    fontSize: '0.75rem',
+                    flex: 1,
+                    minWidth: 0,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}>
+                    {skill.description}
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Tool choice & parallel tool calls (when General Chat has tools or MCP) */}
       {(localToolIds.length > 0 || localMcpServerIds.length > 0) && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
@@ -795,6 +865,7 @@ function GeneralChatSettingsSection() {
                 setLocalEmoji(generalChatSettings.emoji || '💬');
                 setLocalToolIds(generalChatSettings.tool_ids ?? []);
                 setLocalMcpServerIds(generalChatSettings.mcp_server_ids ?? []);
+                setLocalSkillIds(generalChatSettings.skill_ids ?? []);
                 setLocalToolChoice(generalChatSettings.tool_choice ?? 'auto');
                 setLocalParallelToolCalls((generalChatSettings.parallel_tool_calls ?? 1) !== 0);
               }

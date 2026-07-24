@@ -16,6 +16,7 @@ import type {
   CouncilConfig,
   ProviderRoutingConfig,
   ConversationToolConfigOverride,
+  ConversationSkillConfigOverride,
 } from '../types';
 import type { AuthUser } from '../api/client';
 import { agentsApi, conversationsApi, messagesApi, settingsApi, creditsApi, usageApi, authApi } from '../api/client';
@@ -91,6 +92,11 @@ interface AppState {
   conversationToolConfigOverrides: Record<string, ConversationToolConfigOverride | undefined>;
   setConversationToolConfigOverride: (conversationId: string, config: ConversationToolConfigOverride | undefined) => void;
   getConversationToolConfigOverride: (conversationId: string) => ConversationToolConfigOverride | undefined;
+
+  // Per-conversation skill config override (undefined = no override, use agent/general-chat defaults)
+  conversationSkillConfigOverrides: Record<string, ConversationSkillConfigOverride | undefined>;
+  setConversationSkillConfigOverride: (conversationId: string, config: ConversationSkillConfigOverride | undefined) => void;
+  getConversationSkillConfigOverride: (conversationId: string) => ConversationSkillConfigOverride | undefined;
 
   // Ordered live activity timeline (text/thinking/tool) for current streaming message
   streamingActivityEvents: StreamingActivityEvent[];
@@ -346,6 +352,19 @@ export const useStore = create<AppState>((set, get) => ({
     return get().conversationToolConfigOverrides[conversationId];
   },
 
+  // Per-conversation skill config override
+  conversationSkillConfigOverrides: {},
+  setConversationSkillConfigOverride: (conversationId, config) =>
+    set((state) => ({
+      conversationSkillConfigOverrides: {
+        ...state.conversationSkillConfigOverrides,
+        [conversationId]: config,
+      },
+    })),
+  getConversationSkillConfigOverride: (conversationId) => {
+    return get().conversationSkillConfigOverrides[conversationId];
+  },
+
   // Ordered streaming activity timeline (append by arrival order)
   streamingActivityEvents: [],
   appendStreamingContentEvent: (chunk) => set((state) => {
@@ -582,6 +601,16 @@ export const useStore = create<AppState>((set, get) => ({
       } catch {
         // keep []
       }
+      let skill_ids: string[] = [];
+      try {
+        const raw = settings['general_chat_skill_ids'];
+        if (raw && typeof raw === 'string') {
+          const parsed = JSON.parse(raw) as unknown;
+          if (Array.isArray(parsed)) skill_ids = parsed.filter((id): id is string => typeof id === 'string');
+        }
+      } catch {
+        // keep []
+      }
       const toolChoiceRaw = settings['general_chat_tool_choice'];
       const tool_choice = toolChoiceRaw === 'none' ? 'none' : 'auto';
       const parallelRaw = settings['general_chat_parallel_tool_calls'];
@@ -612,6 +641,7 @@ export const useStore = create<AppState>((set, get) => ({
         emoji: settings['general_chat_emoji'] || '💬',
         tool_ids,
         mcp_server_ids,
+        skill_ids,
         tool_choice,
         parallel_tool_calls,
         reasoning_enabled: settings['general_chat_reasoning_enabled'] === 'true',
@@ -635,6 +665,7 @@ export const useStore = create<AppState>((set, get) => ({
         settingsApi.set('general_chat_emoji', settings.emoji || '💬'),
         settingsApi.set('general_chat_tool_ids', JSON.stringify(settings.tool_ids ?? [])),
         settingsApi.set('general_chat_mcp_server_ids', JSON.stringify(settings.mcp_server_ids ?? [])),
+        settingsApi.set('general_chat_skill_ids', JSON.stringify(settings.skill_ids ?? [])),
         settingsApi.set('general_chat_tool_choice', settings.tool_choice ?? 'auto'),
         settingsApi.set('general_chat_parallel_tool_calls', String(settings.parallel_tool_calls ?? 1)),
         settingsApi.set('general_chat_reasoning_enabled', String(settings.reasoning_enabled)),

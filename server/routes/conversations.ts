@@ -48,6 +48,23 @@ function attachToolConfigBatch(rows: Record<string, unknown>[]): Record<string, 
   }));
 }
 
+function attachSkillConfig(row: Record<string, unknown>): Record<string, unknown> {
+  return attachSkillConfigBatch([row])[0];
+}
+function attachSkillConfigBatch(rows: Record<string, unknown>[]): Record<string, unknown>[] {
+  if (rows.length === 0) return rows;
+  const ids = rows.map((r) => r.id as string);
+  const placeholders = ids.map(() => '?').join(',');
+  const skillLinks = db.prepare(`SELECT conversation_id, skill_id FROM conversation_skills WHERE conversation_id IN (${placeholders})`).all(...ids) as { conversation_id: string; skill_id: string }[];
+  const skillMap = new Map<string, string[]>();
+  for (const l of skillLinks) { if (!skillMap.has(l.conversation_id)) skillMap.set(l.conversation_id, []); skillMap.get(l.conversation_id)!.push(l.skill_id); }
+  return rows.map((r) => ({
+    ...r,
+    skills_overridden: !!r.skills_overridden,
+    skill_ids: skillMap.get(r.id as string) || [],
+  }));
+}
+
 // GET /api/conversations - List conversations, optionally filtered by agent_id
 router.get('/', (req: AuthRequest, res: Response) => {
   try {
@@ -74,7 +91,7 @@ router.get('/', (req: AuthRequest, res: Response) => {
       `).all(userId);
     }
 
-    res.json(attachToolConfigBatch(conversations as Record<string, unknown>[]).map(withParsedProviderRouting));
+    res.json(attachSkillConfigBatch(attachToolConfigBatch(conversations as Record<string, unknown>[])).map(withParsedProviderRouting));
   } catch (err) {
     console.error('Error listing conversations:', err);
     res.status(500).json({ error: 'Failed to list conversations' });
@@ -115,7 +132,7 @@ router.post('/', (req: AuthRequest, res: Response) => {
       WHERE c.id = ?
     `).get(id);
 
-    res.status(201).json(withParsedProviderRouting(attachToolConfig(conversation as Record<string, unknown>)));
+    res.status(201).json(withParsedProviderRouting(attachSkillConfig(attachToolConfig(conversation as Record<string, unknown>))));
   } catch (err) {
     console.error('Error creating conversation:', err);
     res.status(500).json({ error: 'Failed to create conversation' });
@@ -134,7 +151,7 @@ router.put('/:id', (req: AuthRequest, res: Response) => {
 
     const conversation = db.prepare('SELECT * FROM conversations WHERE id = ? AND user_id = ?').get(req.params.id, userId);
     if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
-    res.json(withParsedProviderRouting(attachToolConfig(conversation as Record<string, unknown>)));
+    res.json(withParsedProviderRouting(attachSkillConfig(attachToolConfig(conversation as Record<string, unknown>))));
   } catch (err) {
     console.error('Error updating conversation:', err);
     res.status(500).json({ error: 'Failed to update conversation' });
@@ -168,7 +185,7 @@ router.put('/:id/model', (req: AuthRequest, res: Response) => {
     `).get(req.params.id, userId);
 
     if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
-    res.json(withParsedProviderRouting(attachToolConfig(conversation as Record<string, unknown>)));
+    res.json(withParsedProviderRouting(attachSkillConfig(attachToolConfig(conversation as Record<string, unknown>))));
   } catch (err) {
     console.error('Error updating conversation model:', err);
     res.status(500).json({ error: 'Failed to update conversation model' });
@@ -217,7 +234,7 @@ router.put('/:id/provider-routing', (req: AuthRequest, res: Response) => {
     `).get(req.params.id, userId);
 
     if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
-    res.json(withParsedProviderRouting(attachToolConfig(conversation as Record<string, unknown>)));
+    res.json(withParsedProviderRouting(attachSkillConfig(attachToolConfig(conversation as Record<string, unknown>))));
   } catch (err) {
     console.error('Error updating conversation provider routing:', err);
     res.status(500).json({ error: 'Failed to update conversation provider routing' });
@@ -265,7 +282,7 @@ router.put('/:id/tool-config', (req: AuthRequest, res: Response) => {
     `).get(req.params.id, userId);
 
     if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
-    res.json(withParsedProviderRouting(attachToolConfig(conversation as Record<string, unknown>)));
+    res.json(withParsedProviderRouting(attachSkillConfig(attachToolConfig(conversation as Record<string, unknown>))));
   } catch (err) {
     console.error('Error updating conversation tool config:', err);
     res.status(500).json({ error: 'Failed to update conversation tool config' });
@@ -296,10 +313,79 @@ router.delete('/:id/tool-config', (req: AuthRequest, res: Response) => {
     `).get(req.params.id, userId);
 
     if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
-    res.json(withParsedProviderRouting(attachToolConfig(conversation as Record<string, unknown>)));
+    res.json(withParsedProviderRouting(attachSkillConfig(attachToolConfig(conversation as Record<string, unknown>))));
   } catch (err) {
     console.error('Error clearing conversation tool config:', err);
     res.status(500).json({ error: 'Failed to clear conversation tool config' });
+  }
+});
+
+// PUT /api/conversations/:id/skill-config - Set conversation-level skill override (full replace)
+router.put('/:id/skill-config', (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.userId;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    const { skill_ids } = req.body;
+
+    if (!Array.isArray(skill_ids) || !skill_ids.every((id: unknown) => typeof id === 'string')) {
+      return res.status(400).json({ error: 'skill_ids must be an array of strings' });
+    }
+
+    const existing = db.prepare('SELECT * FROM conversations WHERE id = ? AND user_id = ?').get(req.params.id, userId);
+    if (!existing) return res.status(404).json({ error: 'Conversation not found' });
+
+    const dedupedSkillIds = [...new Set(skill_ids as string[])];
+    const run = db.transaction(() => {
+      db.prepare(`UPDATE conversations SET skills_overridden = 1, updated_at = datetime('now') WHERE id = ? AND user_id = ?`).run(req.params.id, userId);
+      db.prepare('DELETE FROM conversation_skills WHERE conversation_id = ?').run(req.params.id);
+      for (const skillId of dedupedSkillIds) {
+        db.prepare('INSERT OR IGNORE INTO conversation_skills (conversation_id, skill_id) VALUES (?, ?)').run(req.params.id, skillId);
+      }
+    });
+    run();
+
+    const conversation = db.prepare(`
+      SELECT c.*, a.name as agent_name, a.emoji as agent_emoji
+      FROM conversations c
+      LEFT JOIN agents a ON c.agent_id = a.id
+      WHERE c.id = ? AND c.user_id = ?
+    `).get(req.params.id, userId);
+
+    if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
+    res.json(withParsedProviderRouting(attachSkillConfig(attachToolConfig(conversation as Record<string, unknown>))));
+  } catch (err) {
+    console.error('Error updating conversation skill config:', err);
+    res.status(500).json({ error: 'Failed to update conversation skill config' });
+  }
+});
+
+// DELETE /api/conversations/:id/skill-config - Clear conversation-level skill override
+router.delete('/:id/skill-config', (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.userId;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const existing = db.prepare('SELECT * FROM conversations WHERE id = ? AND user_id = ?').get(req.params.id, userId);
+    if (!existing) return res.status(404).json({ error: 'Conversation not found' });
+
+    const run = db.transaction(() => {
+      db.prepare(`UPDATE conversations SET skills_overridden = 0, updated_at = datetime('now') WHERE id = ? AND user_id = ?`).run(req.params.id, userId);
+      db.prepare('DELETE FROM conversation_skills WHERE conversation_id = ?').run(req.params.id);
+    });
+    run();
+
+    const conversation = db.prepare(`
+      SELECT c.*, a.name as agent_name, a.emoji as agent_emoji
+      FROM conversations c
+      LEFT JOIN agents a ON c.agent_id = a.id
+      WHERE c.id = ? AND c.user_id = ?
+    `).get(req.params.id, userId);
+
+    if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
+    res.json(withParsedProviderRouting(attachSkillConfig(attachToolConfig(conversation as Record<string, unknown>))));
+  } catch (err) {
+    console.error('Error clearing conversation skill config:', err);
+    res.status(500).json({ error: 'Failed to clear conversation skill config' });
   }
 });
 

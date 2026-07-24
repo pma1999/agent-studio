@@ -6,10 +6,11 @@
 import { getBuiltinExecutor } from './registry.js';
 import { runHttpTool } from './httpTool.js';
 import { callMcpToolDetailed } from '../mcp/index.js';
+import { runSkillTool } from '../skills/activation.js';
 import type { McpToolCatalogEntry, ResolvedTool, ResolvedToolMcpConfig, ResolvedToolMcpMetaConfig } from './resolve.js';
 import type { McpConnection } from '../mcp/index.js';
 
-export type ToolExecutionSource = 'builtin' | 'http' | 'mcp' | 'unknown';
+export type ToolExecutionSource = 'builtin' | 'http' | 'mcp' | 'skill' | 'unknown';
 
 export interface RunToolResult {
   output: string;
@@ -137,6 +138,7 @@ export async function runTool(
   mcpClients?: Map<string, McpConnection>,
   userId?: string,
   conversationId?: string,
+  currentMessages?: Array<{ role: string; content?: unknown }>,
 ): Promise<RunToolResult> {
   let tool = resolvedTools.find((t) => t.name === toolName);
 
@@ -191,6 +193,13 @@ export async function runTool(
         source: 'mcp',
         metadata: { content: result.content, structuredContent: result.structuredContent, annotations: config.annotations },
       };
+    }
+
+    if (tool.type === 'skill') {
+      if (!userId) {
+        return { output: JSON.stringify({ error: 'Skill tools require an authenticated user context' }), isError: true, source: 'skill' };
+      }
+      return runSkillTool(tool, parsedArgs, { userId, currentMessages: currentMessages || [], conversationId });
     }
 
     return { output: JSON.stringify({ error: `Unsupported tool type: ${(tool as ResolvedTool).type}` }), isError: true, source: 'unknown' };

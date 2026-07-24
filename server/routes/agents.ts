@@ -26,7 +26,19 @@ function withParsedProviderRouting<T extends Record<string, unknown>>(row: T): T
   };
 }
 
-// GET /api/agents - List all agents (with tool_ids and mcp_server_ids)
+const INVALID_SKILL_IDS_ERROR = 'One or more skill_ids do not exist or are not owned by this user';
+
+function skillIdsAreOwnedByUser(skillIds: unknown, userId: string): boolean {
+  if (!Array.isArray(skillIds)) return true;
+  const skillLookup = db.prepare('SELECT id FROM skills WHERE id = ? AND user_id = ?');
+  return skillIds.every((skillId) => (
+    typeof skillId === 'string'
+    && skillId.length > 0
+    && Boolean(skillLookup.get(skillId, userId))
+  ));
+}
+
+// GET /api/agents - List all agents (with tool_ids, mcp_server_ids, and skill_ids)
 router.get('/', (req: AuthRequest, res: Response) => {
   try {
     const userId = req.userId;
@@ -39,8 +51,12 @@ router.get('/', (req: AuthRequest, res: Response) => {
     const mcpLinks = agentIds.length
       ? (db.prepare('SELECT agent_id, mcp_server_id FROM agent_mcp_servers WHERE agent_id IN (?' + ',?'.repeat(agentIds.length - 1) + ')').all(...agentIds) as { agent_id: string; mcp_server_id: string }[])
       : [];
+    const skillLinks = agentIds.length
+      ? (db.prepare('SELECT agent_id, skill_id FROM agent_skills WHERE agent_id IN (?' + ',?'.repeat(agentIds.length - 1) + ')').all(...agentIds) as { agent_id: string; skill_id: string }[])
+      : [];
     const toolByAgent = new Map<string, string[]>();
     const mcpByAgent = new Map<string, string[]>();
+    const skillByAgent = new Map<string, string[]>();
     for (const l of toolLinks) {
       if (!toolByAgent.has(l.agent_id)) toolByAgent.set(l.agent_id, []);
       toolByAgent.get(l.agent_id)!.push(l.tool_id);
@@ -49,10 +65,15 @@ router.get('/', (req: AuthRequest, res: Response) => {
       if (!mcpByAgent.has(l.agent_id)) mcpByAgent.set(l.agent_id, []);
       mcpByAgent.get(l.agent_id)!.push(l.mcp_server_id);
     }
+    for (const l of skillLinks) {
+      if (!skillByAgent.has(l.agent_id)) skillByAgent.set(l.agent_id, []);
+      skillByAgent.get(l.agent_id)!.push(l.skill_id);
+    }
     const result = agents.map((a) => ({
       ...withParsedProviderRouting(a),
       tool_ids: toolByAgent.get(a.id as string) || [],
       mcp_server_ids: mcpByAgent.get(a.id as string) || [],
+      skill_ids: skillByAgent.get(a.id as string) || [],
     }));
     res.json(result);
   } catch (err) {
@@ -96,7 +117,7 @@ router.get('/search', (req: AuthRequest, res: Response) => {
   }
 });
 
-// GET /api/agents/:id - Get single agent (with tool_ids, mcp_server_ids, full tools, and mcp_servers)
+// GET /api/agents/:id - Get single agent (with tool_ids, mcp_server_ids, skill_ids, and full resources)
 router.get('/:id', (req: AuthRequest, res: Response) => {
   try {
     const userId = req.userId;
@@ -125,12 +146,23 @@ router.get('/:id', (req: AuthRequest, res: Response) => {
         config: r.config ? (() => { try { return JSON.parse(r.config as string); } catch { return null; } })() : null,
       }));
     }
+    const skillLinks = db.prepare('SELECT skill_id FROM agent_skills WHERE agent_id = ?').all(req.params.id) as { skill_id: string }[];
+    const skillIds = skillLinks.map((l) => l.skill_id);
+    const skills = skillIds.length
+      ? (db.prepare('SELECT * FROM skills WHERE id IN (?' + ',?'.repeat(skillIds.length - 1) + ') AND user_id = ?').all(...skillIds, userId) as Record<string, unknown>[])
+      : [];
+    const skillsParsed = skills.map((s) => ({
+      ...s,
+      metadata: s.metadata ? (() => { try { return JSON.parse(s.metadata as string); } catch { return null; } })() : null,
+    }));
     res.json({
       ...withParsedProviderRouting(agent),
       tool_ids: toolIds,
       tools: toolsParsed,
       mcp_server_ids: mcpServerIds,
       mcp_servers: mcpServers,
+      skill_ids: skillIds,
+      skills: skillsParsed,
     });
   } catch (err) {
     console.error('Error getting agent:', err);
@@ -138,12 +170,12 @@ router.get('/:id', (req: AuthRequest, res: Response) => {
   }
 });
 
-// POST /api/agents - Create agent (optional tool_ids, mcp_server_ids; web_search_enabled syncs with web_search tool)
+// POST /api/agents - Create agent (optional tool_ids, mcp_server_ids, skill_ids; web_search_enabled syncs with web_search tool)
 router.post('/', (req: AuthRequest, res: Response) => {
   try {
     const userId = req.userId;
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
-    const { name, description, emoji, system_prompt, base_url, model, provider_routing, temperature, max_tokens, web_search_enabled, reasoning_enabled, reasoning_effort, reasoning_max_tokens, tool_ids, mcp_server_ids, tool_choice, parallel_tool_calls, structured_output_enabled, structured_output_schema, response_healing_enabled } = req.body;
+    const { name, description, emoji, system_prompt, base_url, model, provider_routing, temperature, max_tokens, web_search_enabled, reasoning_enabled, reasoning_effort, reasoning_max_tokens, tool_ids, mcp_server_ids, skill_ids, tool_choice, parallel_tool_calls, structured_output_enabled, structured_output_schema, response_healing_enabled } = req.body;
 
     if (!name || !system_prompt) {
       return res.status(400).json({ error: 'Name and system_prompt are required' });
@@ -160,6 +192,9 @@ router.post('/', (req: AuthRequest, res: Response) => {
       assertProviderRoutingCompatible(finalModel, routingInput.config);
     } catch (err) {
       return res.status(400).json({ error: err instanceof Error ? err.message : 'Invalid provider routing' });
+    }
+    if (!skillIdsAreOwnedByUser(skill_ids, userId)) {
+      return res.status(400).json({ error: INVALID_SKILL_IDS_ERROR });
     }
 
     let finalToolIds: string[] = Array.isArray(tool_ids) ? [...tool_ids] : [];
@@ -214,12 +249,20 @@ router.post('/', (req: AuthRequest, res: Response) => {
         db.prepare('INSERT OR IGNORE INTO agent_mcp_servers (agent_id, mcp_server_id) VALUES (?, ?)').run(id, mcpId);
       }
     }
+    const skillIds: string[] = Array.isArray(skill_ids) ? skill_ids : [];
+    for (const skillId of skillIds) {
+      if (typeof skillId === 'string' && skillId) {
+        db.prepare('INSERT OR IGNORE INTO agent_skills (agent_id, skill_id) VALUES (?, ?)').run(id, skillId);
+      }
+    }
 
     const agent = withParsedProviderRouting(db.prepare('SELECT * FROM agents WHERE id = ?').get(id) as Record<string, unknown>);
     const toolLinks = db.prepare('SELECT tool_id FROM agent_tools WHERE agent_id = ?').all(id) as { tool_id: string }[];
     const mcpLinks = db.prepare('SELECT mcp_server_id FROM agent_mcp_servers WHERE agent_id = ?').all(id) as { mcp_server_id: string }[];
+    const skillLinks = db.prepare('SELECT skill_id FROM agent_skills WHERE agent_id = ?').all(id) as { skill_id: string }[];
     (agent as Record<string, unknown>).tool_ids = toolLinks.map((l) => l.tool_id);
     (agent as Record<string, unknown>).mcp_server_ids = mcpLinks.map((l) => l.mcp_server_id);
+    (agent as Record<string, unknown>).skill_ids = skillLinks.map((l) => l.skill_id);
     res.status(201).json(agent);
   } catch (err) {
     console.error('Error creating agent:', err);
@@ -227,7 +270,7 @@ router.post('/', (req: AuthRequest, res: Response) => {
   }
 });
 
-// PUT /api/agents/:id - Update agent (optional tool_ids; web_search_enabled syncs with web_search tool)
+// PUT /api/agents/:id - Update agent (optional tool_ids, mcp_server_ids, skill_ids; web_search_enabled syncs with web_search tool)
 router.put('/:id', (req: AuthRequest, res: Response) => {
   try {
     const userId = req.userId;
@@ -237,7 +280,11 @@ router.put('/:id', (req: AuthRequest, res: Response) => {
       return res.status(404).json({ error: 'Agent not found' });
     }
 
-    const { name, description, emoji, system_prompt, base_url, model, provider_routing, temperature, max_tokens, web_search_enabled, reasoning_enabled, reasoning_effort, reasoning_max_tokens, tool_ids, mcp_server_ids, tool_choice, parallel_tool_calls, structured_output_enabled, structured_output_schema, response_healing_enabled } = req.body;
+    const { name, description, emoji, system_prompt, base_url, model, provider_routing, temperature, max_tokens, web_search_enabled, reasoning_enabled, reasoning_effort, reasoning_max_tokens, tool_ids, mcp_server_ids, skill_ids, tool_choice, parallel_tool_calls, structured_output_enabled, structured_output_schema, response_healing_enabled } = req.body;
+
+    if (!skillIdsAreOwnedByUser(skill_ids, userId)) {
+      return res.status(400).json({ error: INVALID_SKILL_IDS_ERROR });
+    }
 
     let finalToolIds: string[] | null = null;
     if (Array.isArray(tool_ids)) {
@@ -332,12 +379,22 @@ router.put('/:id', (req: AuthRequest, res: Response) => {
         }
       }
     }
+    if (Array.isArray(skill_ids)) {
+      db.prepare('DELETE FROM agent_skills WHERE agent_id = ?').run(req.params.id);
+      for (const skillId of skill_ids) {
+        if (typeof skillId === 'string' && skillId) {
+          db.prepare('INSERT OR IGNORE INTO agent_skills (agent_id, skill_id) VALUES (?, ?)').run(req.params.id, skillId);
+        }
+      }
+    }
 
     const agent = withParsedProviderRouting(db.prepare('SELECT * FROM agents WHERE id = ?').get(req.params.id) as Record<string, unknown>);
     const toolLinks = db.prepare('SELECT tool_id FROM agent_tools WHERE agent_id = ?').all(req.params.id) as { tool_id: string }[];
     const mcpLinks = db.prepare('SELECT mcp_server_id FROM agent_mcp_servers WHERE agent_id = ?').all(req.params.id) as { mcp_server_id: string }[];
+    const skillLinks = db.prepare('SELECT skill_id FROM agent_skills WHERE agent_id = ?').all(req.params.id) as { skill_id: string }[];
     (agent as Record<string, unknown>).tool_ids = toolLinks.map((l) => l.tool_id);
     (agent as Record<string, unknown>).mcp_server_ids = mcpLinks.map((l) => l.mcp_server_id);
+    (agent as Record<string, unknown>).skill_ids = skillLinks.map((l) => l.skill_id);
     res.json(agent);
   } catch (err) {
     console.error('Error updating agent:', err);

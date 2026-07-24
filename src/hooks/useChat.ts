@@ -11,6 +11,7 @@ export interface SendMessageOptions {
   model?: string;
   providerRouting?: ProviderRoutingConfig | null;
   invokeAgentId?: string;
+  invokeSkillNames?: string[];
   councilConfig?: CouncilConfig;
   /** When set, server loads full council config (including tool_ids) from DB instead of using councilConfig inline */
   councilMemberId?: string;
@@ -198,6 +199,7 @@ export function useChat() {
     const model = options?.model;
     const providerRouting = options?.providerRouting;
     const invokeAgentId = options?.invokeAgentId;
+    const invokeSkillNames = options?.invokeSkillNames;
 
     // Add user message to local state immediately
     const userMsg: Message = {
@@ -279,6 +281,7 @@ export function useChat() {
       invokeAgentId,
       (data) => updateConversationTitle(data.conversation_id, data.title),
       (data) => appendStreamingToolOutputChunk(data),
+      invokeSkillNames,
     );
   }, [activeConversationId, isStreaming, addMessage, setIsStreaming, setStreamingContent, appendStreamingContent, appendStreamingContentEvent, setAbortController, setStreamStartTime, setReasoningContent, appendReasoningContent, appendStreamingReasoningEvent, reasoningOverride, upsertStreamingToolCall, completeStreamingToolCall, appendStreamingToolOutputChunk, resetStreamingActivityEvents, loadMessages, loadConversations, updateConversationTitle, selectedAgentId]);
 

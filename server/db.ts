@@ -834,6 +834,46 @@ export function migrate() {
     CREATE INDEX IF NOT EXISTS idx_agent_files_user_id ON agent_files(user_id);
     CREATE INDEX IF NOT EXISTS idx_agent_files_expires_at ON agent_files(expires_at);
   `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS skills (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL,
+      body TEXT NOT NULL,
+      license TEXT,
+      compatibility TEXT,
+      metadata TEXT,
+      allowed_tools TEXT,
+      disable_model_invocation INTEGER NOT NULL DEFAULT 0,
+      source_filename TEXT NOT NULL,
+      storage_dir TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now')),
+      UNIQUE(user_id, name)
+    );
+    CREATE INDEX IF NOT EXISTS idx_skills_user_id ON skills(user_id);
+    CREATE TABLE IF NOT EXISTS agent_skills (
+      agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+      skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+      PRIMARY KEY (agent_id, skill_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_skills_agent ON agent_skills(agent_id);
+    CREATE INDEX IF NOT EXISTS idx_agent_skills_skill ON agent_skills(skill_id);
+    CREATE TABLE IF NOT EXISTS conversation_skills (
+      conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+      skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+      PRIMARY KEY (conversation_id, skill_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_conversation_skills_conversation ON conversation_skills(conversation_id);
+    CREATE INDEX IF NOT EXISTS idx_conversation_skills_skill ON conversation_skills(skill_id);
+  `);
+
+  const convColsForSkillOverride = db.prepare("PRAGMA table_info(conversations)").all() as { name: string }[];
+  if (!convColsForSkillOverride.some((c) => c.name === 'skills_overridden')) {
+    db.exec('ALTER TABLE conversations ADD COLUMN skills_overridden INTEGER DEFAULT 0');
+  }
 }
 
 function migrateCouncilTables() {

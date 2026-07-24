@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Send, ArrowDown, StopCircle, MessageSquare, Bot, Brain, FileUp, Link, X, Users, SlidersHorizontal, Wrench } from 'lucide-react';
+import { Send, ArrowDown, StopCircle, MessageSquare, Bot, Brain, FileUp, Link, X, Users, SlidersHorizontal, Wrench, Layers } from 'lucide-react';
 import { CouncilToggle } from './CouncilToggle';
 import { CouncilStreamingView } from './CouncilStreamingView';
 import { useStore } from '../stores/store';
@@ -13,7 +13,8 @@ import { Button } from './ui/Button';
 import { ModelSelectorCore } from './ModelSelectorCore';
 import { ProviderRoutingSelector } from './ProviderRoutingSelector';
 import { ConversationToolsSelector } from './ConversationToolsSelector';
-import { conversationsApi } from '../api/client';
+import { ConversationSkillsSelector } from './ConversationSkillsSelector';
+import { conversationsApi, skillsApi } from '../api/client';
 import { PremiumMentionInput } from './ui/PremiumMentionInput';
 import { Sheet } from './ui/Sheet';
 import { ConversationTokenSummary, StreamingTokenCounter } from './TokenCounter';
@@ -26,6 +27,7 @@ import type {
   ToolSource,
   StreamingActivityEvent,
   ProviderRoutingConfig,
+  Skill,
 } from '../types';
 
 const MAX_PDF_ATTACHMENTS = 5;
@@ -101,6 +103,8 @@ export function ChatView() {
     setConversationProviderRoutingOverride,
     conversationToolConfigOverrides,
     setConversationToolConfigOverride,
+    conversationSkillConfigOverrides,
+    setConversationSkillConfigOverride,
     loadConversations,
     generalChatSettings,
     councilEnabled,
@@ -132,6 +136,8 @@ export function ChatView() {
   const [streamingModelSnapshot, setStreamingModelSnapshot] = useState<string | null>(null);
   const [streamingProviderRoutingSnapshot, setStreamingProviderRoutingSnapshot] = useState<ProviderRoutingConfig | null>(null);
   const [invokeAgentId, setInvokeAgentId] = useState<string | undefined>(undefined);
+  const [invokeSkillNames, setInvokeSkillNames] = useState<string[]>([]);
+  const [skills, setSkills] = useState<Skill[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const reasoningBtnRef = useRef<HTMLButtonElement>(null);
   const reasoningPopoverRef = useRef<HTMLDivElement>(null);
@@ -152,6 +158,12 @@ export function ChatView() {
     ]
   );
   const { containerRef, scrollToBottom, showScrollButton, handleScroll } = useAutoScroll(scrollDependency);
+
+  // Fetch the skill catalog once, on mount — there is no global store cache for
+  // skills to reuse, consistent with this app's per-component-fetch convention.
+  useEffect(() => {
+    skillsApi.list().then(setSkills).catch(() => setSkills([]));
+  }, []);
 
   // When stream ends, keep view at bottom (instant scroll after layout)
   useLayoutEffect(() => {
@@ -181,6 +193,7 @@ export function ChatView() {
     : (generalChatSettings?.provider_routing ?? null);
   const defaultToolIdsForChat = agent ? (agent.tool_ids ?? []) : (generalChatSettings?.tool_ids ?? []);
   const defaultMcpServerIdsForChat = agent ? (agent.mcp_server_ids ?? []) : (generalChatSettings?.mcp_server_ids ?? []);
+  const defaultSkillIdsForChat = agent ? (agent.skill_ids ?? []) : (generalChatSettings?.skill_ids ?? []);
 
   const effectiveConversationModel = useMemo(() => {
     if (!activeConversationId) return null;
@@ -209,6 +222,20 @@ export function ChatView() {
       mcpServerIds: source.tools_overridden ? source.mcp_server_ids : defaultMcpServerIdsForChat,
     };
   }, [activeConversationId, conversationToolConfigOverrides, activeConversation, defaultToolIdsForChat, defaultMcpServerIdsForChat]);
+
+  const effectiveConversationSkillConfig = useMemo(() => {
+    if (!activeConversationId) {
+      return { overrideActive: false, skillIds: defaultSkillIdsForChat };
+    }
+    const override = conversationSkillConfigOverrides[activeConversationId];
+    const source = override !== undefined
+      ? override
+      : { skills_overridden: !!activeConversation?.skills_overridden, skill_ids: activeConversation?.skill_ids ?? [] };
+    return {
+      overrideActive: source.skills_overridden,
+      skillIds: source.skills_overridden ? source.skill_ids : defaultSkillIdsForChat,
+    };
+  }, [activeConversationId, conversationSkillConfigOverrides, activeConversation, defaultSkillIdsForChat]);
 
   // Model used for the next (or current streaming) message; shown in the assistant bubble when streaming.
   const effectiveModelForThisMessage = messageModelOverride ?? effectiveConversationModel ?? defaultModelForChat;
@@ -266,6 +293,31 @@ export function ChatView() {
       console.error('Failed to reset conversation tool config:', err);
     }
   }, [activeConversationId, setConversationToolConfigOverride, loadConversations]);
+
+  const handleConversationSkillConfigApply = useCallback(
+    async (skillIds: string[]) => {
+      if (!activeConversationId) return;
+      setConversationSkillConfigOverride(activeConversationId, { skills_overridden: true, skill_ids: skillIds });
+      try {
+        await conversationsApi.updateSkillConfig(activeConversationId, skillIds);
+        await loadConversations();
+      } catch (err) {
+        console.error('Failed to update conversation skill config:', err);
+      }
+    },
+    [activeConversationId, setConversationSkillConfigOverride, loadConversations]
+  );
+
+  const handleConversationSkillConfigReset = useCallback(async () => {
+    if (!activeConversationId) return;
+    setConversationSkillConfigOverride(activeConversationId, { skills_overridden: false, skill_ids: [] });
+    try {
+      await conversationsApi.resetSkillConfig(activeConversationId);
+      await loadConversations();
+    } catch (err) {
+      console.error('Failed to reset conversation skill config:', err);
+    }
+  }, [activeConversationId, setConversationSkillConfigOverride, loadConversations]);
 
   // Determine effective reasoning state: override > agent default > general chat settings (when no agent)
   const effectiveReasoning: ReasoningConfig = useMemo(() => {
@@ -462,6 +514,7 @@ export function ChatView() {
       ...(messageModelOverride && { model: messageModelOverride }),
       ...(messageProviderRoutingOverride && { providerRouting: messageProviderRoutingOverride }),
       ...(invokeAgentId && { invokeAgentId }),
+      ...(invokeSkillNames.length && { invokeSkillNames }),
       ...(councilEnabled && councilConfig && {
       councilConfig,
       ...(selectedCouncilId && { councilMemberId: selectedCouncilId }),
@@ -472,10 +525,11 @@ export function ChatView() {
     setMessageModelOverride(null);
     setMessageProviderRoutingOverride(null);
     setInvokeAgentId(undefined);
+    setInvokeSkillNames([]);
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
-  }, [inputValue, isStreaming, pendingAttachments, pdfEngine, sendMessage, messageModelOverride, messageProviderRoutingOverride, invokeAgentId, councilEnabled, councilConfig, selectedCouncilId, effectiveConversationModel, defaultModelForChat, effectiveConversationProviderRouting, defaultProviderRoutingForChat]);
+  }, [inputValue, isStreaming, pendingAttachments, pdfEngine, sendMessage, messageModelOverride, messageProviderRoutingOverride, invokeAgentId, invokeSkillNames, councilEnabled, councilConfig, selectedCouncilId, effectiveConversationModel, defaultModelForChat, effectiveConversationProviderRouting, defaultProviderRoutingForChat]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -564,6 +618,13 @@ export function ChatView() {
                 overrideActive={effectiveConversationToolConfig.overrideActive}
                 onApply={handleConversationToolConfigApply}
                 onReset={handleConversationToolConfigReset}
+                disabled={isStreaming || !activeConversationId}
+              />
+              <ConversationSkillsSelector
+                skillIds={effectiveConversationSkillConfig.skillIds}
+                overrideActive={effectiveConversationSkillConfig.overrideActive}
+                onApply={handleConversationSkillConfigApply}
+                onReset={handleConversationSkillConfigReset}
                 disabled={isStreaming || !activeConversationId}
               />
             </span>
@@ -1198,13 +1259,15 @@ export function ChatView() {
               )}
               <PremiumMentionInput
                 value={inputValue}
-                onChange={(val, agentId) => {
+                onChange={(val, agentId, skillNames) => {
                   setInputValue(val);
                   setInvokeAgentId(agentId);
+                  setInvokeSkillNames(skillNames ?? []);
                 }}
                 disabled={isStreaming}
-                placeholder={isStreaming ? 'Waiting for response...' : 'Send a message... Use @ to mention an agent'}
+                placeholder={isStreaming ? 'Waiting for response...' : 'Send a message... Use @ to mention an agent, / to invoke a skill'}
                 agents={agents}
+                skills={skills}
                 onSubmit={handleSend}
                 submitDisabled={!inputValue.trim() || isStreaming}
                 onFocus={() => setComposerFocused(true)}
@@ -1428,6 +1491,20 @@ export function ChatView() {
                   overrideActive={effectiveConversationToolConfig.overrideActive}
                   onApply={handleConversationToolConfigApply}
                   onReset={handleConversationToolConfigReset}
+                  disabled={isStreaming || !activeConversationId}
+                  compact
+                />
+              </div>
+            </section>
+
+            <section className="composer-options-section">
+              <span className="composer-options-label"><Layers size={15} /> Skills for this conversation</span>
+              <div className="composer-options-controls">
+                <ConversationSkillsSelector
+                  skillIds={effectiveConversationSkillConfig.skillIds}
+                  overrideActive={effectiveConversationSkillConfig.overrideActive}
+                  onApply={handleConversationSkillConfigApply}
+                  onReset={handleConversationSkillConfigReset}
                   disabled={isStreaming || !activeConversationId}
                   compact
                 />

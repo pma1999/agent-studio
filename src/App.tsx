@@ -8,6 +8,7 @@ import { AgentEditor } from './components/AgentEditor';
 import { ChatView } from './components/ChatView';
 import { ToolsView } from './components/ToolsView';
 import { McpView } from './components/McpView';
+import { SkillsView } from './components/SkillsView';
 import { CouncilManager } from './components/CouncilManager';
 import { CouncilEditor } from './components/CouncilEditor';
 import { SettingsPanel } from './components/SettingsPanel';
@@ -194,6 +195,11 @@ function App() {
         {currentView === 'mcp' && (
           <motion.div key="mcp" {...viewMotion} style={viewStyle}>
             <McpView />
+          </motion.div>
+        )}
+        {currentView === 'skills' && (
+          <motion.div key="skills" {...viewMotion} style={viewStyle}>
+            <SkillsView />
           </motion.div>
         )}
         {currentView === 'councils' && (

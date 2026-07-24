@@ -8,6 +8,11 @@ const router = Router();
 
 const NAME_REGEX = /^[a-z][a-z0-9_]*$/;
 
+// Names reserved outright for the Agent Skills feature's own built-in tools (see
+// server/skills/activation.ts). No custom tool — builtin or http — may use these names,
+// to prevent a name collision that would make runTool()'s name-based dispatch ambiguous.
+export const RESERVED_SKILL_TOOL_NAMES = ['activate_skill', 'read_skill_resource', 'run_skill_script'] as const;
+
 // GET /api/tools - List all tools
 router.get('/', (req: AuthRequest, res: Response) => {
   try {
@@ -60,6 +65,9 @@ router.post('/', (req: AuthRequest, res: Response) => {
     const trimmedName = name.trim();
     if (!NAME_REGEX.test(trimmedName)) {
       return res.status(400).json({ error: 'name must be snake_case (e.g. web_search, get_current_time)' });
+    }
+    if ((RESERVED_SKILL_TOOL_NAMES as readonly string[]).includes(trimmedName)) {
+      return res.status(400).json({ error: `"${trimmedName}" is a reserved name used by the Skills feature and cannot be used for a custom tool` });
     }
 
     const schema = parameters_schema != null ? (typeof parameters_schema === 'string' ? JSON.parse(parameters_schema) : parameters_schema) : { type: 'object', properties: {}, required: [] };

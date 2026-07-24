@@ -13,8 +13,8 @@ import type { RunToolResult } from './run.js';
 import { scanCommand } from '../../shared/commandSafety.js';
 
 export const MAX_COMMAND_OUTPUT_CHARS = 64_000;
-const DEFAULT_TIMEOUT_SECONDS = 120;
-const MAX_TIMEOUT_SECONDS = 1_800;
+export const DEFAULT_TIMEOUT_SECONDS = 120;
+export const MAX_TIMEOUT_SECONDS = 1_800;
 const MAX_SANDBOX_TIMEOUT_MS = 3_550_000;
 const E2B_DEFAULT_CWD = '/home/user';
 const CLIENT_DISCONNECT_ERROR = 'Command cancelled because the client disconnected.';

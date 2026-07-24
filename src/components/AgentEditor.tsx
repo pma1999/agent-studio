@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { Search, Loader2, Zap, Globe, Brain, Wrench, Plug, Braces, ExternalLink } from 'lucide-react';
+import { Search, Loader2, Zap, Globe, Brain, Wrench, Plug, Layers, Braces, ExternalLink } from 'lucide-react';
 import { useStore } from '../stores/store';
-import { agentsApi, toolsApi, mcpServersApi } from '../api/client';
+import { agentsApi, toolsApi, mcpServersApi, skillsApi } from '../api/client';
 import { Modal } from './ui/Modal';
 import { ModelSelectorCore } from './ModelSelectorCore';
 import { ProviderRoutingSelector } from './ProviderRoutingSelector';
@@ -9,7 +9,7 @@ import { Input } from './ui/Input';
 import { TextArea } from './ui/TextArea';
 import { Slider } from './ui/Slider';
 import { Button } from './ui/Button';
-import type { AgentFormData, ReasoningEffort, Tool, McpServer } from '../types';
+import type { AgentFormData, ReasoningEffort, Tool, McpServer, Skill } from '../types';
 
 const EMOJI_OPTIONS = [
   '🤖', '✨', '🧠', '💡', '🎯', '🔮', '⚡', '🌟', '🎨', '📝',
@@ -34,6 +34,7 @@ const DEFAULT_FORM: AgentFormData = {
   reasoning_max_tokens: null,
   tool_ids: [],
   mcp_server_ids: [],
+  skill_ids: [],
   tool_choice: 'auto',
   parallel_tool_calls: true,
   structured_output_enabled: false,
@@ -63,6 +64,7 @@ export function AgentEditor() {
   const [error, setError] = useState('');
   const [allTools, setAllTools] = useState<Tool[]>([]);
   const [allMcpServers, setAllMcpServers] = useState<McpServer[]>([]);
+  const [allSkills, setAllSkills] = useState<Skill[]>([]);
 
   useEffect(() => {
     if (editingAgent) {
@@ -83,6 +85,7 @@ export function AgentEditor() {
         reasoning_max_tokens: editingAgent.reasoning_max_tokens || null,
         tool_ids: editingAgent.tool_ids ?? [],
         mcp_server_ids: editingAgent.mcp_server_ids ?? [],
+        skill_ids: editingAgent.skill_ids ?? [],
         tool_choice: (editingAgent as { tool_choice?: string }).tool_choice === 'none' ? 'none' : 'auto',
         parallel_tool_calls: (editingAgent as { parallel_tool_calls?: number }).parallel_tool_calls === 0 ? false : true,
         structured_output_enabled: !!(editingAgent as { structured_output_enabled?: number }).structured_output_enabled,
@@ -99,6 +102,7 @@ export function AgentEditor() {
     if (agentEditorOpen) {
       toolsApi.list().then(setAllTools).catch(() => setAllTools([]));
       mcpServersApi.list().then(setAllMcpServers).catch(() => setAllMcpServers([]));
+      skillsApi.list().then(setAllSkills).catch(() => setAllSkills([]));
     }
   }, [agentEditorOpen]);
 
@@ -466,6 +470,71 @@ export function AgentEditor() {
                           />
                           <span style={{ fontWeight: 500 }}>{mcp.name}</span>
                           <span style={{ color: 'var(--text-muted)', fontSize: '0.75rem' }}>{mcp.transport}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Skills (assign which skills this agent can use) */}
+              {allSkills.length > 0 && (
+                <div style={{
+                  border: '1px solid var(--border)',
+                  borderRadius: 'var(--radius-sm)',
+                  overflow: 'hidden',
+                }}>
+                  <div style={{
+                    padding: '10px 12px',
+                    background: 'var(--bg-elevated)',
+                    borderBottom: '1px solid var(--border)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    fontSize: '0.8125rem',
+                    fontWeight: 500,
+                    color: 'var(--text-secondary)',
+                  }}>
+                    <Layers size={14} />
+                    Skills
+                  </div>
+                  <div style={{ padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                    {allSkills.map((skill) => {
+                      const checked = (form.skill_ids ?? []).includes(skill.id);
+                      return (
+                        <label
+                          key={skill.id}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '10px',
+                            cursor: 'pointer',
+                            fontSize: '0.8125rem',
+                            color: 'var(--text-primary)',
+                          }}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => {
+                              const ids = form.skill_ids ?? [];
+                              if (checked) updateField('skill_ids', ids.filter((id) => id !== skill.id));
+                              else updateField('skill_ids', [...ids, skill.id]);
+                            }}
+                            style={{ width: '16px', height: '16px', accentColor: 'var(--accent)' }}
+                          />
+                          <span style={{ fontWeight: 500, flexShrink: 0 }}>{skill.name}</span>
+                          <span style={{
+                            color: 'var(--text-muted)',
+                            fontSize: '0.75rem',
+                            flex: 1,
+                            minWidth: 0,
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}>
+                            {skill.description}
+                          </span>
                         </label>
                       );
                     })}

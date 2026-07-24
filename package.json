@@ -15,7 +15,7 @@
     "build:client": "vite build",
     "start": "node dist/server/index.js",
     "preview": "vite preview",
-    "test": "tsx scripts/test-provider-routing.ts && tsx scripts/test-conversation-titles.ts && tsx scripts/test-web-fetch-detection.ts && tsx scripts/test-conversation-tool-overrides.ts && tsx scripts/test-tool-call-budget.ts && tsx scripts/test-command-safety.ts && tsx scripts/test-exec-audit.ts && tsx scripts/test-run-command-e2b.ts && tsx scripts/test-mcp-stdio-hardening.ts && tsx scripts/test-agent-relay.ts && tsx scripts/test-file-ops.ts && tsx scripts/test-agent-files.ts && tsx scripts/test-send-file.ts",
+    "test": "tsx scripts/test-provider-routing.ts && tsx scripts/test-conversation-titles.ts && tsx scripts/test-web-fetch-detection.ts && tsx scripts/test-conversation-tool-overrides.ts && tsx scripts/test-tool-call-budget.ts && tsx scripts/test-command-safety.ts && tsx scripts/test-exec-audit.ts && tsx scripts/test-run-command-e2b.ts && tsx scripts/test-mcp-stdio-hardening.ts && tsx scripts/test-agent-relay.ts && tsx scripts/test-file-ops.ts && tsx scripts/test-agent-files.ts && tsx scripts/test-send-file.ts && tsx scripts/test-skill-parser.ts && tsx scripts/test-skill-storage.ts && tsx scripts/test-skill-resolution.ts && tsx scripts/test-skill-activation.ts && tsx scripts/test-skill-run-script.ts && tsx scripts/test-skill-tool-name-collision.ts",
     "db:restore": "node scripts/restore-db-from-stdin.mjs",
     "db:migrate-local": "node scripts/migrate-local-db.mjs",
     "test:web-fetch": "node scripts/test-web-fetch.mjs",
@@ -24,6 +24,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
     "@mozilla/readability": "^0.6.0",
+    "adm-zip": "^0.5.16",
     "bcrypt": "^6.0.0",
     "better-sqlite3": "^11.7.0",
     "cookie-parser": "^1.4.7",
@@ -33,6 +34,7 @@
     "express-rate-limit": "^8.2.1",
     "framer-motion": "^11.15.0",
     "highlight.js": "^11.10.0",
+    "js-yaml": "^4.1.0",
     "jsdom": "^29.1.1",
     "jsonwebtoken": "^9.0.3",
     "lucide-react": "^0.468.0",
@@ -47,11 +49,13 @@
     "zustand": "^5.0.2"
   },
   "devDependencies": {
+    "@types/adm-zip": "^0.5.7",
     "@types/bcrypt": "^6.0.0",
     "@types/better-sqlite3": "^7.6.12",
     "@types/cookie-parser": "^1.4.10",
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
+    "@types/js-yaml": "^4.0.9",
     "@types/jsdom": "^28.0.3",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/react": "^18.3.12",

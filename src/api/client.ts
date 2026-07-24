@@ -21,6 +21,7 @@ import type {
   CouncilRunDetail,
   CouncilConfig,
   ProviderRoutingConfig,
+  Skill,
 } from '../types';
 
 /** In production (Vercel), set VITE_API_URL to your Railway API URL (e.g. https://your-app.railway.app). No trailing slash. */
@@ -170,6 +171,13 @@ export const conversationsApi = {
   resetToolConfig: (id: string) => request<Conversation>(`/conversations/${id}/tool-config`, {
     method: 'DELETE',
   }),
+  updateSkillConfig: (id: string, skillIds: string[]) => request<Conversation>(`/conversations/${id}/skill-config`, {
+    method: 'PUT',
+    body: JSON.stringify({ skill_ids: skillIds }),
+  }),
+  resetSkillConfig: (id: string) => request<Conversation>(`/conversations/${id}/skill-config`, {
+    method: 'DELETE',
+  }),
   delete: (id: string) => request<{ success: boolean }>(`/conversations/${id}`, {
     method: 'DELETE',
   }),
@@ -240,6 +248,106 @@ export const mcpServersApi = {
   }),
 };
 
+// Skills
+export type SkillCreatePayload =
+  | { raw_skill_md: string }
+  | {
+      name: string;
+      description: string;
+      body: string;
+      license?: string;
+      compatibility?: string;
+      metadata?: Record<string, string>;
+      allowed_tools?: string;
+      disable_model_invocation?: boolean;
+    };
+
+export interface SkillResourceEntry {
+  path: string;
+  size_bytes: number;
+}
+
+export interface SkillParsePreviewResult {
+  valid: boolean;
+  errors: string[];
+  warnings: string[];
+  catalog_entry?: { name: string; description: string };
+}
+
+export interface SkillImportResult {
+  skill: Skill;
+  warnings: string[];
+  resources: SkillResourceEntry[];
+}
+
+/** UTF-8-safe base64 encoding of a relative path, mirroring how `agentFiles.ts`'s
+ *  server side decodes `X-File-Name-B64` (`Buffer.from(header, 'base64').toString('utf8')`).
+ *  Bare `btoa(path)` mangles non-Latin1 characters, so encode the UTF-8 byte sequence first. */
+function base64EncodeUtf8(value: string): string {
+  return btoa(unescape(encodeURIComponent(value)));
+}
+
+export const skillsApi = {
+  list: () => request<Skill[]>('/skills'),
+  get: (id: string) => request<Skill & { resources: SkillResourceEntry[] }>(`/skills/${id}`),
+  create: (data: SkillCreatePayload) => request<SkillImportResult>('/skills', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  }),
+  update: (id: string, data: SkillCreatePayload) => request<Skill>(`/skills/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  }),
+  delete: (id: string) => request<{ success: boolean }>(`/skills/${id}`, {
+    method: 'DELETE',
+  }),
+  parsePreview: (data: SkillCreatePayload) => request<SkillParsePreviewResult>('/skills/parse-preview', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  }),
+  importZip: async (zipBytes: ArrayBuffer): Promise<SkillImportResult> => {
+    const res = await fetch(`${API_BASE}/skills/import-zip`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/zip',
+        ...getAuthHeaders(),
+      },
+      body: zipBytes,
+    });
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({ error: 'Request failed' }));
+      throw new Error(error.error || `HTTP ${res.status}`);
+    }
+    return res.json();
+  },
+  listResources: (id: string) => request<SkillResourceEntry[]>(`/skills/${id}/resources`),
+  getResourceContent: (id: string, path: string) => request<{ path: string; content: string | null; size_bytes: number; truncated: boolean; binary?: boolean }>(
+    `/skills/${id}/resources/content?path=${encodeURIComponent(path)}`
+  ),
+  addResource: async (id: string, path: string, bytes: ArrayBuffer): Promise<SkillResourceEntry> => {
+    const res = await fetch(`${API_BASE}/skills/${id}/resources`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'X-Resource-Path-B64': base64EncodeUtf8(path),
+        ...getAuthHeaders(),
+      },
+      body: bytes,
+    });
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({ error: 'Request failed' }));
+      throw new Error(error.error || `HTTP ${res.status}`);
+    }
+    return res.json();
+  },
+  deleteResource: (id: string, path: string) => request<{ success: boolean }>(
+    `/skills/${id}/resources?path=${encodeURIComponent(path)}`,
+    { method: 'DELETE' }
+  ),
+};
+
 // Done event data shape from the backend
 export interface StreamDoneData {
   done: true;
@@ -306,6 +414,8 @@ export async function streamChat(
   // Appended last (not inserted earlier): every existing call site uses positional
   // arguments and would silently break if this shifted the position of any prior one.
   onToolOutputChunk?: (data: StreamToolOutputChunkData) => void,
+  // Same rule as onToolOutputChunk above: appended last, not inserted earlier.
+  invokeSkillNames?: string[],
 ): Promise<void> {
   try {
     const body: Record<string, unknown> = { conversation_id: conversationId, content };
@@ -321,6 +431,9 @@ export async function streamChat(
     // Include invoke_agent_id for @agent mentions
     if (invokeAgentId) {
       body.invoke_agent_id = invokeAgentId;
+    }
+    if (invokeSkillNames?.length) {
+      body.invoke_skill_names = invokeSkillNames;
     }
 
     // Include per-message reasoning override if provided

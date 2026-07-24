@@ -97,7 +97,7 @@ export interface CouncilResult {
 export interface ResolvedTool {
   id: string;
   name: string;
-  type: 'builtin' | 'http' | 'mcp';
+  type: 'builtin' | 'http' | 'mcp' | 'skill';
   config: unknown;
   openAIDef: {
     type: 'function';

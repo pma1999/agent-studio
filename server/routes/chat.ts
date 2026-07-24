@@ -29,6 +29,22 @@ import {
 } from '../providers/index.js';
 import { buildDateTimeContext, injectDateTimeIntoCurrentTurn } from '../dateTimeContext.js';
 import {
+  appendSkillCatalogIfNeeded,
+  buildActivateSkillTool,
+  buildReadSkillResourceTool,
+  buildRunSkillScriptTool,
+  hasSkillAlreadyActivated,
+  injectSkillActivationIntoCurrentTurn,
+  tryActivateSkill,
+} from '../skills/activation.js';
+import {
+  getConversationSkillOverride,
+  resolveSkillsForAgent,
+  resolveSkillsFromIds,
+  selectSkillResolutionSource,
+} from '../skills/resolve.js';
+import type { ResolvedSkill } from '../skills/resolve.js';
+import {
   AUTO_CONVERSATION_TITLES_SETTING_KEY,
   createFallbackConversationTitle,
   generateConversationTitleWithOpenRouter,
@@ -92,6 +108,24 @@ export const MAX_TOOL_TIME_MS_PER_TURN = readNonNegativeNumberEnv('MAX_TOOL_TIME
 
 export function isToolBudgetExceeded(toolCallCount: number, toolTimeMs: number): boolean {
   return toolCallCount >= MAX_TOOL_CALLS_PER_TURN || toolTimeMs >= MAX_TOOL_TIME_MS_PER_TURN;
+}
+
+/**
+ * Skill tools (activate_skill, read_skill_resource, run_skill_script) are the reserved,
+ * canonical owners of their names. If a stale/pre-existing user tool happens to share one of
+ * these names (e.g. created before the tools.ts CRUD-level reservation existed), it must never
+ * shadow or collide with the real skill tool in the final list sent to the model — the skill
+ * tool always wins.
+ */
+export function excludeReservedSkillToolNames<T extends { name: string }>(
+  baseTools: T[],
+  skillTools: T[],
+): T[] {
+  const skillToolNames = new Set(skillTools.map((t) => t.name));
+  return [
+    ...baseTools.filter((t) => !skillToolNames.has(t.name)),
+    ...skillTools,
+  ];
 }
 
 export function buildToolOutputChunkEvent(
@@ -206,11 +240,16 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       res.status(401).json({ error: 'Unauthorized' });
       return;
     }
-    const body = req.body as { conversation_id?: string; content?: string; reasoning?: unknown; attachments?: unknown; pdf_engine?: string; model?: string; provider_routing?: unknown; invoke_agent_id?: string; timezone?: string };
-    const { conversation_id, content, reasoning, attachments: attachmentsRaw, pdf_engine: pdfEngineRaw, model: messageModel, provider_routing: messageProviderRoutingRaw, invoke_agent_id, timezone: bodyTimezone } = body;
+    const body = req.body as { conversation_id?: string; content?: string; reasoning?: unknown; attachments?: unknown; pdf_engine?: string; model?: string; provider_routing?: unknown; invoke_agent_id?: string; invoke_skill_names?: unknown; timezone?: string };
+    const { conversation_id, content, reasoning, attachments: attachmentsRaw, pdf_engine: pdfEngineRaw, model: messageModel, provider_routing: messageProviderRoutingRaw, invoke_agent_id, invoke_skill_names, timezone: bodyTimezone } = body;
 
     if (!conversation_id || !content) {
       res.status(400).json({ error: 'conversation_id and content are required' });
+      return;
+    }
+
+    if (invoke_skill_names !== undefined && (!Array.isArray(invoke_skill_names) || !invoke_skill_names.every((n: unknown) => typeof n === 'string'))) {
+      res.status(400).json({ error: 'invoke_skill_names must be an array of strings' });
       return;
     }
 
@@ -412,13 +451,51 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     const resolved = toolSource.kind === 'agent-default'
       ? await resolveToolsForAgent(agent.id, userId)
       : await resolveToolsFromIds(toolSource.tool_ids, toolSource.mcp_server_ids, userId);
-    const resolvedTools = resolved.resolvedTools;
+
+    // Resolve skills for this agent/conversation — mirrors the tool resolution above; skills
+    // have no MCP-style async connection to manage and no isUsable-style gating (a skill's
+    // usability never depends on external connectivity, only on assignment).
+    const conversationSkillOverride = getConversationSkillOverride(conversation.id);
+    const skillSource = selectSkillResolutionSource({
+      conversationOverride: conversationSkillOverride,
+      isGeneralChat: agent.id === 'general',
+      generalSettings: generalSettings ? { skill_ids: generalSettings.skill_ids || [] } : null,
+    });
+    const resolvedSkills: ResolvedSkill[] = skillSource.kind === 'agent-default'
+      ? resolveSkillsForAgent(agent.id, userId)
+      : resolveSkillsFromIds(skillSource.skill_ids, userId);
+    const skillTools = [
+      buildActivateSkillTool(resolvedSkills),
+      buildReadSkillResourceTool(resolvedSkills),
+      buildRunSkillScriptTool(resolvedSkills, userId),
+    ]
+      .filter((t): t is NonNullable<typeof t> => t !== null);
+
+    const resolvedTools = excludeReservedSkillToolNames(resolved.resolvedTools, skillTools);
     mcpClients = resolved.mcpClients;
     const openRouterTools = toOpenRouterTools(resolvedTools);
 
     // Augment system prompt with MCP tool naming instruction when applicable
     if (messages[0]?.role === 'system' && typeof messages[0].content === 'string') {
       messages[0].content = appendToolInstructionsIfNeeded(messages[0].content, resolvedTools);
+      messages[0].content = appendSkillCatalogIfNeeded(messages[0].content, resolvedSkills);
+    }
+
+    const requestedSkillNames = Array.isArray(invoke_skill_names) ? invoke_skill_names : [];
+    for (const rawName of requestedSkillNames) {
+      if (typeof rawName !== 'string' || !rawName.trim()) continue;
+      const entry = resolvedSkills.find((skill) => skill.name === rawName.trim());
+      if (!entry) {
+        console.warn(`[chat] invoke_skill_names: '${rawName}' is not a resolved skill for this conversation, skipping`);
+        continue;
+      }
+      const activation = tryActivateSkill({ name: entry.name, userId, currentMessages: messages });
+      if (!activation) {
+        console.warn(`[chat] invoke_skill_names: skill '${entry.name}' could not be loaded, skipping`);
+        continue;
+      }
+      if (activation.alreadyActive) continue; // silent no-op — the model already has this in context, no new signal needed
+      injectSkillActivationIntoCurrentTurn(messages, activation.content);
     }
 
     // Early exit if server is shutting down (shouldn't reach here due to
@@ -948,7 +1025,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
                   res.write(`data: ${JSON.stringify(buildToolOutputChunkEvent(id, chunk, outputSeq++))}\n\n`);
                 },
               })
-              : await runTool(resolvedTools, name, args, mcpClients, userId, conversation_id);
+              : await runTool(resolvedTools, name, args, mcpClients, userId, conversation_id, messages);
           } finally {
             clearInterval(keepaliveTimer);
           }
@@ -1040,6 +1117,7 @@ function loadGeneralChatSettings(userId: string): {
   reasoning_max_tokens: number | null;
   tool_ids: string[];
   mcp_server_ids: string[];
+  skill_ids: string[];
   tool_choice: string;
   parallel_tool_calls: number;
   provider_routing: ProviderRoutingConfig | null;
@@ -1052,6 +1130,7 @@ function loadGeneralChatSettings(userId: string): {
     reasoning_max_tokens: null as number | null,
     tool_ids: [] as string[],
     mcp_server_ids: [] as string[],
+    skill_ids: [] as string[],
     tool_choice: 'auto',
     parallel_tool_calls: 1,
     provider_routing: null as ProviderRoutingConfig | null,
@@ -1089,6 +1168,17 @@ function loadGeneralChatSettings(userId: string): {
       }
     }
 
+    let skill_ids = defaults.skill_ids;
+    const rawSkillIds = getSettingValue(userId, 'general_chat_skill_ids');
+    if (rawSkillIds && typeof rawSkillIds === 'string') {
+      try {
+        const parsed = JSON.parse(rawSkillIds) as unknown;
+        if (Array.isArray(parsed)) skill_ids = parsed.filter((id): id is string => typeof id === 'string');
+      } catch {
+        // keep default
+      }
+    }
+
     const parallel_tool_calls = parallelToolCallsRaw === '0' ? 0 : 1;
 
     return {
@@ -1099,6 +1189,7 @@ function loadGeneralChatSettings(userId: string): {
       reasoning_max_tokens: reasoningMaxTokens ? parseInt(reasoningMaxTokens, 10) : defaults.reasoning_max_tokens,
       tool_ids,
       mcp_server_ids,
+      skill_ids,
       tool_choice: toolChoice === 'none' ? 'none' : 'auto',
       parallel_tool_calls,
       provider_routing: providerRouting,

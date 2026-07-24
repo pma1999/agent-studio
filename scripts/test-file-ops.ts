@@ -256,7 +256,7 @@ assert.ok(auditRows.some((row) => row.tool_name === 'write_file' && row.conversa
 const chatSource = fs.readFileSync(path.join(process.cwd(), 'server/routes/chat.ts'), 'utf8');
 assert.match(chatSource, /const keepaliveTimer = setInterval\(/);
 assert.doesNotMatch(chatSource, /if \(name === 'run_command'\)[\s\S]{0,250}setInterval\(/);
-assert.match(chatSource, /runTool\(resolvedTools, name, args, mcpClients, userId, conversation_id\)/);
+assert.match(chatSource, /runTool\(resolvedTools, name, args, mcpClients, userId, conversation_id, messages\)/);
 
 db.close();
 for (const suffix of ['', '-shm', '-wal']) {

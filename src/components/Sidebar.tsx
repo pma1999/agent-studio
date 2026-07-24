@@ -6,7 +6,7 @@ import { useChat } from '../hooks/useChat';
 import { useIsMobile, usePrefersReducedMotion } from '../utils/breakpoints';
 import { ConversationList } from './ConversationList';
 import { IconButton } from './ui/IconButton';
-import { navItems } from './navItems';
+import { navItems, type NavView } from './navItems';
 import { useBodyScrollLock } from '../hooks/useBodyScrollLock';
 import { useFocusTrap } from '../hooks/useFocusTrap';
 
@@ -99,7 +99,7 @@ export function Sidebar() {
     ? agents.filter((a) => a.name.toLowerCase().includes(agentQuery.trim().toLowerCase()))
     : agents;
 
-  const navClick = (view: 'agents' | 'chat' | 'tools' | 'mcp' | 'councils') => {
+  const navClick = (view: NavView) => {
     setCurrentView(view);
     if (isMobile) setSidebarMobileOpen(false);
   };

@@ -33,6 +33,8 @@ export interface Agent {
   tools?: Tool[];
   mcp_server_ids?: string[];
   mcp_servers?: McpServer[];
+  skill_ids?: string[];
+  skills?: Skill[];
   tool_choice?: 'auto' | 'none';
   parallel_tool_calls?: boolean;
   structured_output_enabled?: boolean;
@@ -73,6 +75,26 @@ export interface ConversationToolConfigOverride {
   mcp_server_ids: string[];
 }
 
+export interface Skill {
+  id: string;
+  name: string;
+  description: string;
+  body: string;
+  license: string | null;
+  compatibility: string | null;
+  metadata: Record<string, string> | null;
+  allowed_tools: string | null;
+  disable_model_invocation: boolean;
+  source_filename: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ConversationSkillConfigOverride {
+  skills_overridden: boolean;
+  skill_ids: string[];
+}
+
 export interface Conversation {
   id: string;
   agent_id: string | null;
@@ -85,6 +107,8 @@ export interface Conversation {
   tools_overridden?: boolean;
   tool_ids?: string[];
   mcp_server_ids?: string[];
+  skills_overridden?: boolean;
+  skill_ids?: string[];
   created_at: string;
   updated_at: string;
 }
@@ -135,7 +159,7 @@ export interface ChatAttachmentInput {
   url?: string;
 }
 
-export type View = 'agents' | 'chat' | 'tools' | 'mcp' | 'settings' | 'councils';
+export type View = 'agents' | 'chat' | 'tools' | 'mcp' | 'skills' | 'settings' | 'councils';
 
 export type ToolType = 'builtin' | 'http';
 
@@ -232,6 +256,7 @@ export interface AgentFormData {
   reasoning_max_tokens?: number | null;
   tool_ids?: string[];
   mcp_server_ids?: string[];
+  skill_ids?: string[];
   tool_choice?: 'auto' | 'none';
   parallel_tool_calls?: boolean;
   structured_output_enabled?: boolean;
@@ -246,6 +271,7 @@ export interface GeneralChatSettings {
   emoji?: string;
   tool_ids?: string[];
   mcp_server_ids?: string[];
+  skill_ids?: string[];
   tool_choice?: 'auto' | 'none';
   parallel_tool_calls?: number;
   reasoning_enabled?: boolean;
