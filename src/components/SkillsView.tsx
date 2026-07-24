@@ -497,7 +497,7 @@ export function SkillsView() {
           <input
             ref={zipInputRef}
             type="file"
-            accept=".zip"
+            accept=".zip,.skill"
             onChange={handleZipChange}
             style={{ display: 'none' }}
             aria-hidden
@@ -509,7 +509,7 @@ export function SkillsView() {
             disabled={importing}
             style={{ border: '1px solid var(--border)' }}
           >
-            {importing ? 'Importing…' : 'Import .zip'}
+            {importing ? 'Importing…' : 'Import .zip / .skill'}
           </Button>
           <Button onClick={openCreate} icon={<Plus size={16} />}>
             New Skill
