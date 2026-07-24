@@ -42,6 +42,8 @@ try {
   }
 }
 
+export const DB_DIRECTORY = path.dirname(dbPathToUse);
+
 // Enable WAL mode for better concurrent performance
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
@@ -733,6 +735,17 @@ export function migrate() {
         required: [],
       },
     },
+    {
+      name: 'send_file',
+      description: 'Deliver a file from the connected local machine to the user as a downloadable link in the chat — use this after creating a file (e.g. with run_command or write_file) that the user should be able to download, such as a chart image, document, spreadsheet, or export. The download link stays valid for about 72 hours and then expires automatically. Requires a connected local agent.',
+      schema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File path relative to the workspace root (or an absolute path within it) of the file to deliver.' },
+        },
+        required: ['path'],
+      },
+    },
   ];
   const existingFileToolStmt = db.prepare('SELECT id, type FROM tools WHERE user_id = ? AND name = ?');
   const hasToolNameStmt = db.prepare('SELECT 1 FROM tools WHERE user_id = ? AND name = ?');
@@ -804,6 +817,22 @@ export function migrate() {
     );
     CREATE INDEX IF NOT EXISTS idx_paired_agents_user_id ON paired_agents(user_id);
     CREATE INDEX IF NOT EXISTS idx_paired_agents_token_hash ON paired_agents(token_hash);
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS agent_files (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      agent_id TEXT NOT NULL,
+      filename TEXT NOT NULL,
+      mime_type TEXT NOT NULL,
+      size_bytes INTEGER NOT NULL,
+      storage_path TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_files_user_id ON agent_files(user_id);
+    CREATE INDEX IF NOT EXISTS idx_agent_files_expires_at ON agent_files(expires_at);
   `);
 }
 

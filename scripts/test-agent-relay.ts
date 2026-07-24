@@ -69,7 +69,7 @@ async function expectRejectsPromptly(promise: Promise<unknown>) {
 
 migrate();
 
-// All ten file-op wire variants accept the pinned camelCase shapes.
+// All twelve file-op wire variants accept the pinned camelCase shapes.
 {
   const requests: BackendToAgentMessage[] = [
     { type: 'read_file_request', requestId: 'schema-read', path: 'a.txt', offset: 1, limit: 10 },
@@ -85,6 +85,7 @@ migrate();
     },
     { type: 'delete_file_request', requestId: 'schema-delete', path: 'a.txt', recursive: false },
     { type: 'list_directory_request', requestId: 'schema-list', path: '.' },
+    { type: 'send_file_request', requestId: 'schema-send-file', path: 'export.csv' },
   ];
   const responses: AgentToBackendMessage[] = [
     {
@@ -108,6 +109,16 @@ migrate();
       truncated: false,
       totalEntries: 1,
     },
+    {
+      type: 'send_file_response',
+      requestId: 'schema-send-file',
+      ok: true,
+      fileId: 'file-abc123',
+      filename: 'export.csv',
+      mimeType: 'text/csv',
+      sizeBytes: 2048,
+      expiresAt: new Date().toISOString(),
+    },
   ];
   for (const request of requests) assert.equal(BackendToAgentMessageSchema.safeParse(request).success, true);
   for (const response of responses) assert.equal(AgentToBackendMessageSchema.safeParse(response).success, true);
@@ -122,6 +133,22 @@ migrate();
     requestId: 'strict-response',
     ok: true,
     bytes_written: 5,
+  }).success, false);
+  assert.equal(BackendToAgentMessageSchema.safeParse({
+    type: 'send_file_request',
+    requestId: 'invalid-send-file',
+  }).success, false);
+  assert.equal(BackendToAgentMessageSchema.safeParse({
+    type: 'send_file_request',
+    requestId: 'invalid-send-file-extra',
+    path: 'export.csv',
+    extra: 'field',
+  }).success, false);
+  assert.equal(AgentToBackendMessageSchema.safeParse({
+    type: 'send_file_response',
+    requestId: 'strict-send-file-response',
+    ok: true,
+    file_id: 'file-abc123',
   }).success, false);
 }
 

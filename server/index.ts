@@ -21,6 +21,8 @@ import chatCouncilRouter from './routes/chatCouncil.js';
 import councilMembersRouter from './routes/councilMembers.js';
 import { mountWsProbe } from './routes/agentProbe.js';
 import agentRouter, { mountAgentTransport } from './routes/agent.js';
+import agentFilesRouter from './routes/agentFiles.js';
+import { startAgentFileSweep } from './agentFiles/storage.js';
 
 const app = express();
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3001;
@@ -109,6 +111,7 @@ app.use('/api/export', authMiddleware, exportRouter);
 app.use('/api/import', authMiddleware, importRouter);
 app.use('/api/chat/council', authMiddleware, chatCouncilRouter);
 app.use('/api/council', authMiddleware, councilMembersRouter);
+app.use('/api/agent/files', agentFilesRouter);
 app.use('/api/agent', agentRouter);
 
 // Root: for load balancer / health probes that hit /
@@ -139,6 +142,7 @@ const server = app.listen(PORT, '0.0.0.0', () => {
 // Graceful shutdown: handles SIGTERM/SIGINT, drains SSE streams, closes DB.
 setupGracefulShutdown(server, db);
 mountAgentTransport(server);
+startAgentFileSweep();
 
 // Temporary WebSocket viability probe (task-04) — off unless explicitly enabled.
 if (process.env.ENABLE_WS_PROBE === 'true') {

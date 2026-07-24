@@ -80,6 +80,17 @@ export type AgentToBackendMessage =
       entries?: Array<{ name: string; type: 'file' | 'directory' | 'symlink' | 'other'; sizeBytes?: number }>;
       truncated?: boolean;
       totalEntries?: number;
+    }
+  | {
+      type: 'send_file_response';
+      requestId: string;
+      ok: boolean;
+      error?: string;
+      fileId?: string;
+      filename?: string;
+      mimeType?: string;
+      sizeBytes?: number;
+      expiresAt?: string;
     };
 
 export type BackendToAgentMessage =
@@ -99,7 +110,8 @@ export type BackendToAgentMessage =
       hasBeenRead: boolean;
     }
   | { type: 'delete_file_request'; requestId: string; path: string; recursive?: boolean }
-  | { type: 'list_directory_request'; requestId: string; path: string };
+  | { type: 'list_directory_request'; requestId: string; path: string }
+  | { type: 'send_file_request'; requestId: string; path: string };
 
 export type CommandRequestMessage = Extract<BackendToAgentMessage, { type: 'command_request' }>;
 export type ReadFileRequestMessage = Extract<BackendToAgentMessage, { type: 'read_file_request' }>;
@@ -107,6 +119,7 @@ export type WriteFileRequestMessage = Extract<BackendToAgentMessage, { type: 'wr
 export type EditFileRequestMessage = Extract<BackendToAgentMessage, { type: 'edit_file_request' }>;
 export type DeleteFileRequestMessage = Extract<BackendToAgentMessage, { type: 'delete_file_request' }>;
 export type ListDirectoryRequestMessage = Extract<BackendToAgentMessage, { type: 'list_directory_request' }>;
+export type SendFileRequestMessage = Extract<BackendToAgentMessage, { type: 'send_file_request' }>;
 
 /** Matches the 20s heartbeat / 60s backend-timeout pair fixed in `global-constraints.md`. */
 export const HEARTBEAT_INTERVAL_MS = 20_000;
@@ -219,6 +232,11 @@ export function parseBackendMessage(raw: string): BackendToAgentMessage | null {
     case 'list_directory_request':
       if (typeof message.requestId === 'string' && typeof message.path === 'string') {
         return { type: 'list_directory_request', requestId: message.requestId, path: message.path };
+      }
+      return null;
+    case 'send_file_request':
+      if (typeof message.requestId === 'string' && typeof message.path === 'string') {
+        return { type: 'send_file_request', requestId: message.requestId, path: message.path };
       }
       return null;
     default:

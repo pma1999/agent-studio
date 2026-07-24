@@ -11,6 +11,7 @@ import { loadConfig, saveConfig, getConfigPath, type LocalAgentConfig } from './
 import { connectAgent, type AgentTransportHandle, type BackendToAgentMessage } from './transport.js';
 import { createCommandExecutor, createConsoleConfirmer, type CommandExecutor } from './commandExecutor.js';
 import { createFileOpsExecutor, type FileOpsExecutor } from './fileOpsExecutor.js';
+import { createSendFileExecutor, type SendFileExecutor } from './sendFileExecutor.js';
 import { createShellDetector } from './shellDetection.js';
 
 const AGENT_VERSION = '1.0.0';
@@ -166,6 +167,7 @@ function dispatch(
   message: BackendToAgentMessage,
   executor: CommandExecutor,
   fileOpsExecutor: FileOpsExecutor,
+  sendFileExecutor: SendFileExecutor,
   onHelloAck: (agentId: string) => void
 ): void {
   switch (message.type) {
@@ -195,6 +197,9 @@ function dispatch(
       break;
     case 'list_directory_request':
       void fileOpsExecutor.handleListDirectoryRequest(message);
+      break;
+    case 'send_file_request':
+      void sendFileExecutor.handleSendFileRequest(message);
       break;
   }
 }
@@ -233,6 +238,13 @@ async function main(): Promise<void> {
     confirmTier2,
     send: (message) => transportHandle?.send(message),
   });
+  const sendFileExecutor = createSendFileExecutor({
+    workspaceRoot: config.workspaceRoot,
+    allowOutsideWorkspace: config.allowOutsideWorkspace,
+    backendUrl: config.backendUrl,
+    token: config.token,
+    send: (message) => transportHandle?.send(message),
+  });
 
   let backoffMs = INITIAL_BACKOFF_MS;
   console.log(`[local-agent] connecting to ${config.backendUrl} ...`);
@@ -246,7 +258,7 @@ async function main(): Promise<void> {
         platform: process.platform,
         shell,
         onMessage: (message) => {
-          dispatch(message, executor, fileOpsExecutor, () => {
+          dispatch(message, executor, fileOpsExecutor, sendFileExecutor, () => {
             backoffMs = INITIAL_BACKOFF_MS;
           });
         },

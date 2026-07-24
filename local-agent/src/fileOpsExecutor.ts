@@ -64,7 +64,7 @@ type ScopeResult = { ok: true; resolved: string } | { ok: false; error: string }
  * and reject before any fs access is attempted if it resolves outside the
  * root and `allowOutsideWorkspace` is disabled.
  */
-function scopePath(pathInput: string, workspaceRoot: string, allowOutsideWorkspace: boolean): ScopeResult {
+export function scopePath(pathInput: string, workspaceRoot: string, allowOutsideWorkspace: boolean): ScopeResult {
   const resolved = path.resolve(workspaceRoot, pathInput);
   if (!allowOutsideWorkspace && !isPathWithinRoot(pathInput, workspaceRoot)) {
     return {

@@ -79,6 +79,7 @@ function handleMessage(connection: AgentConnection, message: AgentToBackendMessa
     || message.type === 'edit_file_response'
     || message.type === 'delete_file_response'
     || message.type === 'list_directory_response'
+    || message.type === 'send_file_response'
   ) {
     clearTimeout(pending.timer);
     pendingRequests.delete(message.requestId);

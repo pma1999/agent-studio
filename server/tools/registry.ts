@@ -12,6 +12,7 @@ import {
   readFileTool,
   writeFileTool,
 } from './execFileOps.js';
+import { sendFileTool } from './execSendFile.js';
 import { getSettingValue } from '../routes/settings.js';
 
 export type ToolExecutor = (args: Record<string, unknown>, config?: unknown, userId?: string, conversationId?: string) => Promise<string>;
@@ -180,6 +181,20 @@ Si la página objetivo parece bloqueada, muestra un captcha, un muro de pago o c
       },
     },
   },
+  send_file: {
+    type: 'function',
+    function: {
+      name: 'send_file',
+      description: 'Deliver a file from the connected local machine to the user as a downloadable link in the chat — use this after creating a file (e.g. with run_command or write_file) that the user should be able to download, such as a chart image, document, spreadsheet, or export. The download link stays valid for about 72 hours and then expires automatically. Requires a connected local agent.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File path relative to the workspace root (or an absolute path within it) of the file to deliver.' },
+        },
+        required: ['path'],
+      },
+    },
+  },
   run_command: {
     type: 'function',
     function: {
@@ -277,6 +292,10 @@ const executors: Record<string, ToolExecutor> = {
 
   async list_directory(args: Record<string, unknown>, _config?: unknown, userId?: string, conversationId?: string): Promise<string> {
     return listDirectoryTool(args, userId!, conversationId);
+  },
+
+  async send_file(args: Record<string, unknown>, _config?: unknown, userId?: string, conversationId?: string): Promise<string> {
+    return sendFileTool(args, userId!, conversationId);
   },
 
   async run_command(): Promise<string> {

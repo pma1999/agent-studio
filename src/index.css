@@ -1985,6 +1985,68 @@ button:hover .conv-delete-btn,
   }
 }
 
+/* ---------- send_file delivered-file panel ---------- */
+
+.tool-call-file-body {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 10px 10px;
+  flex-wrap: wrap;
+}
+
+.tool-call-file-meta {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.tool-call-file-name {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-call-file-details {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.68rem;
+  color: var(--text-muted);
+}
+
+.tool-call-file-download {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  padding: 5px 11px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  color: var(--accent);
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.tool-call-file-download:hover {
+  background: var(--accent-ghost);
+}
+
+.tool-call-file-download.expired {
+  border-color: var(--border-light);
+  color: var(--text-muted);
+  cursor: default;
+  pointer-events: none;
+}
+
 /* ---------- Local Agent pairing ---------- */
 
 @keyframes agentConnectedPulse {

@@ -9,6 +9,7 @@ import {
   Clock3,
   Cloud,
   Code2,
+  Download,
   FileEdit,
   FilePlus,
   FileText,
@@ -22,6 +23,7 @@ import {
   Wrench,
 } from 'lucide-react';
 import type { ToolExecution, ToolOutputChunk, ToolSource } from '../types';
+import { agentFilesApi } from '../api/client';
 
 interface ToolCallTimelineProps {
   calls: ToolExecution[];
@@ -62,6 +64,7 @@ const FILE_TOOL_ICONS: Record<string, React.ReactNode> = {
   edit_file: <FileEdit size={13} />,
   delete_file: <Trash2 size={13} />,
   list_directory: <FolderOpen size={13} />,
+  send_file: <Download size={13} />,
 };
 
 function formatDuration(durationMs?: number): string | null {
@@ -106,6 +109,55 @@ function getRunCommandInfo(call: ToolExecution): RunCommandInfo {
   const backend = body.backend === 'local' || body.backend === 'e2b' ? body.backend : null;
   const exitCode = typeof body.exit_code === 'number' ? body.exit_code : null;
   return { backend, refusal: null, exitCode };
+}
+
+/** Only set for a `send_file` call whose `call.result` parses to the exact
+ *  `{ ok: true, ... }` success shape — an `ok: false` or unparseable result
+ *  yields `null` so the caller falls through to the generic `DataPanel`
+ *  error rendering (no special-casing needed for the failure path). */
+interface SendFileInfo {
+  fileId: string;
+  filename: string;
+  mimeType: string;
+  sizeBytes: number;
+  expiresAt: string;
+}
+
+function getSendFileInfo(call: ToolExecution): SendFileInfo | null {
+  if (call.name !== 'send_file' || call.result === undefined) return null;
+  const parsed = tryParseJson(call.result);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const body = parsed as Record<string, unknown>;
+  if (
+    body.ok !== true ||
+    typeof body.fileId !== 'string' ||
+    typeof body.filename !== 'string' ||
+    typeof body.mimeType !== 'string' ||
+    typeof body.sizeBytes !== 'number' ||
+    typeof body.expiresAt !== 'string'
+  ) {
+    return null;
+  }
+  return {
+    fileId: body.fileId,
+    filename: body.filename,
+    mimeType: body.mimeType,
+    sizeBytes: body.sizeBytes,
+    expiresAt: body.expiresAt,
+  };
+}
+
+function formatFileSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return '0 B';
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let value = bytes / 1024;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value.toFixed(1)} ${units[unitIndex]}`;
 }
 
 function refusalCopy(refusal: RunCommandRefusal): { label: string; detail?: string } {
@@ -215,6 +267,40 @@ function DataPanel({
   );
 }
 
+function SendFilePanel({ info }: { info: SendFileInfo }) {
+  const expired = new Date(info.expiresAt).getTime() <= Date.now();
+
+  return (
+    <div className="tool-call-panel tool-call-file-panel">
+      <div className="tool-call-panel-header">
+        <span className="tool-call-panel-title">
+          <Download size={12} />
+          Delivered file
+        </span>
+      </div>
+      <div className="tool-call-file-body">
+        <div className="tool-call-file-meta">
+          <div className="tool-call-file-name">{info.filename}</div>
+          <div className="tool-call-file-details">
+            <span>{formatFileSize(info.sizeBytes)}</span>
+            <span>{info.mimeType}</span>
+          </div>
+        </div>
+        {expired ? (
+          <span className="tool-call-file-download expired" aria-disabled="true">
+            Expired
+          </span>
+        ) : (
+          <a href={agentFilesApi.downloadUrl(info.fileId)} className="tool-call-file-download">
+            <Download size={13} />
+            Download
+          </a>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ToolCallCard({
   call,
   index,
@@ -227,7 +313,9 @@ function ToolCallCard({
   const source = sourceLabel(call.source, call.name);
   const prettyName = prettifyToolName(call.name);
   const isRunCommand = call.name === 'run_command';
+  const isSendFile = call.name === 'send_file';
   const { backend, refusal, exitCode } = React.useMemo(() => getRunCommandInfo(call), [call]);
+  const sendFileInfo = React.useMemo(() => getSendFileInfo(call), [call]);
 
   React.useEffect(() => {
     if (call.status === 'running') {
@@ -303,6 +391,8 @@ function ToolCallCard({
             )}
             {call.status === 'running' && isRunCommand ? (
               <LiveTerminalPanel liveOutput={call.liveOutput} />
+            ) : isSendFile && sendFileInfo ? (
+              <SendFilePanel info={sendFileInfo} />
             ) : call.result !== undefined ? (
               <DataPanel title="Result" value={call.result || ''} accent="result" />
             ) : (

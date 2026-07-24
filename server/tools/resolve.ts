@@ -87,7 +87,7 @@ function isUsable(t: ToolRow, userId: string): boolean {
       return !!key?.trim();
     }
     if (t.name === 'run_command') return isAgentConnected(userId) || isRunCommandUsable(userId);
-    if (['read_file', 'write_file', 'edit_file', 'delete_file', 'list_directory'].includes(t.name)) {
+    if (['read_file', 'write_file', 'edit_file', 'delete_file', 'list_directory', 'send_file'].includes(t.name)) {
       return isAgentConnected(userId);
     }
     if (t.name === 'web_fetch') return true;

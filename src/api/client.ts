@@ -515,6 +515,12 @@ export const agentPairingApi = {
   }),
 };
 
+// Agent-delivered files (send_file tool) — URL-builder only, no network call needed:
+// the download is a plain `<a href>` navigation, not a fetch.
+export const agentFilesApi = {
+  downloadUrl: (fileId: string) => `${API_BASE}/agent/files/${encodeURIComponent(fileId)}/download`,
+};
+
 // Credits (OpenRouter)
 export const creditsApi = {
   get: () => request<{ data: OpenRouterCredits }>('/credits'),
