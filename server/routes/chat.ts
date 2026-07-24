@@ -1118,7 +1118,7 @@ function createGeneralChatAgent(settings: ReturnType<typeof loadGeneralChatSetti
     base_url: 'https://openrouter.ai/api/v1',
     model: settings.model,
     temperature: 0.7,
-    max_tokens: 4096,
+    max_tokens: 60000,
     web_search_enabled: 0,
     reasoning_enabled: settings.reasoning_enabled ? 1 : 0,
     reasoning_effort: settings.reasoning_effort,

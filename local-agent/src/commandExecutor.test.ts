@@ -13,12 +13,24 @@
  *       messages as they arrive, not buffered into one.
  * Plus a bonus cancellation check (killTreeFn invoked, a command_response
  * still follows) since it is cheap and directly exercises a named risk.
+ *
+ * Plus (Remediation Round 2): a real-process regression test for the
+ * `PATHEXT`-omission bug (see task-01 report) — spawns real
+ * `pwsh`/`powershell` on this machine via `buildSafeEnv()` +
+ * `buildShellInvocation()` (the exact same functions `defaultSpawnFn` uses),
+ * running a native external executable (not a PowerShell cmdlet), matching
+ * `shellDetection.test.ts`'s established convention of real-process checks
+ * for this exact class of PowerShell bug (a unit-level assertion on the env
+ * object alone cannot prove PowerShell actually launches/waits/captures
+ * stdio from a native child correctly).
  */
 
 import assert from 'node:assert/strict';
+import { spawn as realSpawn, spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import path from 'node:path';
 import {
+  buildSafeEnv,
   createCommandExecutor,
   createConsoleConfirmer,
   type CommandExecutorOptions,
@@ -27,6 +39,7 @@ import {
   type QuestionerLike,
   type SpawnFn,
 } from './commandExecutor.js';
+import { buildShellInvocation } from './shellDetection.js';
 import type { AgentToBackendMessage } from './transport.js';
 
 const WORKSPACE = path.resolve('C:\\agent-studio-test-workspace');
@@ -302,6 +315,40 @@ async function main() {
     children[0].emit('close', 1);
     children[1].emit('close', 1);
     console.log('(ARC-04) disconnect kills every active child process: OK');
+  }
+
+  // (PATHEXT regression, Remediation Round 2) real-process check: SAFE_ENV_KEYS
+  // must include PATHEXT, or pwsh/powershell silently fail to properly
+  // launch/wait-for/capture-stdio-from a native external command (returns
+  // exit 0 with empty stdout instead of erroring) — see task-01 report for
+  // the full root-cause diagnosis. This spawns real pwsh/powershell via the
+  // exact same buildSafeEnv()/buildShellInvocation() functions
+  // defaultSpawnFn uses, running whoami.exe (a native executable, not a
+  // PowerShell cmdlet — the one class of command this bug affects).
+  if (process.platform === 'win32') {
+    for (const kind of ['pwsh', 'powershell'] as const) {
+      const probe = spawnSync(kind, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', 'exit 0']);
+      if (probe.error || probe.status !== 0) {
+        console.log(`(skip) PATHEXT regression check for ${kind}: not installed on this machine`);
+        continue;
+      }
+      const invocation = buildShellInvocation({ kind, execPath: kind }, 'whoami.exe');
+      const child = realSpawn(invocation.file, invocation.args, { env: buildSafeEnv() });
+      let stdout = '';
+      const exitCode: number | null = await new Promise((resolve) => {
+        child.stdout.on('data', (d) => (stdout += d));
+        child.on('close', (code) => resolve(code));
+      });
+      assert.equal(exitCode, 0, `${kind}: whoami.exe via buildSafeEnv() must exit 0`);
+      assert.ok(
+        stdout.trim().length > 0,
+        `${kind}: whoami.exe must produce non-empty stdout when PATHEXT is present in buildSafeEnv() ` +
+          `(empty stdout here means SAFE_ENV_KEYS regressed to omit PATHEXT again — the exact bug this test guards against)`
+      );
+      console.log(`(PATHEXT) ${kind}: buildSafeEnv() lets a native command (whoami.exe) run and report output correctly: OK`);
+    }
+  } else {
+    console.log('(skip) PATHEXT regression check: not on win32');
   }
 
   console.log('\ncommandExecutor: all tests passed');

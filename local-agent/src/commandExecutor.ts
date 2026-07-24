@@ -12,7 +12,24 @@ import { scanCommand, isPathWithinRoot } from '../../shared/commandSafety.js';
 import { buildShellInvocation, type DetectedShell, type ShellInvocation } from './shellDetection.js';
 import type { AgentToBackendMessage, CommandRequestMessage } from './transport.js';
 
-/** Same allowlist-baseline principle as task-03's `mcp/client.ts` `SAFE_STDIO_ENV_KEYS`. */
+/**
+ * Same allowlist-baseline principle as task-03's `mcp/client.ts`
+ * `SAFE_STDIO_ENV_KEYS`.
+ *
+ * `PATHEXT` (Remediation Round 2 — empirically root-caused, see task-01
+ * report): this key predates the pwsh/powershell explicit-argv rework and
+ * was harmless while every Windows command ran through `cmd.exe`
+ * (`shell:true`), which does not need it to run a native executable
+ * correctly. It became load-bearing the moment `pwsh`/`powershell` became
+ * the default Windows shell: without `PATHEXT` in the child's environment,
+ * PowerShell silently fails to properly launch/wait-for/capture-stdio-from
+ * *any* native external command (confirmed for Python and `whoami.exe`, on
+ * both `pwsh` and Windows PowerShell 5.1) — it still exits 0, with empty
+ * stdout and no side effects, so the failure is invisible unless you know
+ * to look for it. Harmless to include unconditionally: `buildSafeEnv()`
+ * below already skips any key absent from `process.env` (inert on POSIX,
+ * where `PATHEXT` does not exist).
+ */
 const SAFE_ENV_KEYS = [
   'PATH',
   'SystemRoot',
@@ -25,6 +42,7 @@ const SAFE_ENV_KEYS = [
   'LOCALAPPDATA',
   'LANG',
   'TMPDIR',
+  'PATHEXT',
 ] as const;
 
 export function buildSafeEnv(): NodeJS.ProcessEnv {
