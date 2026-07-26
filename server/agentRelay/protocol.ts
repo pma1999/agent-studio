@@ -90,6 +90,14 @@ export const AgentToBackendMessageSchema = z.discriminatedUnion('type', [
     sizeBytes: z.number().int().nonnegative().optional(),
     expiresAt: z.string().optional(),
   }).strict(),
+  z.object({
+    type: z.literal('receive_file_response'),
+    requestId: z.string(),
+    ok: z.boolean(),
+    error: z.string().optional(),
+    writtenPath: z.string().optional(),
+    bytesWritten: z.number().int().nonnegative().optional(),
+  }).strict(),
 ]);
 
 export const BackendToAgentMessageSchema = z.discriminatedUnion('type', [
@@ -141,6 +149,14 @@ export const BackendToAgentMessageSchema = z.discriminatedUnion('type', [
     type: z.literal('send_file_request'),
     requestId: z.string(),
     path: z.string(),
+  }).strict(),
+  z.object({
+    type: z.literal('receive_file_request'),
+    requestId: z.string(),
+    fileId: z.string(),
+    filename: z.string(),
+    sizeBytes: z.number().int().nonnegative(),
+    mimeType: z.string(),
   }).strict(),
 ]);
 

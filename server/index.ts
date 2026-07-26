@@ -9,6 +9,7 @@ import authRouter from './routes/auth.js';
 import agentsRouter from './routes/agents.js';
 import conversationsRouter from './routes/conversations.js';
 import messagesRouter from './routes/messages.js';
+import agentUploadsRouter from './routes/agentUploads.js';
 import chatRouter from './routes/chat.js';
 import settingsRouter from './routes/settings.js';
 import modelsRouter from './routes/models.js';
@@ -101,6 +102,7 @@ app.use('/api/auth', authRouter);
 app.use('/api/agents', authMiddleware, agentsRouter);
 app.use('/api/conversations', authMiddleware, conversationsRouter);
 app.use('/api/conversations', authMiddleware, messagesRouter); // same base path, different routes (e.g. /:id/messages)
+app.use('/api/conversations', authMiddleware, agentUploadsRouter); // same base path, different routes (e.g. /:id/agent-uploads)
 app.use('/api/chat', authMiddleware, chatRouter);
 app.use('/api/settings', authMiddleware, settingsRouter);
 app.use('/api/models', authMiddleware, modelsRouter);

@@ -1,6 +1,6 @@
 import React from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { User, Sparkles, Copy, Check, Brain, ChevronDown, ChevronRight, ExternalLink, Globe, FileUp, Braces, Users } from 'lucide-react';
+import { User, Sparkles, Copy, Check, Brain, ChevronDown, ChevronRight, ExternalLink, Globe, FileUp, Braces, Users, Laptop } from 'lucide-react';
 import { MarkdownContent } from './MarkdownContent';
 import { MessageTokenPills } from './TokenCounter';
 import { ToolCallTimeline } from './ToolCallTimeline';
@@ -552,10 +552,21 @@ export function MessageBubble({
                 fontSize: '0.75rem',
                 color: 'var(--text-muted)',
               }}>
-                <FileUp size={12} style={{ flexShrink: 0 }} />
-                <span>
-                  Attached: {message.attachments.map((a) => a.filename).join(', ')}
-                </span>
+                {message.attachments.some((a) => a.deliveredPath) ? (
+                  <>
+                    <Laptop size={12} style={{ flexShrink: 0 }} />
+                    <span>
+                      Delivered to your computer: {message.attachments.map((a) => a.filename).join(', ')}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <FileUp size={12} style={{ flexShrink: 0 }} />
+                    <span>
+                      Attached: {message.attachments.map((a) => a.filename).join(', ')}
+                    </span>
+                  </>
+                )}
               </div>
             )}
           </>

@@ -634,6 +634,22 @@ export const agentFilesApi = {
   downloadUrl: (fileId: string) => `${API_BASE}/agent/files/${encodeURIComponent(fileId)}/download`,
 };
 
+// "Send to my computer" — delivers a user-picked file to the connected local agent's
+// workspace via the chat composer (distinct from the agent-initiated send_file tool above).
+export const agentUploadsApi = {
+  send: (conversationId: string, file: File) => request<{ message: Message }>(
+    `/conversations/${encodeURIComponent(conversationId)}/agent-uploads`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'X-File-Name-B64': base64EncodeUtf8(file.name),
+      },
+      body: file,
+    }
+  ),
+};
+
 // Credits (OpenRouter)
 export const creditsApi = {
   get: () => request<{ data: OpenRouterCredits }>('/credits'),

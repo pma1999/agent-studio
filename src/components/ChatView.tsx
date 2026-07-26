@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Send, ArrowDown, StopCircle, MessageSquare, Bot, Brain, FileUp, Link, X, Users, SlidersHorizontal, Wrench, Layers } from 'lucide-react';
+import { Send, ArrowDown, StopCircle, MessageSquare, Bot, Brain, FileUp, Link, X, Users, SlidersHorizontal, Wrench, Layers, Laptop } from 'lucide-react';
 import { CouncilToggle } from './CouncilToggle';
 import { CouncilStreamingView } from './CouncilStreamingView';
 import { useStore } from '../stores/store';
@@ -14,7 +14,7 @@ import { ModelSelectorCore } from './ModelSelectorCore';
 import { ProviderRoutingSelector } from './ProviderRoutingSelector';
 import { ConversationToolsSelector } from './ConversationToolsSelector';
 import { ConversationSkillsSelector } from './ConversationSkillsSelector';
-import { conversationsApi, skillsApi } from '../api/client';
+import { conversationsApi, skillsApi, agentPairingApi, agentUploadsApi } from '../api/client';
 import { PremiumMentionInput } from './ui/PremiumMentionInput';
 import { Sheet } from './ui/Sheet';
 import { ConversationTokenSummary, StreamingTokenCounter } from './TokenCounter';
@@ -89,6 +89,7 @@ export function ChatView() {
     streamingContent,
     reasoningContent,
     activeConversationId,
+    addMessage,
     conversations,
     agents,
     selectedAgentId,
@@ -131,6 +132,8 @@ export function ChatView() {
   const [pdfEngine, setPdfEngine] = useState<'' | PDFEngine>('');
   const [pdfUrlInput, setPdfUrlInput] = useState('');
   const [pdfUrlError, setPdfUrlError] = useState('');
+  const [sendFileError, setSendFileError] = useState('');
+  const [isSendingFile, setIsSendingFile] = useState(false);
   const [messageModelOverride, setMessageModelOverride] = useState<string | null>(null);
   const [messageProviderRoutingOverride, setMessageProviderRoutingOverride] = useState<ProviderRoutingConfig | null>(null);
   const [streamingModelSnapshot, setStreamingModelSnapshot] = useState<string | null>(null);
@@ -142,6 +145,7 @@ export function ChatView() {
   const reasoningBtnRef = useRef<HTMLButtonElement>(null);
   const reasoningPopoverRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const sendFileInputRef = useRef<HTMLInputElement>(null);
   const prevIsStreamingRef = useRef(isStreaming);
   const scrollDependency = useMemo(
     () =>
@@ -478,6 +482,45 @@ export function ChatView() {
   const removeAttachment = useCallback((id: string) => {
     setPendingAttachments((prev) => prev.filter((a) => a.id !== id));
   }, []);
+
+  // "Send to my computer" — wholly separate from the PDF-attach control above:
+  // delivers arbitrary files to the connected local agent's workspace.
+  const handleSendToComputerClick = useCallback(async () => {
+    setSendFileError('');
+    if (!activeConversationId || isStreaming || isSendingFile) return;
+    try {
+      const pairings = await agentPairingApi.listPairings();
+      if (!pairings.some((p) => p.connected)) {
+        setSendFileError('No local agent is connected.');
+        return;
+      }
+    } catch (err) {
+      setSendFileError(err instanceof Error ? err.message : 'Could not check local agent connection.');
+      return;
+    }
+    sendFileInputRef.current?.click();
+  }, [activeConversationId, isStreaming, isSendingFile]);
+
+  const handleSendFileChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const picked = Array.from(e.target.files ?? []);
+    e.target.value = '';
+    if (!picked.length || !activeConversationId) return;
+    setIsSendingFile(true);
+    setSendFileError('');
+    for (const file of picked) {
+      if (file.size > 100 * 1024 * 1024) {
+        setSendFileError(`"${file.name}" exceeds the 100 MiB size limit.`);
+        continue;
+      }
+      try {
+        const { message } = await agentUploadsApi.send(activeConversationId, file);
+        addMessage(message);
+      } catch (err) {
+        setSendFileError(`Failed to send "${file.name}": ${err instanceof Error ? err.message : 'Unknown error'}`);
+      }
+    }
+    setIsSendingFile(false);
+  }, [activeConversationId, addMessage]);
 
   const handleSend = useCallback(async () => {
     if (!inputValue.trim() || isStreaming) return;
@@ -1114,6 +1157,14 @@ export function ChatView() {
                   e.target.value = '';
                 }}
               />
+              <input
+                ref={sendFileInputRef}
+                type="file"
+                multiple
+                disabled={isStreaming || isSendingFile}
+                style={{ display: 'none' }}
+                onChange={handleSendFileChange}
+              />
               {/* PDF attachments + URL row */}
               {(pendingAttachments.length > 0 || !isStreaming) && (
                 <div style={{
@@ -1253,6 +1304,29 @@ export function ChatView() {
                         </button>
                       </div>
                       {pdfUrlError && <span style={{ fontSize: '0.6875rem', color: 'var(--error)' }}>{pdfUrlError}</span>}
+                      <button
+                        type="button"
+                        onClick={handleSendToComputerClick}
+                        disabled={!activeConversationId || isStreaming || isSendingFile}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '6px',
+                          padding: '4px 10px',
+                          fontSize: '0.75rem',
+                          fontFamily: 'var(--font-body)',
+                          color: 'var(--text-secondary)',
+                          background: 'var(--bg-base)',
+                          border: '1px solid var(--border)',
+                          borderRadius: 'var(--radius-sm)',
+                          cursor: (!activeConversationId || isStreaming || isSendingFile) ? 'not-allowed' : 'pointer',
+                          opacity: (!activeConversationId || isStreaming || isSendingFile) ? 0.6 : 1,
+                        }}
+                      >
+                        <Laptop size={12} />
+                        {isSendingFile ? 'Sending…' : 'Send to my computer'}
+                      </button>
+                      {sendFileError && <span style={{ fontSize: '0.6875rem', color: 'var(--error)' }}>{sendFileError}</span>}
                     </div>
                   )}
                 </div>

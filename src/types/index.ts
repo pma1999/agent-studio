@@ -124,6 +124,9 @@ export interface Annotation {
 
 export interface MessageAttachment {
   filename: string;
+  /** Workspace-relative path on the local agent's machine, set only for files delivered
+   *  via the "Send to my computer" control — absent for the existing PDF-attach shape. */
+  deliveredPath?: string;
 }
 
 export interface Message {

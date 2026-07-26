@@ -91,6 +91,14 @@ export type AgentToBackendMessage =
       mimeType?: string;
       sizeBytes?: number;
       expiresAt?: string;
+    }
+  | {
+      type: 'receive_file_response';
+      requestId: string;
+      ok: boolean;
+      error?: string;
+      writtenPath?: string;
+      bytesWritten?: number;
     };
 
 export type BackendToAgentMessage =
@@ -111,7 +119,15 @@ export type BackendToAgentMessage =
     }
   | { type: 'delete_file_request'; requestId: string; path: string; recursive?: boolean }
   | { type: 'list_directory_request'; requestId: string; path: string }
-  | { type: 'send_file_request'; requestId: string; path: string };
+  | { type: 'send_file_request'; requestId: string; path: string }
+  | {
+      type: 'receive_file_request';
+      requestId: string;
+      fileId: string;
+      filename: string;
+      sizeBytes: number;
+      mimeType: string;
+    };
 
 export type CommandRequestMessage = Extract<BackendToAgentMessage, { type: 'command_request' }>;
 export type ReadFileRequestMessage = Extract<BackendToAgentMessage, { type: 'read_file_request' }>;
@@ -120,6 +136,7 @@ export type EditFileRequestMessage = Extract<BackendToAgentMessage, { type: 'edi
 export type DeleteFileRequestMessage = Extract<BackendToAgentMessage, { type: 'delete_file_request' }>;
 export type ListDirectoryRequestMessage = Extract<BackendToAgentMessage, { type: 'list_directory_request' }>;
 export type SendFileRequestMessage = Extract<BackendToAgentMessage, { type: 'send_file_request' }>;
+export type ReceiveFileRequestMessage = Extract<BackendToAgentMessage, { type: 'receive_file_request' }>;
 
 /** Matches the 20s heartbeat / 60s backend-timeout pair fixed in `global-constraints.md`. */
 export const HEARTBEAT_INTERVAL_MS = 20_000;
@@ -237,6 +254,24 @@ export function parseBackendMessage(raw: string): BackendToAgentMessage | null {
     case 'send_file_request':
       if (typeof message.requestId === 'string' && typeof message.path === 'string') {
         return { type: 'send_file_request', requestId: message.requestId, path: message.path };
+      }
+      return null;
+    case 'receive_file_request':
+      if (
+        typeof message.requestId === 'string' &&
+        typeof message.fileId === 'string' &&
+        typeof message.filename === 'string' &&
+        typeof message.sizeBytes === 'number' &&
+        typeof message.mimeType === 'string'
+      ) {
+        return {
+          type: 'receive_file_request',
+          requestId: message.requestId,
+          fileId: message.fileId,
+          filename: message.filename,
+          sizeBytes: message.sizeBytes,
+          mimeType: message.mimeType,
+        };
       }
       return null;
     default:

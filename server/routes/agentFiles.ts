@@ -6,6 +6,7 @@ import {
   getActiveAgentFile,
   saveAgentFile,
 } from '../agentFiles/storage.js';
+import { takeStagedInboundFile } from '../agentFiles/inboundStaging.js';
 
 interface AgentFileUploadRequest extends Request {
   agentIdentity?: {
@@ -28,9 +29,9 @@ function authenticateAgent(req: AgentFileUploadRequest, res: Response, next: Nex
   next();
 }
 
-function sanitizeFilename(encodedFilename: string): string {
+export function sanitizeFilename(encodedFilename: string): string {
   const decoded = Buffer.from(encodedFilename, 'base64').toString('utf8');
-  const sanitized = decoded.replace(/[\/\\\x00-\x1f]/g, '').trim().slice(0, 255);
+  const sanitized = decoded.replace(/[\/\\\x00-\x1f:<>"|?*]/g, '').trim().slice(0, 255);
   return sanitized || 'file';
 }
 
@@ -86,6 +87,21 @@ agentFilesRouter.use((err: unknown, _req: Request, res: Response, next: NextFunc
     return;
   }
   next(err);
+});
+
+agentFilesRouter.get('/inbound/:stagedId', authenticateAgent, (req: AgentFileUploadRequest, res) => {
+  const staged = takeStagedInboundFile(
+    req.params.stagedId,
+    req.agentIdentity!.userId,
+  );
+  if (!staged) {
+    res.status(404).json({ error: 'Staged file not found, already fetched, or expired' });
+    return;
+  }
+
+  res.setHeader('Content-Type', staged.mimeType);
+  res.setHeader('Content-Length', String(staged.content.length));
+  res.status(200).end(staged.content);
 });
 
 agentFilesRouter.get('/:fileId/download', (req, res) => {

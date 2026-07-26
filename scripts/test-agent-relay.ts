@@ -69,7 +69,7 @@ async function expectRejectsPromptly(promise: Promise<unknown>) {
 
 migrate();
 
-// All twelve file-op wire variants accept the pinned camelCase shapes.
+// All fourteen file-op wire variants accept the pinned camelCase shapes.
 {
   const requests: BackendToAgentMessage[] = [
     { type: 'read_file_request', requestId: 'schema-read', path: 'a.txt', offset: 1, limit: 10 },
@@ -86,6 +86,14 @@ migrate();
     { type: 'delete_file_request', requestId: 'schema-delete', path: 'a.txt', recursive: false },
     { type: 'list_directory_request', requestId: 'schema-list', path: '.' },
     { type: 'send_file_request', requestId: 'schema-send-file', path: 'export.csv' },
+    {
+      type: 'receive_file_request',
+      requestId: 'schema-receive-file',
+      fileId: 'staged-abc123',
+      filename: 'notes.txt',
+      sizeBytes: 1024,
+      mimeType: 'text/plain',
+    },
   ];
   const responses: AgentToBackendMessage[] = [
     {
@@ -119,6 +127,13 @@ migrate();
       sizeBytes: 2048,
       expiresAt: new Date().toISOString(),
     },
+    {
+      type: 'receive_file_response',
+      requestId: 'schema-receive-file',
+      ok: true,
+      writtenPath: 'uploads/notes.txt',
+      bytesWritten: 1024,
+    },
   ];
   for (const request of requests) assert.equal(BackendToAgentMessageSchema.safeParse(request).success, true);
   for (const response of responses) assert.equal(AgentToBackendMessageSchema.safeParse(response).success, true);
@@ -149,6 +164,26 @@ migrate();
     requestId: 'strict-send-file-response',
     ok: true,
     file_id: 'file-abc123',
+  }).success, false);
+  assert.equal(BackendToAgentMessageSchema.safeParse({
+    type: 'receive_file_request',
+    requestId: 'invalid-receive-file',
+    fileId: 'staged-abc123',
+  }).success, false);
+  assert.equal(BackendToAgentMessageSchema.safeParse({
+    type: 'receive_file_request',
+    requestId: 'invalid-receive-file-extra',
+    fileId: 'staged-abc123',
+    filename: 'notes.txt',
+    sizeBytes: 1024,
+    mimeType: 'text/plain',
+    extra: 'field',
+  }).success, false);
+  assert.equal(AgentToBackendMessageSchema.safeParse({
+    type: 'receive_file_response',
+    requestId: 'strict-receive-file-response',
+    ok: true,
+    written_path: 'uploads/notes.txt',
   }).success, false);
 }
 
@@ -327,6 +362,40 @@ migrate();
     endLine: 1,
     truncated: false,
   });
+  connection.close();
+}
+
+// A receive_file_response resolves its pending request like every other file op.
+{
+  const connection = connect('user-receive-file');
+  const request = sendFileOpRequest<{ ok: boolean; writtenPath?: string; bytesWritten?: number }>(
+    'user-receive-file',
+    {
+      type: 'receive_file_request',
+      requestId: 'receive-file-resolve',
+      fileId: 'staged-abc123',
+      filename: 'notes.txt',
+      sizeBytes: 1024,
+      mimeType: 'text/plain',
+    },
+    500,
+  );
+  assert.deepEqual(connection.sent.at(-1), {
+    type: 'receive_file_request',
+    requestId: 'receive-file-resolve',
+    fileId: 'staged-abc123',
+    filename: 'notes.txt',
+    sizeBytes: 1024,
+    mimeType: 'text/plain',
+  });
+  connection.receive({
+    type: 'receive_file_response',
+    requestId: 'receive-file-resolve',
+    ok: true,
+    writtenPath: 'uploads/notes.txt',
+    bytesWritten: 1024,
+  });
+  assert.deepEqual(await request, { ok: true, writtenPath: 'uploads/notes.txt', bytesWritten: 1024 });
   connection.close();
 }
 
