@@ -103,8 +103,8 @@ function readNonNegativeNumberEnv(name: string, fallback: number): number {
   return Number.isFinite(value) && value >= 0 ? value : fallback;
 }
 
-export const MAX_TOOL_CALLS_PER_TURN = readNonNegativeNumberEnv('MAX_TOOL_CALLS_PER_TURN', 25);
-export const MAX_TOOL_TIME_MS_PER_TURN = readNonNegativeNumberEnv('MAX_TOOL_TIME_MS_PER_TURN', 3_600_000);
+export const MAX_TOOL_CALLS_PER_TURN = readNonNegativeNumberEnv('MAX_TOOL_CALLS_PER_TURN', 100_000);
+export const MAX_TOOL_TIME_MS_PER_TURN = readNonNegativeNumberEnv('MAX_TOOL_TIME_MS_PER_TURN', 24 * 3_600_000);
 
 export function isToolBudgetExceeded(toolCallCount: number, toolTimeMs: number): boolean {
   return toolCallCount >= MAX_TOOL_CALLS_PER_TURN || toolTimeMs >= MAX_TOOL_TIME_MS_PER_TURN;
