@@ -23,6 +23,7 @@ import {
   getProviderForModel,
   toUpstreamModelId,
   assistantReasoningField,
+  resolveAssistantHistoryContent,
   buildDeepSeekThinking,
   computeDeepSeekCost,
   deepSeekCachedTokens,
@@ -398,7 +399,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         const annotations = row.annotations ? (JSON.parse(row.annotations) as unknown[]) : undefined;
         const out: { role: 'assistant'; content: string | null; tool_calls?: unknown[]; annotations?: unknown[]; reasoning?: string; reasoning_content?: string } = {
           role: 'assistant',
-          content: row.content || null,
+          content: resolveAssistantHistoryContent(row.content, !!tool_calls?.length),
         };
         if (tool_calls?.length) out.tool_calls = tool_calls;
         if (annotations?.length) out.annotations = annotations;
@@ -858,6 +859,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
 
       let fullContent = '';
       let fullReasoning = '';
+      let streamHadRealError = false;
       const toolCallsByIndex: Record<number, { id?: string; type?: string; function?: { name?: string; arguments?: string } }> = {};
       lastFinishReason = null;
 
@@ -949,7 +951,12 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
           }
         }
       } catch (streamErr: unknown) {
-        if ((streamErr as Error).name !== 'AbortError') console.error('[chat] Stream error:', streamErr);
+        if ((streamErr as Error).name !== 'AbortError') {
+          console.error('[chat] Stream error:', streamErr);
+          // Distinct from a deliberate client disconnect or the 120s abort timeout
+          // (both already handled elsewhere) — this is a genuine stream-read failure.
+          if (!clientDisconnected) streamHadRealError = true;
+        }
       }
 
       const finishReason = lastFinishReason;
@@ -981,6 +988,17 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
             console.log('[chat] tool calls parsed from reasoning:', toolCallsArray.map((t) => t.function.name).join(', '));
           }
         }
+      }
+
+      // Genuine stream-read failure that left nothing usable to persist or report as
+      // success: surface it as an error instead of silently truncating the turn.
+      if (streamHadRealError && !fullContent && toolCallsArray.length === 0) {
+        if (!clientDisconnected && !res.writableEnded) {
+          res.write(`data: ${JSON.stringify({ error: 'Stream connection error - please retry' })}\n\n`);
+          res.write('data: [DONE]\n\n');
+          res.end();
+        }
+        return;
       }
 
       let cappedToolCallMessageId: string | null = null;

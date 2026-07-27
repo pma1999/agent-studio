@@ -4,7 +4,7 @@ import db from '../db.js';
 import { getSettingValue } from './settings.js';
 import { resolveToolsForAgent, resolveToolsFromIds, toOpenRouterTools, appendToolInstructionsIfNeeded } from '../tools/index.js';
 import { CouncilExecutor } from '../services/councilExecutor.js';
-import { getProviderConfig, resolveProviderId, type ProviderId } from '../providers/index.js';
+import { getProviderConfig, resolveProviderId, resolveAssistantHistoryContent, type ProviderId } from '../providers/index.js';
 import { buildDateTimeContext } from '../dateTimeContext.js';
 import { AuthRequest } from '../middleware/auth.js';
 import { trackStream, untrackStream } from '../shutdown.js';
@@ -314,7 +314,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         const annotations = row.annotations ? (JSON.parse(row.annotations) as unknown[]) : undefined;
         const out: { role: 'assistant'; content: string | null; tool_calls?: unknown[]; annotations?: unknown[] } = {
           role: 'assistant',
-          content: row.content || null,
+          content: resolveAssistantHistoryContent(row.content, !!tool_calls?.length),
         };
         if (tool_calls?.length) out.tool_calls = tool_calls;
         if (annotations?.length) out.annotations = annotations;

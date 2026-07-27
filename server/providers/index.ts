@@ -105,6 +105,21 @@ export function assistantReasoningField(id: ProviderId): 'reasoning' | 'reasonin
   return id === 'deepseek' ? 'reasoning_content' : 'reasoning';
 }
 
+/**
+ * Resolves the `content` field for a replayed assistant history row.
+ *
+ * DeepSeek's `/chat/completions` endpoint rejects an assistant message whose
+ * `content` is `null` and which carries no `tool_calls` with HTTP 400
+ * ("Invalid assistant message: content or tool_calls must be set") — this can
+ * happen for rows persisted with empty content (e.g. an interrupted stream).
+ * `content: null` is only valid when `tool_calls` is also present on the same
+ * message (the legitimate pure-tool-call turn); otherwise an empty string
+ * must be sent instead of `null`.
+ */
+export function resolveAssistantHistoryContent(content: string, hasToolCalls: boolean): string | null {
+  return hasToolCalls ? (content || null) : (content || '');
+}
+
 // ---------------------------------------------------------------------------
 // DeepSeek thinking mode (OpenAI-compatible format)
 // Docs: https://api-docs.deepseek.com/guides/thinking_mode
