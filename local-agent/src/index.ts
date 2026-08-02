@@ -13,6 +13,7 @@ import { createCommandExecutor, createConsoleConfirmer, type CommandExecutor } f
 import { createFileOpsExecutor, type FileOpsExecutor } from './fileOpsExecutor.js';
 import { createSendFileExecutor, type SendFileExecutor } from './sendFileExecutor.js';
 import { createReceiveFileExecutor, type ReceiveFileExecutor } from './receiveFileExecutor.js';
+import { createMcpExecutor, type McpExecutor } from './mcpExecutor.js';
 import { createShellDetector } from './shellDetection.js';
 
 const AGENT_VERSION = '1.0.0';
@@ -170,6 +171,7 @@ function dispatch(
   fileOpsExecutor: FileOpsExecutor,
   sendFileExecutor: SendFileExecutor,
   receiveFileExecutor: ReceiveFileExecutor,
+  mcpExecutor: McpExecutor,
   onHelloAck: (agentId: string) => void
 ): void {
   switch (message.type) {
@@ -205,6 +207,15 @@ function dispatch(
       break;
     case 'receive_file_request':
       void receiveFileExecutor.handleReceiveFileRequest(message);
+      break;
+    case 'mcp_start_request':
+      mcpExecutor.handleMcpStartRequest(message);
+      break;
+    case 'mcp_stop_request':
+      mcpExecutor.handleMcpStopRequest(message);
+      break;
+    case 'mcp_message':
+      mcpExecutor.handleMcpMessage(message);
       break;
   }
 }
@@ -256,6 +267,9 @@ async function main(): Promise<void> {
     token: config.token,
     send: (message) => transportHandle?.send(message),
   });
+  const mcpExecutor = createMcpExecutor({
+    send: (message) => transportHandle?.send(message),
+  });
 
   let backoffMs = INITIAL_BACKOFF_MS;
   console.log(`[local-agent] connecting to ${config.backendUrl} ...`);
@@ -269,7 +283,7 @@ async function main(): Promise<void> {
         platform: process.platform,
         shell,
         onMessage: (message) => {
-          dispatch(message, executor, fileOpsExecutor, sendFileExecutor, receiveFileExecutor, () => {
+          dispatch(message, executor, fileOpsExecutor, sendFileExecutor, receiveFileExecutor, mcpExecutor, () => {
             backoffMs = INITIAL_BACKOFF_MS;
           });
         },
@@ -279,8 +293,10 @@ async function main(): Promise<void> {
           // ARC-04: the backend has already given up on every pending
           // request tied to this now-dead connection (rejected on its own
           // side in registry.ts); don't let the matching child processes
-          // keep running locally with nothing left to report back to.
+          // (commands AND MCP servers) keep running locally with nothing
+          // left to report back to.
           executor.handleDisconnect();
+          mcpExecutor.handleDisconnect();
           resolve();
         },
       });

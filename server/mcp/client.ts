@@ -8,6 +8,7 @@ import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import type { McpServerConfig, McpTransport } from './types.js';
 import { isMcpConfigUrl, isMcpConfigStdio } from './types.js';
+import { getOrCreateRelaySession } from './relaySessions.js';
 import { scanCommand } from '../../shared/commandSafety.js';
 import { logToolExecution } from '../tools/execAudit.js';
 
@@ -193,11 +194,14 @@ async function connectUrlTransport(
 /**
  * Create and connect an MCP client for the given server config.
  * For URL transport, tries StreamableHTTP first with automatic SSE fallback.
+ * For relay transport, asks the user's paired local agent to host the server
+ * (pooled via relaySessions).
  * Returns { client, close } so the caller can use the client and must call close() when done.
  */
 export async function createAndConnectMcpClient(server: {
   transport: McpTransport;
   config: McpServerConfig;
+  serverId?: string;
 }, auditContext?: McpStdioAuditContext): Promise<McpConnection> {
   if (server.transport === 'url') {
     if (!isMcpConfigUrl(server.config)) throw new Error('URL transport requires config.url');
@@ -266,6 +270,46 @@ export async function createAndConnectMcpClient(server: {
         await closeQuietly(() => transport.close(), 'stdio transport');
       },
     };
+  }
+
+  if (server.transport === 'relay') {
+    if (!server.serverId) throw new Error('relay transport requires serverId');
+    if (!auditContext?.userId) throw new Error('relay transport requires a userId');
+    if (!isMcpConfigStdio(server.config)) throw new Error('relay transport requires config.command');
+    const command = server.config.command?.trim();
+    if (!command) throw new Error('config.command is required for relay transport');
+
+    const verdict = scanCommand(command, null, false);
+    if (verdict.tier === 1) {
+      auditMcpStdioConnection(auditContext, {
+        command,
+        cwd: server.config.cwd,
+        blockedPattern: verdict.label,
+        isError: true,
+      });
+      throw new Error(`Refused: command matches a blocked pattern (${verdict.label ?? 'tier-1'})`);
+    }
+
+    // NOTE: env is passed through as configured — it runs on the user's machine,
+    // so buildSafeEnv() must NOT be used (that would leak the backend's env).
+    const startedAt = Date.now();
+    try {
+      const connection = await getOrCreateRelaySession(auditContext.userId, server.serverId, server.config);
+      auditMcpStdioConnection(auditContext, {
+        command,
+        cwd: server.config.cwd,
+        durationMs: Date.now() - startedAt,
+      });
+      return connection;
+    } catch (err) {
+      auditMcpStdioConnection(auditContext, {
+        command,
+        cwd: server.config.cwd,
+        durationMs: Date.now() - startedAt,
+        isError: true,
+      });
+      throw err;
+    }
   }
 
   throw new Error(`Unsupported MCP transport: ${server.transport}`);

@@ -44,7 +44,7 @@ export interface Agent {
   updated_at: string;
 }
 
-export type McpTransport = 'url' | 'stdio';
+export type McpTransport = 'url' | 'stdio' | 'relay';
 
 export interface McpConfigUrl {
   url: string;
@@ -65,6 +65,10 @@ export interface McpServer {
   name: string;
   transport: McpTransport;
   config: McpServerConfig | null;
+  /** Set by the API for relay servers: the command runs on the user's PC via the local agent. */
+  requires_agent?: boolean;
+  /** Whether the local agent (PC) is currently connected. Only meaningful when requires_agent is true. */
+  agent_connected?: boolean;
   created_at: string;
   updated_at: string;
 }

@@ -98,6 +98,28 @@ export const AgentToBackendMessageSchema = z.discriminatedUnion('type', [
     writtenPath: z.string().optional(),
     bytesWritten: z.number().int().nonnegative().optional(),
   }).strict(),
+  z.object({
+    type: z.literal('mcp_start_response'),
+    requestId: z.string(),
+    ok: z.boolean(),
+    error: z.string().optional(),
+  }).strict(),
+  z.object({
+    type: z.literal('mcp_stop_response'),
+    requestId: z.string(),
+    ok: z.boolean(),
+    error: z.string().optional(),
+  }).strict(),
+  z.object({
+    type: z.literal('mcp_message'),
+    channelId: z.string(),
+    payload: z.unknown(),
+  }).strict(),
+  z.object({
+    type: z.literal('mcp_exited'),
+    channelId: z.string(),
+    exitCode: z.number().int().nullable(),
+  }).strict(),
 ]);
 
 export const BackendToAgentMessageSchema = z.discriminatedUnion('type', [
@@ -157,6 +179,27 @@ export const BackendToAgentMessageSchema = z.discriminatedUnion('type', [
     filename: z.string(),
     sizeBytes: z.number().int().nonnegative(),
     mimeType: z.string(),
+  }).strict(),
+  z.object({
+    type: z.literal('mcp_start_request'),
+    requestId: z.string(),
+    channelId: z.string(),
+    config: z.object({
+      command: z.string(),
+      args: z.array(z.string()).optional(),
+      env: z.record(z.string(), z.string()).optional(),
+      cwd: z.string().optional(),
+    }).strict(),
+  }).strict(),
+  z.object({
+    type: z.literal('mcp_stop_request'),
+    requestId: z.string(),
+    channelId: z.string(),
+  }).strict(),
+  z.object({
+    type: z.literal('mcp_message'),
+    channelId: z.string(),
+    payload: z.unknown(),
   }).strict(),
 ]);
 

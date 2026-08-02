@@ -55,7 +55,7 @@ const toolExportSchema = z.object({
 const mcpServerExportSchema = z.object({
   id: z.string(),
   name: z.string(),
-  transport: z.enum(['url', 'stdio']),
+  transport: z.enum(['url', 'stdio', 'relay']),
   config: z.union([
     z.object({ url: z.string(), headers: z.record(z.string(), z.string()).optional() }),
     z.object({ command: z.string(), args: z.array(z.string()).optional(), env: z.record(z.string(), z.string()).optional(), cwd: z.string().optional() }),

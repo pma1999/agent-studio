@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
-import { Plus, Plug, Pencil, Trash2, Globe, Terminal, Loader2, CheckCircle, XCircle } from 'lucide-react';
+import { Plus, Plug, Pencil, Trash2, Globe, Terminal, Laptop, Loader2, CheckCircle, XCircle } from 'lucide-react';
 import { mcpServersApi } from '../api/client';
 import type { McpServer, McpTransport, McpConfigUrl, McpConfigStdio } from '../types';
 import { Button } from './ui/Button';
@@ -54,6 +54,13 @@ interface TestResultState {
   message: string;
   toolNames?: string[];
 }
+
+/** Pre-fills the stdio/relay form fields with the canonical Playwright MCP invocation
+ *  (stdio transport, system Chrome, headed by default). Fields stay editable afterwards. */
+const PLAYWRIGHT_PRESET = {
+  command: 'npx',
+  argsStr: '-y @playwright/mcp@latest --browser chrome',
+};
 
 export function McpView() {
   const [servers, setServers] = useState<McpServer[]>([]);
@@ -144,6 +151,10 @@ export function McpView() {
     setEditorOpen(true);
   };
 
+  const applyPlaywrightPreset = () => {
+    setForm((f) => ({ ...f, ...PLAYWRIGHT_PRESET }));
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setSubmitError(null);
@@ -175,7 +186,11 @@ export function McpView() {
     } else {
       const command = form.command.trim();
       if (!command) {
-        setSubmitError('Command is required for local (stdio) transport');
+        setSubmitError(
+          form.transport === 'relay'
+            ? 'Command is required for local agent (PC) transport'
+            : 'Command is required for local (stdio) transport'
+        );
         return;
       }
       const args = form.argsStr.trim() ? form.argsStr.trim().split(/\s+/).filter(Boolean) : undefined;
@@ -279,7 +294,7 @@ export function McpView() {
             MCP Servers
           </motion.h1>
           <p style={{ fontSize: '0.875rem', color: 'var(--text-muted)', margin: 0 }}>
-            Connect Model Context Protocol servers by URL or local command. Assign them to agents in the agent editor.
+            Connect Model Context Protocol servers by URL, cloud command, or a command that runs on your PC via the local agent. Assign them to agents in the agent editor.
           </p>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
@@ -319,19 +334,51 @@ export function McpView() {
             }}>
               {server.transport === 'url' ? (
                 <Globe size={18} style={{ color: 'var(--success)' }} />
+              ) : server.transport === 'relay' ? (
+                <Laptop size={18} style={{ color: 'var(--accent)' }} />
               ) : (
                 <Terminal size={18} style={{ color: 'var(--accent)' }} />
               )}
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: '0.9rem' }}>
-                {server.name}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                <span style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: '0.9rem' }}>
+                  {server.name}
+                </span>
+                {server.requires_agent === true && (
+                  <span
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '5px',
+                      padding: '2px 8px',
+                      borderRadius: '999px',
+                      fontSize: '0.6875rem',
+                      fontWeight: 600,
+                      letterSpacing: '0.02em',
+                      whiteSpace: 'nowrap',
+                      background: server.agent_connected ? 'var(--state-success-soft)' : 'rgba(217, 119, 6, 0.15)',
+                      color: server.agent_connected ? 'var(--success)' : '#d97706',
+                    }}
+                  >
+                    <span
+                      style={{
+                        width: '6px',
+                        height: '6px',
+                        borderRadius: '50%',
+                        flexShrink: 0,
+                        background: server.agent_connected ? 'var(--success)' : '#d97706',
+                      }}
+                    />
+                    {server.agent_connected ? 'PC connected' : 'PC not connected'}
+                  </span>
+                )}
               </div>
               <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {configSummary(server)}
               </div>
               <div style={{ fontSize: '0.6875rem', color: 'var(--text-muted)', marginTop: '4px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-                {server.transport}
+                {server.transport === 'relay' ? 'Local agent (PC)' : server.transport}
               </div>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
@@ -407,7 +454,7 @@ export function McpView() {
           fontSize: '0.9rem',
         }}>
           <Plug size={40} style={{ marginBottom: '12px', opacity: 0.5 }} />
-          <p>No MCP servers yet. Add a server by URL or local command to expose its tools to agents.</p>
+          <p>No MCP servers yet. Add a server by URL, cloud command, or a command that runs on your PC via the local agent (e.g. Playwright).</p>
           <Button onClick={openCreate} icon={<Plus size={16} />} style={{ marginTop: '16px' }}>
             Add MCP server
           </Button>
@@ -472,7 +519,13 @@ export function McpView() {
                 >
                   <option value="url">URL (remote)</option>
                   <option value="stdio">Local (stdio)</option>
+                  <option value="relay">Local agent (PC)</option>
                 </select>
+                {form.transport === 'relay' && (
+                  <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', margin: '6px 0 0', lineHeight: 1.4 }}>
+                    Runs on your computer via the local agent. It only works while your PC is connected.
+                  </p>
+                )}
               </div>
               {form.transport === 'url' ? (
                 <>
@@ -498,7 +551,20 @@ export function McpView() {
               ) : (
                 <>
                   <div style={{ marginBottom: '14px' }}>
-                    <label style={labelStyle}>Command</label>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px', gap: '8px' }}>
+                      <label style={{ ...labelStyle, marginBottom: 0 }}>Command</label>
+                      {form.transport === 'relay' && (
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          size="sm"
+                          onClick={applyPlaywrightPreset}
+                          style={{ fontSize: '0.7rem', padding: '2px 10px', height: '26px' }}
+                        >
+                          Playwright (PC browser)
+                        </Button>
+                      )}
+                    </div>
                     <Input
                       value={form.command}
                       onChange={(e) => setForm((f) => ({ ...f, command: e.target.value }))}

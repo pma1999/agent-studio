@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { nanoid } from 'nanoid';
 import db from '../db.js';
 import { createAndConnectMcpClient, listMcpTools, prefixToolName } from '../mcp/index.js';
+import { isAgentConnected } from '../agentRelay/registry.js';
 import { slugFromServerName } from '../tools/index.js';
 import type { McpServerConfig, McpTransport } from '../mcp/types.js';
 import { AuthRequest } from '../middleware/auth.js';
@@ -23,10 +24,14 @@ router.get('/', (req: AuthRequest, res: Response) => {
     const userId = req.userId;
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
     const rows = db.prepare('SELECT * FROM mcp_servers WHERE user_id = ? ORDER BY name ASC').all(userId) as Record<string, unknown>[];
-    const result = rows.map((r) => ({
-      ...r,
-      config: r.config ? parseConfig(r.config as string) : null,
-    }));
+    const result = rows.map((r) => {
+      const isRelay = r.transport === 'relay';
+      return {
+        ...r,
+        config: r.config ? parseConfig(r.config as string) : null,
+        ...(isRelay ? { requires_agent: true, agent_connected: isAgentConnected(userId) } : {}),
+      };
+    });
     res.json(result);
   } catch (err) {
     console.error('Error listing MCP servers:', err);
@@ -65,8 +70,8 @@ router.post('/', (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: 'name is required' });
     }
     const t = (transport || 'url').toLowerCase();
-    if (t !== 'url' && t !== 'stdio') {
-      return res.status(400).json({ error: 'transport must be "url" or "stdio"' });
+    if (t !== 'url' && t !== 'stdio' && t !== 'relay') {
+      return res.status(400).json({ error: 'transport must be "url", "stdio" or "relay"' });
     }
 
     const cfg = config != null ? (typeof config === 'string' ? JSON.parse(config) : config) : {};
@@ -125,8 +130,8 @@ router.put('/:id', (req: AuthRequest, res: Response) => {
     let t: McpTransport | null = null;
     if (transport !== undefined) {
       const tLower = (transport as string).toLowerCase();
-      if (tLower !== 'url' && tLower !== 'stdio') {
-        return res.status(400).json({ error: 'transport must be "url" or "stdio"' });
+      if (tLower !== 'url' && tLower !== 'stdio' && tLower !== 'relay') {
+        return res.status(400).json({ error: 'transport must be "url", "stdio" or "relay"' });
       }
       t = tLower as McpTransport;
     }
@@ -227,11 +232,20 @@ router.post('/:id/test', async (req: AuthRequest, res: Response) => {
     }
 
     const transport = row.transport as McpTransport;
-    if (transport !== 'url' && transport !== 'stdio') {
+    if (transport !== 'url' && transport !== 'stdio' && transport !== 'relay') {
       return res.status(400).json({ ok: false, error: 'Invalid transport' });
     }
 
-    const connection = await createAndConnectMcpClient({ transport, config }, { userId });
+    if (transport === 'relay' && !isAgentConnected(userId)) {
+      return res.json({
+        ok: false,
+        error: 'Local agent (PC) is not connected. Start the local agent on your computer and try again.',
+      });
+    }
+
+    const connection = transport === 'relay'
+      ? await createAndConnectMcpClient({ transport, config, serverId: row.id }, { userId })
+      : await createAndConnectMcpClient({ transport, config }, { userId });
     try {
       const tools = await listMcpTools(connection.client, '');
 

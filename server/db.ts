@@ -189,7 +189,7 @@ export function migrate() {
     CREATE TABLE IF NOT EXISTS mcp_servers (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
-      transport TEXT NOT NULL CHECK(transport IN ('url', 'stdio')),
+      transport TEXT NOT NULL CHECK(transport IN ('url', 'stdio', 'relay')),
       config TEXT NOT NULL,
       created_at TEXT DEFAULT (datetime('now')),
       updated_at TEXT DEFAULT (datetime('now'))
@@ -507,6 +507,35 @@ export function migrate() {
     db.exec('ALTER TABLE mcp_servers ADD COLUMN user_id TEXT');
     db.prepare('UPDATE mcp_servers SET user_id = ? WHERE user_id IS NULL').run(defaultUserId);
     db.exec('CREATE INDEX IF NOT EXISTS idx_mcp_servers_user_id ON mcp_servers(user_id)');
+  }
+
+  // Migration: allow relay transport for MCP servers (hosted by the user's local agent).
+  // SQLite cannot alter a CHECK constraint, so recreate the table when needed,
+  // preserving all existing columns (incl. user_id).
+  const mcpTableSql = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='mcp_servers'").get() as { sql: string } | undefined;
+  if (!mcpTableSql?.sql?.includes("'relay'")) {
+    db.pragma('foreign_keys = OFF');
+    try {
+      db.exec(`
+        CREATE TABLE mcp_servers_new (
+          id TEXT PRIMARY KEY,
+          user_id TEXT,
+          name TEXT NOT NULL,
+          transport TEXT NOT NULL CHECK(transport IN ('url', 'stdio', 'relay')),
+          config TEXT NOT NULL,
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now'))
+        );
+        INSERT INTO mcp_servers_new (id, user_id, name, transport, config, created_at, updated_at)
+        SELECT id, user_id, name, transport, config, created_at, updated_at FROM mcp_servers;
+        DROP TABLE mcp_servers;
+        ALTER TABLE mcp_servers_new RENAME TO mcp_servers;
+      `);
+      db.exec('CREATE INDEX IF NOT EXISTS idx_mcp_servers_user_id ON mcp_servers(user_id)');
+      console.log('[Agent Studio] Migrated mcp_servers: transport now supports relay');
+    } finally {
+      db.pragma('foreign_keys = ON');
+    }
   }
 
   // Settings: migrate from (key, value) to (user_id, key, value)

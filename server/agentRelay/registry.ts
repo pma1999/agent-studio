@@ -29,6 +29,22 @@ type PendingRequest = {
 
 const connections = new Map<string, AgentConnection>();
 const pendingRequests = new Map<string, PendingRequest>();
+const messageHooks = new Set<(message: AgentToBackendMessage) => void>();
+const disconnectHooks = new Set<(userId: string) => void>();
+
+export function registerMessageHook(cb: (message: AgentToBackendMessage) => void): () => void {
+  messageHooks.add(cb);
+  return () => {
+    messageHooks.delete(cb);
+  };
+}
+
+export function registerDisconnectHook(cb: (userId: string) => void): () => void {
+  disconnectHooks.add(cb);
+  return () => {
+    disconnectHooks.delete(cb);
+  };
+}
 
 function rejectPendingForConnection(connection: AgentConnection): void {
   for (const [requestId, pending] of pendingRequests) {
@@ -51,6 +67,14 @@ function startTimeout(requestId: string, pending: PendingRequest): NodeJS.Timeou
 }
 
 function handleMessage(connection: AgentConnection, message: AgentToBackendMessage): void {
+  for (const hook of messageHooks) {
+    try {
+      hook(message);
+    } catch (e) {
+      console.error('[agentRelay] message hook error:', e);
+    }
+  }
+
   if (!('requestId' in message)) return;
   const pending = pendingRequests.get(message.requestId);
   if (!pending || pending.connection !== connection) return;
@@ -81,6 +105,8 @@ function handleMessage(connection: AgentConnection, message: AgentToBackendMessa
     || message.type === 'list_directory_response'
     || message.type === 'send_file_response'
     || message.type === 'receive_file_response'
+    || message.type === 'mcp_start_response'
+    || message.type === 'mcp_stop_response'
   ) {
     clearTimeout(pending.timer);
     pendingRequests.delete(message.requestId);
@@ -108,6 +134,13 @@ export function unregisterAgentConnection(
     connections.delete(userId);
   }
   rejectPendingForConnection(connection);
+  for (const hook of disconnectHooks) {
+    try {
+      hook(userId);
+    } catch (e) {
+      console.error('[agentRelay] disconnect hook error:', e);
+    }
+  }
 }
 
 export function getAgentConnection(userId: string): AgentConnection | undefined {

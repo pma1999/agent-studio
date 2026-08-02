@@ -99,7 +99,21 @@ export type AgentToBackendMessage =
       error?: string;
       writtenPath?: string;
       bytesWritten?: number;
-    };
+    }
+  | {
+      type: 'mcp_start_response';
+      requestId: string;
+      ok: boolean;
+      error?: string;
+    }
+  | {
+      type: 'mcp_stop_response';
+      requestId: string;
+      ok: boolean;
+      error?: string;
+    }
+  | { type: 'mcp_message'; channelId: string; payload: unknown }
+  | { type: 'mcp_exited'; channelId: string; exitCode: number | null };
 
 export type BackendToAgentMessage =
   | { type: 'hello_ack'; agentId: string }
@@ -127,7 +141,15 @@ export type BackendToAgentMessage =
       filename: string;
       sizeBytes: number;
       mimeType: string;
-    };
+    }
+  | {
+      type: 'mcp_start_request';
+      requestId: string;
+      channelId: string;
+      config: { command: string; args?: string[]; env?: Record<string, string>; cwd?: string };
+    }
+  | { type: 'mcp_stop_request'; requestId: string; channelId: string }
+  | { type: 'mcp_message'; channelId: string; payload: unknown };
 
 export type CommandRequestMessage = Extract<BackendToAgentMessage, { type: 'command_request' }>;
 export type ReadFileRequestMessage = Extract<BackendToAgentMessage, { type: 'read_file_request' }>;
@@ -137,6 +159,9 @@ export type DeleteFileRequestMessage = Extract<BackendToAgentMessage, { type: 'd
 export type ListDirectoryRequestMessage = Extract<BackendToAgentMessage, { type: 'list_directory_request' }>;
 export type SendFileRequestMessage = Extract<BackendToAgentMessage, { type: 'send_file_request' }>;
 export type ReceiveFileRequestMessage = Extract<BackendToAgentMessage, { type: 'receive_file_request' }>;
+export type MCPStartRequestMessage = Extract<BackendToAgentMessage, { type: 'mcp_start_request' }>;
+export type MCPStopRequestMessage = Extract<BackendToAgentMessage, { type: 'mcp_stop_request' }>;
+export type MCPMessageMessage = Extract<BackendToAgentMessage, { type: 'mcp_message' }>;
 
 /** Matches the 20s heartbeat / 60s backend-timeout pair fixed in `global-constraints.md`. */
 export const HEARTBEAT_INTERVAL_MS = 20_000;
@@ -272,6 +297,57 @@ export function parseBackendMessage(raw: string): BackendToAgentMessage | null {
           sizeBytes: message.sizeBytes,
           mimeType: message.mimeType,
         };
+      }
+      return null;
+    case 'mcp_start_request':
+      if (
+        typeof message.requestId === 'string' &&
+        typeof message.channelId === 'string' &&
+        typeof message.config === 'object' &&
+        message.config !== null
+      ) {
+        const config = message.config as Record<string, unknown>;
+        const args = config.args;
+        const env = config.env;
+        const cwd = config.cwd;
+        if (
+          typeof config.command === 'string' &&
+          (args === undefined || (Array.isArray(args) && args.every((a) => typeof a === 'string'))) &&
+          (env === undefined ||
+            (typeof env === 'object' &&
+              env !== null &&
+              !Array.isArray(env) &&
+              Object.values(env).every((v) => typeof v === 'string'))) &&
+          (cwd === undefined || typeof cwd === 'string')
+        ) {
+          return {
+            type: 'mcp_start_request',
+            requestId: message.requestId,
+            channelId: message.channelId,
+            config: {
+              command: config.command,
+              args: args as string[] | undefined,
+              env: env as Record<string, string> | undefined,
+              cwd: cwd as string | undefined,
+            },
+          };
+        }
+      }
+      return null;
+    case 'mcp_stop_request':
+      if (typeof message.requestId === 'string' && typeof message.channelId === 'string') {
+        return { type: 'mcp_stop_request', requestId: message.requestId, channelId: message.channelId };
+      }
+      return null;
+    case 'mcp_message':
+      // Payload must be a non-null object/array — anything JSON-ish. Primitives
+      // and null are rejected because they are never a valid JSON-RPC message.
+      if (
+        typeof message.channelId === 'string' &&
+        typeof message.payload === 'object' &&
+        message.payload !== null
+      ) {
+        return { type: 'mcp_message', channelId: message.channelId, payload: message.payload };
       }
       return null;
     default:

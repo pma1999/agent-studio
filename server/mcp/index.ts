@@ -11,3 +11,8 @@ export {
   type McpToolDef,
   type McpToolCallResult,
 } from './client.js';
+export {
+  getOrCreateRelaySession,
+  teardownRelaySession,
+  closeRelaySessionsForUser,
+} from './relaySessions.js';

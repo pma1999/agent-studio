@@ -14,7 +14,7 @@ import {
   listMcpTools,
   type McpConnection,
 } from '../mcp/index.js';
-import type { McpServerConfig } from '../mcp/types.js';
+import type { McpServerConfig, McpTransport } from '../mcp/types.js';
 import type { ResolvedSkill } from '../skills/resolve.js';
 
 export interface ResolvedToolMcpConfig {
@@ -133,6 +133,66 @@ export function buildResolvedBuiltinTool(row: ToolRow, userId: string): Resolved
 export interface ResolveToolsResult {
   resolvedTools: ResolvedTool[];
   mcpClients: Map<string, McpConnection>;
+}
+
+interface McpServerRowForConnect {
+  id: string;
+  name: string;
+  transport: string;
+  config: string;
+}
+
+/**
+ * Load the mcp_servers row, parse the config, connect an MCP client (with one
+ * retry on transient failures), and compute the tool name prefix.
+ * Returns null when the server is skipped (bad config, unknown transport,
+ * offline local agent, or connection failure) — callers then just continue.
+ */
+async function connectMcpServer(
+  serverRow: McpServerRowForConnect,
+  userId: string
+): Promise<{ connection: McpConnection; slug: string; namePrefix: string } | null> {
+  let config: McpServerConfig;
+  try {
+    config = JSON.parse(serverRow.config) as McpServerConfig;
+  } catch {
+    console.error(`[resolve] Invalid MCP server config for ${serverRow.id}`);
+    return null;
+  }
+
+  const transport = serverRow.transport as McpTransport;
+  if (transport !== 'url' && transport !== 'stdio' && transport !== 'relay') {
+    console.error(`[resolve] Unknown MCP transport for ${serverRow.id}: ${transport}`);
+    return null;
+  }
+
+  // Relay-hosted servers run on the user's own PC: hide their tools while the
+  // local agent is offline.
+  if (transport === 'relay' && !isAgentConnected(userId)) {
+    console.log(`[resolve] Skipping relay MCP server ${serverRow.name} (${serverRow.id}): local agent is not connected`);
+    return null;
+  }
+
+  // Connect with one retry on transient failures
+  let connection: McpConnection | null = null;
+  for (let attempt = 0; attempt <= 1; attempt++) {
+    try {
+      connection = await createAndConnectMcpClient({ transport, config, serverId: serverRow.id }, { userId });
+      break;
+    } catch (err) {
+      if (attempt < 1) {
+        console.warn(`[resolve] MCP connect attempt ${attempt + 1} failed for ${serverRow.name}, retrying in 2s...`);
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      } else {
+        console.error(`[resolve] Failed to connect to MCP server ${serverRow.name} (${serverRow.id}) after 2 attempts:`, err);
+      }
+    }
+  }
+  if (!connection) return null;
+
+  const slug = slugFromServerName(serverRow.name, serverRow.id);
+  const namePrefix = `mcp_${slug}`;
+  return { connection, slug, namePrefix };
 }
 
 const PROGRESSIVE_MCP_TOOL_THRESHOLD = Number.parseInt(process.env.MCP_PROGRESSIVE_TOOL_THRESHOLD || '20', 10);
@@ -268,44 +328,15 @@ export async function resolveToolsForAgent(agentId: string, userId: string): Pro
 
   for (const { mcp_server_id } of mcpLinks) {
     const serverRow = db.prepare('SELECT id, name, transport, config FROM mcp_servers WHERE id = ?').get(mcp_server_id) as
-      | { id: string; name: string; transport: string; config: string }
+      | McpServerRowForConnect
       | undefined;
     if (!serverRow) continue;
 
-    let config: McpServerConfig;
-    try {
-      config = JSON.parse(serverRow.config) as McpServerConfig;
-    } catch {
-      console.error(`[resolve] Invalid MCP server config for ${mcp_server_id}`);
-      continue;
-    }
-
-    const transport = serverRow.transport as 'url' | 'stdio';
-    if (transport !== 'url' && transport !== 'stdio') {
-      console.error(`[resolve] Unknown MCP transport for ${mcp_server_id}: ${transport}`);
-      continue;
-    }
-
-    // Connect with one retry on transient failures
-    let connection: McpConnection | null = null;
-    for (let attempt = 0; attempt <= 1; attempt++) {
-      try {
-        connection = await createAndConnectMcpClient({ transport, config }, { userId });
-        break;
-      } catch (err) {
-        if (attempt < 1) {
-          console.warn(`[resolve] MCP connect attempt ${attempt + 1} failed for ${serverRow.name}, retrying in 2s...`);
-          await new Promise(resolve => setTimeout(resolve, 2000));
-        } else {
-          console.error(`[resolve] Failed to connect to MCP server ${serverRow.name} (${mcp_server_id}) after 2 attempts:`, err);
-        }
-      }
-    }
-    if (!connection) continue;
+    const connected = await connectMcpServer(serverRow, userId);
+    if (!connected) continue;
+    const { connection, namePrefix } = connected;
 
     try {
-      const slug = slugFromServerName(serverRow.name, mcp_server_id);
-      const namePrefix = `mcp_${slug}`;
       const mcpTools = await listMcpTools(connection.client, namePrefix);
 
       for (const mt of mcpTools) {
@@ -418,43 +449,15 @@ export async function resolveToolsFromIds(
     const serverRow = (byIdOnly
       ? db.prepare('SELECT id, name, transport, config FROM mcp_servers WHERE id = ?').get(mcp_server_id)
       : db.prepare('SELECT id, name, transport, config FROM mcp_servers WHERE id = ? AND user_id = ?').get(mcp_server_id, userId)) as
-      | { id: string; name: string; transport: string; config: string }
+      | McpServerRowForConnect
       | undefined;
     if (!serverRow) continue;
 
-    let config: McpServerConfig;
-    try {
-      config = JSON.parse(serverRow.config) as McpServerConfig;
-    } catch {
-      console.error(`[resolve] Invalid MCP server config for ${mcp_server_id}`);
-      continue;
-    }
-
-    const transport = serverRow.transport as 'url' | 'stdio';
-    if (transport !== 'url' && transport !== 'stdio') {
-      console.error(`[resolve] Unknown MCP transport for ${mcp_server_id}: ${transport}`);
-      continue;
-    }
-
-    let connection: McpConnection | null = null;
-    for (let attempt = 0; attempt <= 1; attempt++) {
-      try {
-        connection = await createAndConnectMcpClient({ transport, config }, { userId });
-        break;
-      } catch (err) {
-        if (attempt < 1) {
-          console.warn(`[resolve] MCP connect attempt ${attempt + 1} failed for ${serverRow.name}, retrying in 2s...`);
-          await new Promise(resolve => setTimeout(resolve, 2000));
-        } else {
-          console.error(`[resolve] Failed to connect to MCP server ${serverRow.name} (${mcp_server_id}) after 2 attempts:`, err);
-        }
-      }
-    }
-    if (!connection) continue;
+    const connected = await connectMcpServer(serverRow, userId);
+    if (!connected) continue;
+    const { connection, namePrefix } = connected;
 
     try {
-      const slug = slugFromServerName(serverRow.name, mcp_server_id);
-      const namePrefix = `mcp_${slug}`;
       const mcpTools = await listMcpTools(connection.client, namePrefix);
 
       for (const mt of mcpTools) {

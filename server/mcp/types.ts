@@ -16,7 +16,7 @@ export interface McpConfigStdio {
 
 export type McpServerConfig = McpConfigUrl | McpConfigStdio;
 
-export type McpTransport = 'url' | 'stdio';
+export type McpTransport = 'url' | 'stdio' | 'relay';
 
 export interface McpServerRow {
   id: string;
