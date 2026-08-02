@@ -41,7 +41,7 @@ function ProviderIcon({ name, size = 14 }: { name: 'sparkles' | 'zap' | 'eye' | 
   return Icon ? <Icon size={size} /> : <Sparkles size={size} />;
 }
 
-export type ModelSelectorVariant = 'conversation' | 'message' | 'settings' | 'agent' | 'council';
+export type ModelSelectorVariant = 'conversation' | 'settings' | 'agent' | 'council';
 
 export interface ModelSelectorCoreProps {
   value: string | null;
@@ -105,7 +105,7 @@ export function ModelSelectorCore({
 
   const effectiveModel = value ?? conversationModel ?? agentModel;
   const effectiveModelName = useMemo(() => {
-    if (value === null && (variant === 'conversation' || variant === 'message')) {
+    if (value === null && variant === 'conversation') {
       return conversationModel
         ? formatModelId(conversationModel)
         : formatModelId(agentModel);
@@ -115,7 +115,7 @@ export function ModelSelectorCore({
   }, [value, effectiveModel, conversationModel, agentModel, models, variant]);
 
   const isUsingDefault =
-    (variant === 'conversation' || variant === 'message') && value === null;
+    variant === 'conversation' && value === null;
   const currentAuthor = getModelAuthor(effectiveModel);
   const authorColor = getAuthorColor(currentAuthor);
   const providerMeta = getProviderMeta(currentAuthor);
@@ -143,9 +143,9 @@ export function ModelSelectorCore({
 
   const grouped = useMemo(() => {
     const showDefault =
-      (variant === 'conversation' || variant === 'message') && !search.trim();
+      variant === 'conversation' && !search.trim();
     const showRecent =
-      (variant === 'conversation' || variant === 'message' || variant === 'agent' || variant === 'council') &&
+      (variant === 'conversation' || variant === 'agent' || variant === 'council') &&
       !search.trim() &&
       recent.length > 0;
     const showTiers = variant === 'settings';
@@ -280,7 +280,6 @@ export function ModelSelectorCore({
 
   const isSettings = variant === 'settings';
   const isPanelVariant = variant === 'settings' || variant === 'council';
-  const isMessage = variant === 'message';
 
   const triggerMinHeight = compact ? 32 : isMobile ? 44 : isPanelVariant ? 56 : undefined;
 
@@ -407,7 +406,7 @@ export function ModelSelectorCore({
               fontWeight: isUsingDefault ? 400 : 500,
             }}
           >
-            {isMessage && value === null ? 'Default' : effectiveModelName}
+            {effectiveModelName}
           </span>
         </>
       )}
@@ -524,7 +523,7 @@ export function ModelSelectorCore({
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <Sparkles size={16} style={{ color: 'var(--accent)', opacity: 0.8 }} />
                 <span style={{ fontSize: '0.875rem', fontWeight: 600, color: 'var(--text-primary)' }}>
-                  {isMessage ? 'Model for this message' : 'Model'}
+                  {'Model'}
                 </span>
               </div>
               <motion.button
@@ -606,7 +605,7 @@ export function ModelSelectorCore({
                 </div>
               ) : (
                 <>
-                  {(variant === 'conversation' || variant === 'message') && !search && (
+                  {variant === 'conversation' && !search && (
                     <button
                       type="button"
                       onClick={() => handleSelect(null)}
@@ -637,7 +636,7 @@ export function ModelSelectorCore({
                       <Cpu size={18} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ fontWeight: isUsingDefault ? 600 : 500 }}>
-                          {variant === 'conversation' ? 'Agent Default' : 'Use Default'}
+                          {'Agent Default'}
                         </div>
                         <div
                           style={{

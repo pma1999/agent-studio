@@ -7,8 +7,6 @@ import { MessageTokenPills } from './TokenCounter';
 import { ToolCallTimeline } from './ToolCallTimeline';
 import { CouncilMessageView } from './CouncilMessageView';
 import { Button } from './ui/Button';
-import { ModelSelectorCore } from './ModelSelectorCore';
-import { ProviderRoutingSelector } from './ProviderRoutingSelector';
 import { formatModelId, getModelAuthor, getAuthorColor, formatAuthor } from '../utils/modelUtils';
 import { useIsMobile } from '../utils/breakpoints';
 import { getCouncilRun } from '../api/councilClient';
@@ -193,14 +191,10 @@ function JsonContentView({ content }: { content: string }) {
 interface MessageEditEditorProps {
   content: string;
   onContentChange: (content: string) => void;
-  modelOverride: string | null;
-  onModelOverrideChange: (modelId: string | null) => void;
-  providerRoutingOverride: ProviderRoutingConfig | null;
-  onProviderRoutingOverrideChange: (routing: ProviderRoutingConfig | null) => void;
-  agentModel?: string;
-  conversationModel?: string | null;
-  effectiveConversationModel?: string | null;
-  inheritedProviderRouting?: ProviderRoutingConfig | null;
+  /** Model that produced the original response (informational badge only). */
+  originalModel?: string | null;
+  /** Effective conversation model used for the re-run (informational hint only). */
+  relaunchModel?: string | null;
   disabled?: boolean;
   onCancel: () => void;
   onSubmit: () => void;
@@ -209,14 +203,8 @@ interface MessageEditEditorProps {
 function MessageEditEditor({
   content,
   onContentChange,
-  modelOverride,
-  onModelOverrideChange,
-  providerRoutingOverride,
-  onProviderRoutingOverrideChange,
-  agentModel = 'openrouter/auto',
-  conversationModel = null,
-  effectiveConversationModel = null,
-  inheritedProviderRouting = null,
+  originalModel = null,
+  relaunchModel = null,
   disabled = false,
   onCancel,
   onSubmit,
@@ -271,31 +259,14 @@ function MessageEditEditor({
         borderTop: '1px solid var(--border)',
         background: 'var(--bg-surface)',
       }}>
-        <ModelSelectorCore
-          variant="message"
-          value={modelOverride}
-          onChange={(modelId) => {
-            onModelOverrideChange(modelId);
-            // Picking a different model resets the routing override (mirrors the composer).
-            onProviderRoutingOverrideChange(null);
-          }}
-          agentModel={agentModel}
-          conversationModel={conversationModel}
-          disabled={disabled}
-          compact
-          placement="above"
-          ariaLabel="Modelo para re-lanzar el mensaje"
-        />
-        <ProviderRoutingSelector
-          modelId={modelOverride ?? effectiveConversationModel ?? conversationModel ?? agentModel}
-          value={providerRoutingOverride}
-          onChange={onProviderRoutingOverrideChange}
-          inheritedRouting={inheritedProviderRouting}
-          disabled={disabled}
-          allowDefault
-          compact
-          placement="above"
-        />
+        {originalModel && (
+          <MessageModelBadge modelId={originalModel} title="Model that produced the original response" />
+        )}
+        {relaunchModel && (
+          <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+            Re-run with {formatModelId(relaunchModel)}
+          </span>
+        )}
         <span style={{ flex: 1 }} />
         <Button variant="secondary" size="sm" onClick={onCancel} disabled={disabled}>
           Cancel
@@ -592,23 +563,15 @@ interface MessageBubbleProps {
   isEditing?: boolean;
   editContent?: string;
   onEditContentChange?: (content: string) => void;
-  editModelOverride?: string | null;
-  onEditModelOverrideChange?: (modelId: string | null) => void;
-  editProviderRoutingOverride?: ProviderRoutingConfig | null;
-  onEditProviderRoutingOverrideChange?: (routing: ProviderRoutingConfig | null) => void;
+  /** Model that produced the original response (informational badge in the editor). */
+  editOriginalModel?: string | null;
+  /** Effective conversation model used for the re-run (informational hint in the editor). */
+  relaunchModel?: string | null;
   onStartEdit?: () => void;
   onCancelEdit?: () => void;
   onSubmitEdit?: () => void;
   /** Disable edit affordances while a stream is running (pencil, save button). */
   streamingDisabled?: boolean;
-  /** Default model of the chat (agent/general-chat) for the edit model selector. */
-  agentModel?: string;
-  /** Persisted conversation model, shown as fallback label in the edit selector. */
-  conversationModel?: string | null;
-  /** Override-aware conversation model (used by the edit provider routing selector). */
-  effectiveConversationModel?: string | null;
-  /** Inherited provider routing for the edit routing selector. */
-  inheritedProviderRouting?: ProviderRoutingConfig | null;
 
   // --- Variants (active turn, user messages) ---
   variantTotal?: number;
@@ -842,18 +805,12 @@ export function MessageBubble({
   isEditing,
   editContent,
   onEditContentChange,
-  editModelOverride,
-  onEditModelOverrideChange,
-  editProviderRoutingOverride,
-  onEditProviderRoutingOverrideChange,
+  editOriginalModel,
+  relaunchModel,
   onStartEdit,
   onCancelEdit,
   onSubmitEdit,
   streamingDisabled,
-  agentModel,
-  conversationModel,
-  effectiveConversationModel,
-  inheritedProviderRouting,
   variantTotal,
   variantIndex,
   variantMessages,
@@ -938,9 +895,6 @@ export function MessageBubble({
       {/* Content */}
       <div
         className="message-bubble-content"
-        // While editing, allow the model/routing dropdowns (which open above the
-        // editor's bottom row) to escape the bubble's overflow:hidden box.
-        style={isUser && isEditing ? { overflow: 'visible' } : undefined}
       >
         {/* Role label */}
         <div className="message-bubble-role-row">
@@ -1038,14 +992,8 @@ export function MessageBubble({
                   <MessageEditEditor
                     content={editContent ?? ''}
                     onContentChange={onEditContentChange ?? (() => {})}
-                    modelOverride={editModelOverride ?? null}
-                    onModelOverrideChange={onEditModelOverrideChange ?? (() => {})}
-                    providerRoutingOverride={editProviderRoutingOverride ?? null}
-                    onProviderRoutingOverrideChange={onEditProviderRoutingOverrideChange ?? (() => {})}
-                    agentModel={agentModel}
-                    conversationModel={conversationModel ?? null}
-                    effectiveConversationModel={effectiveConversationModel ?? null}
-                    inheritedProviderRouting={inheritedProviderRouting ?? null}
+                    originalModel={editOriginalModel ?? null}
+                    relaunchModel={relaunchModel ?? null}
                     disabled={streamingDisabled}
                     onCancel={onCancelEdit ?? (() => {})}
                     onSubmit={onSubmitEdit ?? (() => {})}

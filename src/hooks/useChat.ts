@@ -367,8 +367,9 @@ export function useChat() {
 
   /**
    * Retries the last assistant response: re-runs the last user turn of the ACTIVE
-   * thread, reusing the model that produced the previous response (falling back to
-   * the user variant's model). No-op when the thread has no user message.
+   * thread with the conversation's effective model (no per-message model/routing —
+   * the conversation model governs every generation). No-op when the thread has
+   * no user message.
    */
   const retryLastAssistant = useCallback(async (): Promise<void> => {
     const store = useStore.getState();
@@ -376,14 +377,7 @@ export function useChat() {
     const userMsg = [...thread].reverse().find((message) => message.role === 'user');
     if (!userMsg) return;
 
-    const lastAssistant = [...thread].reverse().find((message) => message.role === 'assistant');
-    const model = lastAssistant?.model ?? userMsg.model ?? null;
-
-    await relaunchFromMessage(userMsg.id, {
-      content: userMsg.content,
-      model,
-      providerRouting: userMsg.provider_routing ?? null,
-    });
+    await relaunchFromMessage(userMsg.id, { content: userMsg.content });
   }, [relaunchFromMessage]);
 
   /** The visible thread (root → leaf) of the active conversation, per current store state. */

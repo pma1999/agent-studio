@@ -1,13 +1,13 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Send, ArrowDown, StopCircle, MessageSquare, Bot, Brain, FileUp, Link, X, Users, SlidersHorizontal, Wrench, Layers, Laptop, History } from 'lucide-react';
+import { Send, ArrowDown, StopCircle, MessageSquare, Bot, Brain, FileUp, Link, X, Users, SlidersHorizontal, Wrench, Layers, Laptop, History, Cpu } from 'lucide-react';
 import { CouncilToggle } from './CouncilToggle';
 import { CouncilStreamingView } from './CouncilStreamingView';
 import { useStore } from '../stores/store';
 import { useIsMobile, usePrefersReducedMotion } from '../utils/breakpoints';
 import { useChat } from '../hooks/useChat';
 import { getCurrentVariant, getTurnVariants, findVariantLeaf } from '../utils/threads';
-import { findVariantAssistantModel, findVariantAssistantProviderRouting } from '../utils/variantUtils';
+import { findVariantAssistantModel } from '../utils/variantUtils';
 import { useAutoScroll } from '../hooks/useAutoScroll';
 import { MessageBubble } from './MessageBubble';
 import { EmptyState } from './EmptyState';
@@ -139,15 +139,13 @@ export function ChatView() {
   const [pdfUrlError, setPdfUrlError] = useState('');
   const [sendFileError, setSendFileError] = useState('');
   const [isSendingFile, setIsSendingFile] = useState(false);
-  const [messageModelOverride, setMessageModelOverride] = useState<string | null>(null);
-  const [messageProviderRoutingOverride, setMessageProviderRoutingOverride] = useState<ProviderRoutingConfig | null>(null);
   const [streamingModelSnapshot, setStreamingModelSnapshot] = useState<string | null>(null);
   const [streamingProviderRoutingSnapshot, setStreamingProviderRoutingSnapshot] = useState<ProviderRoutingConfig | null>(null);
   // Edit-message state: local to this view; saving re-launches the turn as a new variant.
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editContent, setEditContent] = useState('');
-  const [editModelOverride, setEditModelOverride] = useState<string | null>(null);
-  const [editProviderRoutingOverride, setEditProviderRoutingOverride] = useState<ProviderRoutingConfig | null>(null);
+  // Model that produced the original response (only used for the edit hint).
+  const [editOriginalModel, setEditOriginalModel] = useState<string | null>(null);
   const [invokeAgentId, setInvokeAgentId] = useState<string | undefined>(undefined);
   const [invokeSkillNames, setInvokeSkillNames] = useState<string[]>([]);
   const [skills, setSkills] = useState<Skill[]>([]);
@@ -253,7 +251,7 @@ export function ChatView() {
   }, [activeConversationId, conversationSkillConfigOverrides, activeConversation, defaultSkillIdsForChat]);
 
   // Model used for the next (or current streaming) message; shown in the assistant bubble when streaming.
-  const effectiveModelForThisMessage = messageModelOverride ?? effectiveConversationModel ?? defaultModelForChat;
+  const effectiveModelForThisMessage = effectiveConversationModel ?? defaultModelForChat;
 
   const handleConversationModelChange = useCallback(
     async (modelId: string | null) => {
@@ -362,7 +360,7 @@ export function ChatView() {
   // Clear the composing flag if the chat unmounts while focused.
   useEffect(() => () => setComposerFocused(false), [setComposerFocused]);
   const composerOptionsActive =
-    reasoningActive || messageModelOverride !== null || councilEnabled || !!pdfEngine;
+    reasoningActive || councilEnabled || !!pdfEngine;
   const prefersReducedMotion = usePrefersReducedMotion();
 
   // Close popover when clicking outside
@@ -401,12 +399,9 @@ export function ChatView() {
   useEffect(() => {
     setReasoningOverride(null);
     setShowReasoningPopover(false);
-    setMessageModelOverride(null);
-    setMessageProviderRoutingOverride(null);
     setEditingMessageId(null);
     setEditContent('');
-    setEditModelOverride(null);
-    setEditProviderRoutingOverride(null);
+    setEditOriginalModel(null);
   }, [activeConversationId, setReasoningOverride]);
 
   // Tool results memo (must be before early return)
@@ -489,36 +484,32 @@ export function ChatView() {
     if (isStreaming) return;
     setEditingMessageId(msg.id);
     setEditContent(msg.content);
-    // Prefill with the model that produced this turn's response; null falls back
-    // to the chat default ("Use Default" in the selector).
-    setEditModelOverride(findVariantAssistantModel(messages, msg));
-    setEditProviderRoutingOverride(findVariantAssistantProviderRouting(messages, msg));
+    // Remember the model that produced the original response (only used as an
+    // informational hint in the edit footer; the re-run always uses the
+    // conversation's effective model).
+    setEditOriginalModel(findVariantAssistantModel(messages, msg));
   }, [isStreaming, messages]);
 
   const handleCancelEdit = useCallback(() => {
     setEditingMessageId(null);
     setEditContent('');
-    setEditModelOverride(null);
-    setEditProviderRoutingOverride(null);
+    setEditOriginalModel(null);
   }, []);
 
   const handleSubmitEdit = useCallback(async () => {
     if (!editingMessageId || isStreaming) return;
     const content = editContent.trim();
     if (!content) return;
-    const model = editModelOverride;
-    const providerRouting = editProviderRoutingOverride;
     setEditingMessageId(null);
     setEditContent('');
-    setEditModelOverride(null);
-    setEditProviderRoutingOverride(null);
+    setEditOriginalModel(null);
     try {
-      await relaunchFromMessage(editingMessageId, { content, model, providerRouting });
+      await relaunchFromMessage(editingMessageId, { content });
     } catch (err) {
       console.error('Failed to relaunch message:', err);
     }
     requestAnimationFrame(() => scrollToBottom('auto'));
-  }, [editingMessageId, isStreaming, editContent, editModelOverride, editProviderRoutingOverride, relaunchFromMessage, scrollToBottom]);
+  }, [editingMessageId, isStreaming, editContent, relaunchFromMessage, scrollToBottom]);
 
   const handleRetry = useCallback(() => {
     if (isStreaming) return;
@@ -666,18 +657,16 @@ export function ChatView() {
     }
 
     const usesCouncil = councilEnabled && !!councilConfig;
-    const outgoingModel = messageModelOverride ?? effectiveConversationModel ?? defaultModelForChat;
+    const outgoingModel = effectiveConversationModel ?? defaultModelForChat;
     const outgoingProviderRouting = usesCouncil
       ? null
-      : messageProviderRoutingOverride ?? effectiveConversationProviderRouting ?? defaultProviderRoutingForChat ?? { mode: 'auto' as const };
+      : effectiveConversationProviderRouting ?? defaultProviderRoutingForChat ?? { mode: 'auto' as const };
     setStreamingModelSnapshot(outgoingModel);
     setStreamingProviderRoutingSnapshot(outgoingProviderRouting);
 
     sendMessage(inputValue, {
       ...(attachmentsPayload?.length && { attachments: attachmentsPayload }),
       ...(pdfEngine && { pdf_engine: pdfEngine }),
-      ...(messageModelOverride && { model: messageModelOverride }),
-      ...(messageProviderRoutingOverride && { providerRouting: messageProviderRoutingOverride }),
       ...(invokeAgentId && { invokeAgentId }),
       ...(invokeSkillNames.length && { invokeSkillNames }),
       ...(councilEnabled && councilConfig && {
@@ -687,14 +676,12 @@ export function ChatView() {
     });
     setInputValue('');
     setPendingAttachments([]);
-    setMessageModelOverride(null);
-    setMessageProviderRoutingOverride(null);
     setInvokeAgentId(undefined);
     setInvokeSkillNames([]);
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
-  }, [inputValue, isStreaming, pendingAttachments, pdfEngine, sendMessage, messageModelOverride, messageProviderRoutingOverride, invokeAgentId, invokeSkillNames, councilEnabled, councilConfig, selectedCouncilId, effectiveConversationModel, defaultModelForChat, effectiveConversationProviderRouting, defaultProviderRoutingForChat]);
+  }, [inputValue, isStreaming, pendingAttachments, pdfEngine, sendMessage, invokeAgentId, invokeSkillNames, councilEnabled, councilConfig, selectedCouncilId, effectiveConversationModel, defaultModelForChat, effectiveConversationProviderRouting, defaultProviderRoutingForChat]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -941,18 +928,12 @@ export function ChatView() {
                   isEditing={editingMessageId === msg.id}
                   editContent={editingMessageId === msg.id ? editContent : undefined}
                   onEditContentChange={setEditContent}
-                  editModelOverride={editModelOverride}
-                  onEditModelOverrideChange={setEditModelOverride}
-                  editProviderRoutingOverride={editProviderRoutingOverride}
-                  onEditProviderRoutingOverrideChange={setEditProviderRoutingOverride}
+                  editOriginalModel={editingMessageId === msg.id ? editOriginalModel : undefined}
+                  relaunchModel={effectiveConversationModel ?? defaultModelForChat}
                   onStartEdit={() => handleStartEdit(msg)}
                   onCancelEdit={handleCancelEdit}
                   onSubmitEdit={handleSubmitEdit}
                   streamingDisabled={isStreaming}
-                  agentModel={defaultModelForChat}
-                  conversationModel={activeConversation?.model ?? null}
-                  effectiveConversationModel={effectiveConversationModel}
-                  inheritedProviderRouting={effectiveConversationProviderRouting ?? defaultProviderRoutingForChat}
                   variantTotal={variantInfo?.total}
                   variantIndex={variantInfo?.index}
                   variantMessages={variantInfo ? turnVariants : undefined}
@@ -1250,33 +1231,6 @@ export function ChatView() {
 
               {/* Council Toggle */}
               <CouncilToggle disabled={isStreaming} placement="above" />
-
-              {/* Message Model Selector */}
-              <div style={{ position: 'relative', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 6 }}>
-                <ModelSelectorCore
-                  variant="message"
-                  value={messageModelOverride}
-                  onChange={(modelId) => {
-                    setMessageModelOverride(modelId);
-                    setMessageProviderRoutingOverride(null);
-                  }}
-                  agentModel={defaultModelForChat}
-                  conversationModel={activeConversation?.model}
-                  disabled={isStreaming}
-                  compact
-                  placement="above"
-                />
-                <ProviderRoutingSelector
-                  modelId={messageModelOverride ?? effectiveConversationModel ?? defaultModelForChat}
-                  value={messageProviderRoutingOverride}
-                  onChange={setMessageProviderRoutingOverride}
-                  inheritedRouting={effectiveConversationProviderRouting ?? defaultProviderRoutingForChat}
-                  disabled={isStreaming}
-                  allowDefault
-                  compact
-                  placement="above"
-                />
-              </div>
             </div>
             )}
 
@@ -1716,25 +1670,22 @@ export function ChatView() {
             </section>
 
             <section className="composer-options-section">
-              <span className="composer-options-label">Model for this message</span>
+              <span className="composer-options-label"><Cpu size={15} /> Model for this conversation</span>
               <div className="composer-options-controls">
                 <ModelSelectorCore
-                  variant="message"
-                  value={messageModelOverride}
-                  onChange={(modelId) => {
-                    setMessageModelOverride(modelId);
-                    setMessageProviderRoutingOverride(null);
-                  }}
+                  variant="conversation"
+                  value={effectiveConversationModel}
+                  onChange={handleConversationModelChange}
                   agentModel={defaultModelForChat}
-                  conversationModel={activeConversation?.model}
+                  conversationModel={activeConversation?.model ?? null}
                   disabled={isStreaming}
                   compact
                 />
                 <ProviderRoutingSelector
-                  modelId={messageModelOverride ?? effectiveConversationModel ?? defaultModelForChat}
-                  value={messageProviderRoutingOverride}
-                  onChange={setMessageProviderRoutingOverride}
-                  inheritedRouting={effectiveConversationProviderRouting ?? defaultProviderRoutingForChat}
+                  modelId={effectiveConversationModel ?? defaultModelForChat}
+                  value={effectiveConversationProviderRouting}
+                  onChange={handleConversationProviderRoutingChange}
+                  inheritedRouting={defaultProviderRoutingForChat}
                   disabled={isStreaming}
                   allowDefault
                   compact

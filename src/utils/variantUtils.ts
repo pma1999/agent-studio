@@ -1,4 +1,4 @@
-import type { Message, ProviderRoutingConfig } from '../types';
+import type { Message } from '../types';
 
 /**
  * Last assistant message belonging to the same turn as `userMessage`.
@@ -42,14 +42,6 @@ export function findVariantAssistantMessage(messages: Message[], userMessage: Me
 /** Model id of the assistant response for `userMessage`'s variant, if any. */
 export function findVariantAssistantModel(messages: Message[], userMessage: Message): string | null {
   return findVariantAssistantMessage(messages, userMessage)?.model ?? null;
-}
-
-/** Provider routing of the assistant response for `userMessage`'s variant, if any. */
-export function findVariantAssistantProviderRouting(
-  messages: Message[],
-  userMessage: Message
-): ProviderRoutingConfig | null {
-  return findVariantAssistantMessage(messages, userMessage)?.provider_routing ?? null;
 }
 
 /** Compact relative time, e.g. "5 min ago". */
