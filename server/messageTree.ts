@@ -124,26 +124,32 @@ export function getTurnVariants(conversationId: string, turnId: string): TurnVar
 }
 
 /**
- * Deepest descendant (via parent_id) of a variant root whose turn_id equals the
- * root's turn_id — i.e. the tail of that variant's continuation. If the root has
- * no continuation, the root itself is returned. Returns null when the root does
- * not exist / has no turn.
+ * Tail of the thread hanging off the variant root: the deepest descendant via
+ * parent_id, INCLUDING later turns that continue the variant's thread (e.g. a
+ * user message sent after an aborted response). No turn_id filtering — those
+ * later turns are the variant's legitimate continuation. Ties (two branches of
+ * equal depth, e.g. sibling turn variants) resolve toward the earlier created
+ * message — the original continuation. Returns the root itself when it has no
+ * continuation. Returns null when the root does not exist or is not a user
+ * message.
  */
 export function findVariantLeaf(conversationId: string, variantRootId: string): string | null {
-  const root = db.prepare('SELECT turn_id FROM messages WHERE id = ? AND conversation_id = ? AND role = ?').get(variantRootId, conversationId, 'user') as { turn_id: string | null } | undefined;
-  if (!root?.turn_id) return null;
+  const root = db.prepare('SELECT id FROM messages WHERE id = ? AND conversation_id = ? AND role = ?').get(variantRootId, conversationId, 'user') as { id: string } | undefined;
+  if (!root) return null;
 
   const row = db.prepare(`
-    WITH RECURSIVE chain(id, turn_id, depth) AS (
-      SELECT id, turn_id, 0 FROM messages WHERE id = ?
+    WITH RECURSIVE chain(id, created_at, depth) AS (
+      SELECT id, created_at, 0 FROM messages WHERE id = ?
       UNION ALL
-      SELECT m.id, m.turn_id, c.depth + 1
+      SELECT m.id, m.created_at, c.depth + 1
       FROM messages m
       JOIN chain c ON m.parent_id = c.id
-      WHERE m.conversation_id = ? AND m.turn_id = ?
+      WHERE m.conversation_id = ?
     )
-    SELECT id FROM chain ORDER BY depth DESC LIMIT 1
-  `).get(variantRootId, conversationId, root.turn_id) as { id: string } | undefined;
+    SELECT id FROM chain
+    ORDER BY depth DESC, created_at ASC, id ASC
+    LIMIT 1
+  `).get(variantRootId, conversationId) as { id: string } | undefined;
 
   return row?.id ?? null;
 }

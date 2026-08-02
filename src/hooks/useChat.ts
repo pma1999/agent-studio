@@ -245,14 +245,23 @@ export function useChat() {
       };
       addMessage(userMsg);
       addMessage(assistantMsg);
-      store.setActiveLeaf(userMsg.id);
+      // The active thread hangs from the leaf: point it at the LAST optimistic
+      // message (the temp assistant) so buildThread walks the new variant chain
+      // (…target.parent → temp-user → temp-assistant) and the streaming
+      // placeholder renders. Pointing at the temp USER would leave the temp
+      // assistant out of the chain — no streaming until loadMessages.
+      store.setActiveLeaf(assistantMsg.id);
     } else {
-      // Add user message to local state immediately
+      // Add user message to local state immediately. Anchor it to the current
+      // leaf and set the leaf to the temp assistant so the optimistic chain
+      // (…old leaf → temp-user → temp-assistant) is the visible thread.
+      const store = useStore.getState();
       userMsg = {
         id: `temp-user-${Date.now()}`,
         conversation_id: activeConversationId,
         role: 'user',
         content: trimmed,
+        parent_id: store.activeLeafId,
         created_at: now,
         ...(attachments?.length && { attachments: attachments.map((a) => ({ filename: a.filename })) }),
       };
@@ -262,10 +271,12 @@ export function useChat() {
         conversation_id: activeConversationId,
         role: 'assistant',
         content: '',
+        parent_id: userMsg.id,
         created_at: now,
       };
       addMessage(userMsg);
       addMessage(assistantMsg);
+      store.setActiveLeaf(assistantMsg.id);
     }
 
     // Create AbortController for cancellation
@@ -302,15 +313,21 @@ export function useChat() {
         setReasoningContent('');
         resetStreamingActivityEvents();
         setAbortController(null);
+        await loadMessages(activeConversationId, { silent: true });
+        // Join the error message to the visible chain (the server may or may
+        // not have persisted the new variant) and make it the active leaf so
+        // it renders; `temp-` prefix keeps setActiveLeaf from PUTting it.
+        const leaf = useStore.getState().activeLeafId;
         const errorMsg: Message = {
-          id: `error-${Date.now()}`,
+          id: `temp-error-${Date.now()}`,
           conversation_id: activeConversationId,
           role: 'assistant',
           content: `**Error:** ${error}`,
+          parent_id: leaf,
           created_at: new Date().toISOString(),
         };
-        await loadMessages(activeConversationId, { silent: true });
         addMessage(errorMsg);
+        useStore.getState().setActiveLeaf(errorMsg.id);
       },
       (chunk) => {
         appendReasoningContent(chunk);

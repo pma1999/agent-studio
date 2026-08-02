@@ -66,10 +66,14 @@ export function getTurnVariants(messages: Message[], userMessageId: string): Mes
 }
 
 /**
- * Finds the deepest descendant of the variant rooted at `variantUserMessageId`
- * (walking DOWN via parent_id children) whose turn_id equals the root's turn_id.
- * With no such descendant (or no descendants at all), returns the root itself.
- * Returns null when the root message is unknown.
+ * Finds the tail of the thread that hangs off the variant rooted at
+ * `variantUserMessageId`: the deepest descendant via parent_id, INCLUDING
+ * later turns that continue the variant's thread (e.g. a user message sent
+ * after an aborted response — that turn is the variant's legitimate
+ * continuation, so no turn_id filtering is applied). Ties (two branches of
+ * equal depth, e.g. sibling turn variants) resolve toward the earlier created
+ * message — the original continuation. Returns the root itself when it has no
+ * descendants. Returns null when the root message is unknown.
  */
 export function findVariantLeaf(messages: Message[], variantUserMessageId: string): string | null {
   const root = messages.find((message) => message.id === variantUserMessageId);
@@ -84,16 +88,18 @@ export function findVariantLeaf(messages: Message[], variantUserMessageId: strin
     }
   }
 
-  const rootTurnId = root.turn_id ?? null;
   let best: Message = root;
   let bestDepth = 0;
   const stack: Array<{ message: Message; depth: number }> = [{ message: root, depth: 0 }];
 
   while (stack.length > 0) {
     const { message, depth } = stack.pop()!;
-    // Legacy roots (no turn_id) treat every descendant as part of the variant;
-    // otherwise only descendants sharing the variant root's turn_id count.
-    if (depth > bestDepth && (rootTurnId === null || message.turn_id === rootTurnId)) {
+    const isDeeper = depth > bestDepth;
+    const isTieBetter =
+      depth === bestDepth &&
+      (message.created_at < best.created_at ||
+        (message.created_at === best.created_at && message.id < best.id));
+    if (isDeeper || isTieBetter) {
       best = message;
       bestDepth = depth;
     }

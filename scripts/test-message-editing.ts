@@ -149,11 +149,13 @@ test('(c) buildThreadIds from variant 3 leaf excludes variants 1/2 messages', ()
   assert.ok(!buildThreadIds(convNormal, a2v3).includes(v2));
 });
 
-test('(c) findVariantLeaf returns the deepest same-turn descendant', () => {
+test('(c) findVariantLeaf returns the deepest descendant (continuation incl. later turns)', () => {
   assert.equal(findVariantLeaf(convNormal, v2), a2v2);
   assert.equal(findVariantLeaf(convNormal, v3), a2v3);
   assert.equal(findVariantLeaf(convNormal, m2), a2); // variant 1 leaf
-  assert.equal(findVariantLeaf(convNormal, m1), a1); // turn 1 leaf (stops at next turn)
+  // turn 1's tail follows its continuation into later turns (ties resolve to
+  // the earlier branch): m1 → a1 → m2 → a2, not a1.
+  assert.equal(findVariantLeaf(convNormal, m1), a2);
   assert.equal(findVariantLeaf(convNormal, a1), null); // assistant roots are not variants
 });
 

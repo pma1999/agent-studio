@@ -129,8 +129,46 @@ test('findVariantLeaf: each variant root resolves to its own assistant leaf', ()
   assert.equal(findVariantLeaf(variants, 'u2'), 'a2');
 });
 
-test('findVariantLeaf: variant 3 excludes the next turn (different turn_id)', () => {
-  assert.equal(findVariantLeaf(variants, 'u3'), 'a3');
+test('findVariantLeaf: variant 3 leaf includes later turns hanging off it', () => {
+  assert.equal(findVariantLeaf(variants, 'u3'), 'a4');
+});
+
+test('findVariantLeaf: aborted-turn continuation (later turn) is the variant tail', () => {
+  const chain = [
+    make({ id: 'uA', role: 'user', content: 'q1', turn_id: 'TA', variant_seq: 1, created_at: t('01') }),
+    make({ id: 'uB', role: 'user', content: 'q2 (sent after abort)', turn_id: 'TB', variant_seq: 1, parent_id: 'uA', created_at: t('02') }),
+    make({ id: 'aB', role: 'assistant', content: 'r2', turn_id: 'TB', parent_id: 'uB', created_at: t('03') }),
+  ];
+  // uA's response was aborted; the uB turn is its legitimate continuation.
+  assert.equal(findVariantLeaf(chain, 'uA'), 'aB');
+  assert.deepEqual(ids(buildThread(chain, 'aB')), ['uA', 'uB', 'aB']);
+});
+
+test('findVariantLeaf: edited variant keeps the old continuation, new variant its own tail', () => {
+  const chain = [
+    make({ id: 'uA', role: 'user', content: 'q1', turn_id: 'TA', variant_seq: 1, created_at: t('01') }),
+    make({ id: 'uB', role: 'user', content: 'q2', turn_id: 'TB', variant_seq: 1, parent_id: 'uA', created_at: t('02') }),
+    make({ id: 'aB', role: 'assistant', content: 'r2', turn_id: 'TB', parent_id: 'uB', created_at: t('03') }),
+    make({ id: 'uA2', role: 'user', content: 'q1 edited', turn_id: 'TA', variant_seq: 2, parent_id: null, created_at: t('04') }),
+    make({ id: 'aA2', role: 'assistant', content: 'r1 edited', turn_id: 'TA', parent_id: 'uA2', created_at: t('05') }),
+  ];
+  assert.equal(findVariantLeaf(chain, 'uA'), 'aB');
+  assert.equal(findVariantLeaf(chain, 'uA2'), 'aA2');
+  assert.deepEqual(ids(buildThread(chain, 'aB')), ['uA', 'uB', 'aB']);
+  assert.deepEqual(ids(buildThread(chain, 'aA2')), ['uA2', 'aA2']);
+});
+
+test('findVariantLeaf: equal-depth sibling branches resolve to the earlier (original) one', () => {
+  const chain = [
+    make({ id: 'm1', role: 'user', content: 'q1', turn_id: 'T1', variant_seq: 1, created_at: t('01') }),
+    make({ id: 'a1', role: 'assistant', content: 'r1', turn_id: 'T1', parent_id: 'm1', created_at: t('02') }),
+    make({ id: 'm2', role: 'user', content: 'q2', turn_id: 'T2', variant_seq: 1, parent_id: 'a1', created_at: t('03') }),
+    make({ id: 'a2', role: 'assistant', content: 'r2', turn_id: 'T2', parent_id: 'm2', created_at: t('04') }),
+    make({ id: 'v2', role: 'user', content: 'q2 edited', turn_id: 'T2', variant_seq: 2, parent_id: 'a1', created_at: t('05') }),
+    make({ id: 'a2v2', role: 'assistant', content: 'r2 edited', turn_id: 'T2', parent_id: 'v2', created_at: t('06') }),
+  ];
+  // m2 and v2 branches are both depth 3 under m1; the earlier (original) wins.
+  assert.equal(findVariantLeaf(chain, 'm1'), 'a2');
 });
 
 test('findVariantLeaf: root without descendants resolves to itself', () => {
@@ -176,6 +214,45 @@ test('buildThread: leaf in variant 2 excludes variants 1 and 3', () => {
 
 test('buildThread: leaf in variant 3 includes the follow-up turn, excludes other variants', () => {
   assert.deepEqual(ids(buildThread(variants, 'a4')), ['u3', 'a3', 'u4', 'a4']);
+});
+
+// ------------------------ (e) optimistic streaming chains (regression: edit/relaunch streaming)
+// The hook sets the active leaf to the TEMP ASSISTANT; buildThread must then
+// surface the full optimistic chain so the streaming placeholder renders.
+test('buildThread: edit/relaunch chain is visible when leaf = temp assistant', () => {
+  const chain = [
+    make({ id: 'u1', role: 'user', content: 'v1', turn_id: 'T1', variant_seq: 1, created_at: t('01') }),
+    make({ id: 'a1', role: 'assistant', content: 'r1', turn_id: 'T1', parent_id: 'u1', created_at: t('02') }),
+    make({ id: 'temp-edit-1', role: 'user', content: 'edited', turn_id: 'T1', variant_seq: 2, parent_id: null, created_at: t('03') }),
+    make({ id: 'temp-assistant-1', role: 'assistant', content: '', turn_id: 'T1', parent_id: 'temp-edit-1', created_at: t('04') }),
+  ];
+  const thread = buildThread(chain, 'temp-assistant-1');
+  assert.deepEqual(ids(thread), ['temp-edit-1', 'temp-assistant-1']);
+  assert.equal(thread[thread.length - 1].role, 'assistant');
+  assert.ok(thread[thread.length - 1].id.startsWith('temp-'));
+});
+
+test('buildThread: normal-send chain stays visible when leaf = temp assistant', () => {
+  const chain = [
+    make({ id: 'm1', role: 'user', content: 'hi', turn_id: 'T1', created_at: t('01') }),
+    make({ id: 'm2', role: 'assistant', content: 'hello', turn_id: 'T1', parent_id: 'm1', created_at: t('02') }),
+    make({ id: 'temp-user-1', role: 'user', content: 'next', parent_id: 'm2', created_at: t('03') }),
+    make({ id: 'temp-assistant-2', role: 'assistant', content: '', parent_id: 'temp-user-1', created_at: t('04') }),
+  ];
+  const thread = buildThread(chain, 'temp-assistant-2');
+  assert.deepEqual(ids(thread), ['m1', 'm2', 'temp-user-1', 'temp-assistant-2']);
+  assert.ok(thread[thread.length - 1].id.startsWith('temp-'));
+});
+
+test('buildThread: error message joined to the chain is visible as leaf', () => {
+  const chain = [
+    make({ id: 'u1', role: 'user', content: 'hi', turn_id: 'T1', created_at: t('01') }),
+    make({ id: 'a1', role: 'assistant', content: 'hello', turn_id: 'T1', parent_id: 'u1', created_at: t('02') }),
+    make({ id: 'temp-error-1', role: 'assistant', content: '**Error:** boom', parent_id: 'a1', created_at: t('03') }),
+  ];
+  const thread = buildThread(chain, 'temp-error-1');
+  assert.deepEqual(ids(thread), ['u1', 'a1', 'temp-error-1']);
+  assert.equal(thread[thread.length - 1].id, 'temp-error-1');
 });
 
 if (failures > 0) {
