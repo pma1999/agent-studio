@@ -2983,6 +2983,25 @@ button:focus-visible .conv-delete-btn {
     -webkit-overflow-scrolling: touch;
     overscroll-behavior: contain;
   }
+  /* `.recents-list` is the single sidebar scroller on mobile: the browser
+     owns vertical pans (native momentum), horizontal pans reach JS for the
+     row swipe; no visible scrollbar; last row clears the home indicator. */
+  .recents-list {
+    touch-action: pan-y;
+    scrollbar-width: none;
+    padding-bottom: calc(env(safe-area-inset-bottom) + 8px);
+  }
+  .recents-list::-webkit-scrollbar {
+    display: none;
+  }
+  .recents-item {
+    touch-action: pan-y;
+  }
+  /* Same gesture arbitration for the drawer chrome itself, so drawer-close
+     swipes are delivered to JS and vertical pans never fight it. */
+  .sidebar-drawer-mobile {
+    touch-action: pan-y;
+  }
 }
 
 /* ---------- View header (shared slim header) ---------- */
@@ -3196,7 +3215,25 @@ button:focus-visible .conv-delete-btn {
   color: var(--text-secondary);
   font-family: var(--font-body);
   border-left: 2px solid transparent;
-  transition: background var(--motion-fast), color var(--motion-fast);
+  transition: background var(--motion-fast), color var(--motion-fast), transform 0.2s cubic-bezier(0.32, 0.72, 0, 1);
+}
+/* Entrance stagger (replaces the per-row framer-motion animation; the swipe
+   transform in the component is applied inline and springs back via the
+   transition above). */
+.recents-item {
+  animation: recents-item-enter 0.2s ease-out backwards;
+  animation-delay: calc(var(--item-index, 0) * 20ms);
+}
+@keyframes recents-item-enter {
+  from { opacity: 0; transform: translateX(-8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+/* While a horizontal swipe is active: follow the finger 1:1, no spring. */
+.recents-item-dragging {
+  transition: transform 0s !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  .recents-item { animation: none; }
 }
 .recents-item:hover { background: var(--surface-hover); color: var(--text-primary); }
 .recents-item:focus-visible { outline: none; box-shadow: var(--shadow-focus); }
@@ -3230,6 +3267,22 @@ button:focus-visible .conv-delete-btn {
 @media (max-width: 767px) {
   .recents-item { min-height: 48px; padding: 10px 12px; }
   .recents-item-title { font-size: 0.9rem; }
+}
+
+/* Bottom fade hint: signals more scrollable conversations (rendered on
+   mobile only; opacity is driven by scroll state in ConversationList). */
+.recents-fade {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 48px;
+  pointer-events: none;
+  background: linear-gradient(to bottom, transparent, var(--bg-base));
+  transition: opacity 0.25s ease;
+}
+@media (prefers-reduced-motion: reduce) {
+  .recents-fade { transition: none; }
 }
 
 /* Citation chips (web search sources) — copper-tonal, CSS hover */

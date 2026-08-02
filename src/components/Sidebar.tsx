@@ -110,14 +110,20 @@ export function Sidebar() {
 
   // Swipe-left-to-close on the mobile drawer. Uses raw touch deltas (not
   // framer drag) to avoid fighting the controlled `transform` animation.
-  const drawerTouchStart = useRef<{ x: number; y: number } | null>(null);
+  // Gestures that begin inside the conversation list or form fields are
+  // ignored: they belong to list scrolling, row swipes, and text selection.
+  const drawerTouchStart = useRef<{ x: number; y: number; inScrollable: boolean } | null>(null);
   const handleDrawerTouchStart = (e: React.TouchEvent) => {
-    drawerTouchStart.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    const target = e.target as HTMLElement;
+    const inScrollable = !!(target.closest && target.closest(
+      '.recents-list, .recents-search, .agent-picker, input, textarea, select'
+    ));
+    drawerTouchStart.current = { x: e.touches[0].clientX, y: e.touches[0].clientY, inScrollable };
   };
   const handleDrawerTouchEnd = (e: React.TouchEvent) => {
     const start = drawerTouchStart.current;
     drawerTouchStart.current = null;
-    if (!start) return;
+    if (!start || start.inScrollable) return;
     const dx = e.changedTouches[0].clientX - start.x;
     const dy = e.changedTouches[0].clientY - start.y;
     if (dx < -60 && Math.abs(dx) > Math.abs(dy)) setSidebarMobileOpen(false);
@@ -414,7 +420,13 @@ export function Sidebar() {
             borderTop: '1px solid var(--border)',
             flex: 1,
             minHeight: 0,
-            overflowY: 'auto',
+            // Mobile: the wrapper becomes a constrained flex column with
+            // overflow hidden so `.recents-list` is the single scroller
+            // (it carries the momentum + overscroll CSS). Desktop keeps the
+            // wrapper itself as the scroller, unchanged.
+            ...(isMobile
+              ? { display: 'flex' as const, flexDirection: 'column' as const, overflow: 'hidden' as const }
+              : { overflowY: 'auto' as const }),
             padding: isMobile ? 'var(--space-md) var(--space-sm) var(--space-sm)' : 'var(--space-sm)',
             }}>
             {isMobile && (
