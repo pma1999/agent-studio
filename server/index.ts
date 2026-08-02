@@ -143,6 +143,14 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`[server] Agent Studio server running on http://0.0.0.0:${PORT}`);
 });
 
+// Railway's edge proxy keeps upstream connections alive ~15s and reuses them
+// from a pool. Node's default keepAliveTimeout (5s) closes them first, so the
+// proxy's next request (including WebSocket upgrades and file uploads) hits a
+// dead connection and fails with intermittent 502s / dropped requests. Keep
+// keepAliveTimeout above the proxy's ~15s (headersTimeout must stay greater).
+server.keepAliveTimeout = 60_000;
+server.headersTimeout = 65_000;
+
 // Graceful shutdown: handles SIGTERM/SIGINT, drains SSE streams, closes DB.
 setupGracefulShutdown(server, db);
 mountAgentTransport(server);
