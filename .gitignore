@@ -64,3 +64,7 @@ temp/
 # .vercel
 # .railway
 # .netlify
+
+# Local-agent test artifacts (not part of the repo)
+local-agent/.playwright-mcp/
+local-agent/substack-home.png

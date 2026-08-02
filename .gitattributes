@@ -1,1 +1,16 @@
+# Line-ending policy: store LF in the repository, compare normalized.
+#
+# WHY: without these rules, tools/editors that save files with CRLF make git
+# report every touched file as "modified" (phantom diffs with zero real
+# content). With `text=auto`, git normalizes to LF when staging and compares
+# normalized content, so `git status`/`git diff` only ever show real changes
+# regardless of the line endings on disk.
+#
+# Do not remove: this file is what keeps the working tree honest.
 * text=auto
+
+# Windows script types must keep CRLF on checkout so they run correctly on
+# Windows even when autocrlf is unset or the checkout happens on Linux.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
