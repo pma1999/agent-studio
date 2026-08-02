@@ -103,12 +103,30 @@ function extractCandidatePath(command: string): string | null {
   return null;
 }
 
+/** True when `p` is a Windows absolute path (drive-letter prefix). */
+function isWindowsAbsolutePath(p: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(p);
+}
+
 export function isPathWithinRoot(candidatePath: string, root: string): boolean {
-  const resolvedRoot = path.resolve(root);
-  const resolvedCandidate = path.resolve(resolvedRoot, candidatePath);
-  const rel = path.relative(resolvedRoot, resolvedCandidate);
+  const rootIsWindows = isWindowsAbsolutePath(root);
+  const candidateIsWindows = isWindowsAbsolutePath(candidatePath);
+  if (candidateIsWindows && !rootIsWindows) {
+    // Path-flavor mismatch: a Windows-absolute target against a POSIX root can
+    // never be "inside" that root on any host. Be conservative.
+    return false;
+  }
+  // On POSIX hosts the native `path` module would treat a Windows drive path
+  // (`C:\...`) as a *relative* path, silently resolving everything "inside"
+  // the root — which defeats the recursive-delete guard. Use win32 semantics
+  // whenever the root is a Windows path. On Windows hosts `path.win32` is the
+  // same module as `path`, so this is a no-op there.
+  const p = rootIsWindows ? path.win32 : path;
+  const resolvedRoot = p.resolve(root);
+  const resolvedCandidate = p.resolve(resolvedRoot, candidatePath);
+  const rel = p.relative(resolvedRoot, resolvedCandidate);
   if (rel === '') return true;
-  return !rel.startsWith('..') && !path.isAbsolute(rel);
+  return !rel.startsWith('..') && !p.isAbsolute(rel);
 }
 
 /**

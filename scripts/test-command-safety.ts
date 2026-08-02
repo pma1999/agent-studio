@@ -53,6 +53,22 @@ expect(
   ['recursive-delete', 'scope-broadening']
 );
 
+// PowerShell recursive delete INSIDE the Windows workspace root -> tier 0
+expect(
+  'Remove-Item -Recurse -Force C:\\Users\\someone\\AgentWorkspace\\build',
+  'C:\\Users\\someone\\AgentWorkspace',
+  false,
+  0
+);
+
+// PowerShell recursive delete outside workspace root, opt-out respected -> tier 0
+expect(
+  'Remove-Item -Recurse -Force C:\\Users\\someone\\Documents',
+  'C:\\Users\\someone\\AgentWorkspace',
+  true,
+  0
+);
+
 // Force push -> tier 2, always (not workspace-scoped)
 expect('git push --force origin main', null, false, 2, 'force-push');
 
@@ -64,5 +80,13 @@ assert.equal(isPathWithinRoot('./build', '/home/user/workspace'), true);
 assert.equal(isPathWithinRoot('/', '/home/user/workspace'), false);
 assert.equal(isPathWithinRoot('/home/user/workspace', '/home/user/workspace'), true);
 assert.equal(isPathWithinRoot('/home/user/other', '/home/user/workspace'), false);
+// Windows path flavor: absolute comparisons + relative candidate against a
+// Windows root (must hold on POSIX hosts too, where `path` is not win32).
+assert.equal(isPathWithinRoot('C:\\Users\\someone\\AgentWorkspace\\build', 'C:\\Users\\someone\\AgentWorkspace'), true);
+assert.equal(isPathWithinRoot('C:\\Users\\someone\\Documents', 'C:\\Users\\someone\\AgentWorkspace'), false);
+assert.equal(isPathWithinRoot('build', 'C:\\Users\\someone\\AgentWorkspace'), true);
+assert.equal(isPathWithinRoot('..\\Documents', 'C:\\Users\\someone\\AgentWorkspace'), false);
+// Flavor mismatch (Windows target vs POSIX root) is conservatively outside.
+assert.equal(isPathWithinRoot('C:\\Users\\someone\\Documents', '/home/user/workspace'), false);
 
 console.log('command safety scanCommand: OK');
