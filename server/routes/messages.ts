@@ -32,7 +32,12 @@ router.get('/:id/messages', (req: AuthRequest, res: Response) => {
       provider_routing: parseProviderRoutingConfig(msg.provider_routing),
     }));
 
-    res.json(parsed);
+    // Deliberate contract change: the flat array becomes { messages, active_leaf_id }
+    // so the client can render the thread tree (editing / variants / branches).
+    res.json({
+      messages: parsed,
+      active_leaf_id: (conversation as { active_leaf_id?: string | null }).active_leaf_id ?? null,
+    });
   } catch (err) {
     console.error('Error listing messages:', err);
     res.status(500).json({ error: 'Failed to list messages' });

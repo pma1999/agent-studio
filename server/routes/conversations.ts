@@ -389,6 +389,36 @@ router.delete('/:id/skill-config', (req: AuthRequest, res: Response) => {
   }
 });
 
+// PUT /api/conversations/:id/active-leaf - Move the active thread cursor
+// (message-tree navigation: switch visible variant / continue from any branch)
+router.put('/:id/active-leaf', (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.userId;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    const { message_id } = req.body;
+
+    if (typeof message_id !== 'string' || !message_id.trim()) {
+      return res.status(400).json({ error: 'message_id is required' });
+    }
+
+    const conversation = db.prepare('SELECT id FROM conversations WHERE id = ? AND user_id = ?').get(req.params.id, userId);
+    if (!conversation) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+
+    const message = db.prepare('SELECT id FROM messages WHERE id = ? AND conversation_id = ?').get(message_id, req.params.id);
+    if (!message) {
+      return res.status(404).json({ error: 'Message not found' });
+    }
+
+    db.prepare("UPDATE conversations SET active_leaf_id = ?, updated_at = datetime('now') WHERE id = ? AND user_id = ?").run(message_id, req.params.id, userId);
+    res.json({ success: true, active_leaf_id: message_id });
+  } catch (err) {
+    console.error('Error updating active leaf:', err);
+    res.status(500).json({ error: 'Failed to update active leaf' });
+  }
+});
+
 // DELETE /api/conversations/:id - Delete conversation and messages
 router.delete('/:id', (req: AuthRequest, res: Response) => {
   try {

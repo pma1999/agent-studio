@@ -48,6 +48,8 @@ interface Conversation {
   title: string;
   model?: string | null;
   provider_routing?: unknown;
+  /** Message-tree cursor: id of the last message of the currently visible thread. */
+  active_leaf_id?: string | null;
 }
 
 const PDF_ENGINES = ['pdf-text', 'mistral-ocr', 'native'] as const;
@@ -263,13 +265,16 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     }
     const getApiKey = (providerId: ProviderId): string => apiKeyByProvider.get(providerId) ?? '';
 
-    // Save user message
+    // Save user message (new turn: parent = active leaf, turn_id = own id, variant_seq = 1)
     const userMsgId = nanoid();
     const attachmentsMeta = attachments.length > 0 ? JSON.stringify(attachments.map((a) => ({ filename: a.filename }))) : null;
     db.prepare(`
-      INSERT INTO messages (id, conversation_id, role, content, attachments)
-      VALUES (?, ?, 'user', ?, ?)
-    `).run(userMsgId, conversation_id, content, attachmentsMeta);
+      INSERT INTO messages (id, conversation_id, role, content, attachments, parent_id, turn_id, variant_seq)
+      VALUES (?, ?, 'user', ?, ?, ?, ?, 1)
+    `).run(userMsgId, conversation_id, content, attachmentsMeta, conversation.active_leaf_id ?? null, userMsgId);
+    // Keep the tree cursor on the user message: without this, the chain-walk
+    // history of the next chat request would truncate the thread after a council run.
+    db.prepare("UPDATE conversations SET active_leaf_id = ?, updated_at = datetime('now') WHERE id = ? AND user_id = ?").run(userMsgId, conversation_id, userId);
 
     // Update conversation title
     const msgCount = db.prepare('SELECT COUNT(*) as cnt FROM messages WHERE conversation_id = ?').get(conversation_id) as { cnt: number };
@@ -498,13 +503,14 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       signal: abortController.signal,
     });
 
-    // Save synthesis message
+    // Save synthesis message (chained to the user message of this turn)
     const assistantMsgId = nanoid();
     db.prepare(`
       INSERT INTO messages (
         id, conversation_id, role, content, tokens_used, prompt_tokens, completion_tokens,
-        cost, reasoning_content, model, provider_routing, council_run_id, is_council_synthesis
-      ) VALUES (?, ?, 'assistant', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        cost, reasoning_content, model, provider_routing, council_run_id, is_council_synthesis,
+        parent_id, turn_id, variant_seq
+      ) VALUES (?, ?, 'assistant', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 1)
     `).run(
       assistantMsgId,
       conversation_id,
@@ -516,8 +522,12 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       result.synthesis.reasoningContent || null,
       synthesizerModel,
       serializeProviderRoutingConfig(result.synthesis.providerRouting),
-      councilRunId
+      councilRunId,
+      userMsgId,
+      userMsgId
     );
+    // Advance the tree cursor so the next chain-walk history includes the council synthesis.
+    db.prepare("UPDATE conversations SET active_leaf_id = ?, updated_at = datetime('now') WHERE id = ? AND user_id = ?").run(assistantMsgId, conversation_id, userId);
 
     // Update council run (comparison_json filled in background after completion event)
     const successfulCount = result.memberResults.filter((r) => r.status === 'success').length;

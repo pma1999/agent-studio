@@ -1,11 +1,13 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Send, ArrowDown, StopCircle, MessageSquare, Bot, Brain, FileUp, Link, X, Users, SlidersHorizontal, Wrench, Layers, Laptop } from 'lucide-react';
+import { Send, ArrowDown, StopCircle, MessageSquare, Bot, Brain, FileUp, Link, X, Users, SlidersHorizontal, Wrench, Layers, Laptop, History } from 'lucide-react';
 import { CouncilToggle } from './CouncilToggle';
 import { CouncilStreamingView } from './CouncilStreamingView';
 import { useStore } from '../stores/store';
 import { useIsMobile, usePrefersReducedMotion } from '../utils/breakpoints';
 import { useChat } from '../hooks/useChat';
+import { getCurrentVariant, getTurnVariants, findVariantLeaf } from '../utils/threads';
+import { findVariantAssistantModel, findVariantAssistantProviderRouting } from '../utils/variantUtils';
 import { useAutoScroll } from '../hooks/useAutoScroll';
 import { MessageBubble } from './MessageBubble';
 import { EmptyState } from './EmptyState';
@@ -28,6 +30,7 @@ import type {
   StreamingActivityEvent,
   ProviderRoutingConfig,
   Skill,
+  Message,
 } from '../types';
 
 const MAX_PDF_ATTACHMENTS = 5;
@@ -113,6 +116,8 @@ export function ChatView() {
     selectedCouncilId,
     councilMemberProgress,
     councilSynthesisPhase,
+    activeLeafId,
+    setActiveLeaf,
   } = useStore();
   const streamingActivitySignature = useMemo(() => (
     streamingActivityEvents
@@ -125,7 +130,7 @@ export function ChatView() {
       ))
       .join('|')
   ), [streamingActivityEvents]);
-  const { sendMessage, cancelStream, startNewChat, startGeneralChat } = useChat();
+  const { sendMessage, cancelStream, startNewChat, startGeneralChat, relaunchFromMessage, retryLastAssistant, getActiveThread } = useChat();
   const [inputValue, setInputValue] = useState('');
   const [showReasoningPopover, setShowReasoningPopover] = useState(false);
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
@@ -138,6 +143,11 @@ export function ChatView() {
   const [messageProviderRoutingOverride, setMessageProviderRoutingOverride] = useState<ProviderRoutingConfig | null>(null);
   const [streamingModelSnapshot, setStreamingModelSnapshot] = useState<string | null>(null);
   const [streamingProviderRoutingSnapshot, setStreamingProviderRoutingSnapshot] = useState<ProviderRoutingConfig | null>(null);
+  // Edit-message state: local to this view; saving re-launches the turn as a new variant.
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [editContent, setEditContent] = useState('');
+  const [editModelOverride, setEditModelOverride] = useState<string | null>(null);
+  const [editProviderRoutingOverride, setEditProviderRoutingOverride] = useState<ProviderRoutingConfig | null>(null);
   const [invokeAgentId, setInvokeAgentId] = useState<string | undefined>(undefined);
   const [invokeSkillNames, setInvokeSkillNames] = useState<string[]>([]);
   const [skills, setSkills] = useState<Skill[]>([]);
@@ -151,13 +161,14 @@ export function ChatView() {
     () =>
       isStreaming
         ? `${streamingContent.length}:${reasoningContent.length}:${streamingActivitySignature}`
-        : `${messages.length}:${messages[messages.length - 1]?.id ?? ''}`,
+        : `${messages.length}:${activeLeafId ?? 'none'}:${messages[messages.length - 1]?.id ?? ''}`,
     [
       isStreaming,
       streamingContent.length,
       reasoningContent.length,
       streamingActivitySignature,
       messages.length,
+      activeLeafId,
       messages[messages.length - 1]?.id,
     ]
   );
@@ -392,6 +403,10 @@ export function ChatView() {
     setShowReasoningPopover(false);
     setMessageModelOverride(null);
     setMessageProviderRoutingOverride(null);
+    setEditingMessageId(null);
+    setEditContent('');
+    setEditModelOverride(null);
+    setEditProviderRoutingOverride(null);
   }, [activeConversationId, setReasoningOverride]);
 
   // Tool results memo (must be before early return)
@@ -427,6 +442,113 @@ export function ChatView() {
     }
     return map;
   }, [messages, toolResultsByCallId]);
+
+  // The visible thread hangs from the active leaf, so variant navigation swaps
+  // entire tails instead of mutating flat message order.
+  const activeThread = useMemo(() => getActiveThread(), [messages, activeLeafId, getActiveThread]);
+
+  // Active variant of the turn the current leaf belongs to (index is 1-based).
+  const currentVariant = useMemo(
+    () => getCurrentVariant(messages, activeLeafId),
+    [messages, activeLeafId]
+  );
+
+  // All user-variant roots per turn, so any message with alternatives can show
+  // the switcher — not just the active turn (mid-thread edits stay reachable).
+  const variantsByTurn = useMemo(() => {
+    const map = new Map<string, Message[]>();
+    for (const m of messages) {
+      if (m.role === 'user' && m.turn_id) {
+        const list = map.get(m.turn_id);
+        if (list) list.push(m);
+        else map.set(m.turn_id, [m]);
+      }
+    }
+    for (const list of map.values()) {
+      list.sort((a, b) => (a.variant_seq ?? 1) - (b.variant_seq ?? 1));
+    }
+    return map;
+  }, [messages]);
+
+  // Ids on the visible chain: used to find which variant of each turn is active.
+  const activeChainIds = useMemo(() => new Set(activeThread.map((m) => m.id)), [activeThread]);
+
+  // Model badge per user variant (last assistant of the same turn/variant), for
+  // the variant-list popover.
+  const variantModels = useMemo(() => {
+    const map: Record<string, string | null> = {};
+    for (const m of messages) {
+      if (m.role === 'user' && m.turn_id && !(m.id in map)) {
+        map[m.id] = findVariantAssistantModel(messages, m);
+      }
+    }
+    return map;
+  }, [messages]);
+
+  const handleStartEdit = useCallback((msg: Message) => {
+    if (isStreaming) return;
+    setEditingMessageId(msg.id);
+    setEditContent(msg.content);
+    // Prefill with the model that produced this turn's response; null falls back
+    // to the chat default ("Use Default" in the selector).
+    setEditModelOverride(findVariantAssistantModel(messages, msg));
+    setEditProviderRoutingOverride(findVariantAssistantProviderRouting(messages, msg));
+  }, [isStreaming, messages]);
+
+  const handleCancelEdit = useCallback(() => {
+    setEditingMessageId(null);
+    setEditContent('');
+    setEditModelOverride(null);
+    setEditProviderRoutingOverride(null);
+  }, []);
+
+  const handleSubmitEdit = useCallback(async () => {
+    if (!editingMessageId || isStreaming) return;
+    const content = editContent.trim();
+    if (!content) return;
+    const model = editModelOverride;
+    const providerRouting = editProviderRoutingOverride;
+    setEditingMessageId(null);
+    setEditContent('');
+    setEditModelOverride(null);
+    setEditProviderRoutingOverride(null);
+    try {
+      await relaunchFromMessage(editingMessageId, { content, model, providerRouting });
+    } catch (err) {
+      console.error('Failed to relaunch message:', err);
+    }
+    requestAnimationFrame(() => scrollToBottom('auto'));
+  }, [editingMessageId, isStreaming, editContent, editModelOverride, editProviderRoutingOverride, relaunchFromMessage, scrollToBottom]);
+
+  const handleRetry = useCallback(() => {
+    if (isStreaming) return;
+    retryLastAssistant();
+  }, [isStreaming, retryLastAssistant]);
+
+  const handleSelectVariant = useCallback((variantId: string) => {
+    if (isStreaming) return;
+    const leaf = findVariantLeaf(messages, variantId);
+    setActiveLeaf(leaf ?? variantId);
+  }, [messages, isStreaming, setActiveLeaf]);
+
+  const handleNavigateVariant = useCallback((direction: -1 | 1, userMessageId: string) => {
+    if (isStreaming) return;
+    const variants = getTurnVariants(messages, userMessageId);
+    const chainIds = new Set(getActiveThread().map((m) => m.id));
+    const activeIdx = variants.findIndex((v) => chainIds.has(v.id));
+    const target = variants[activeIdx + direction];
+    if (!target) return;
+    const leaf = findVariantLeaf(messages, target.id);
+    setActiveLeaf(leaf ?? target.id);
+  }, [messages, isStreaming, setActiveLeaf]);
+
+  const handleGoToLatestVariant = useCallback(() => {
+    if (!currentVariant || isStreaming) return;
+    const variants = getTurnVariants(messages, currentVariant.userMessageId);
+    const last = variants[variants.length - 1];
+    if (!last) return;
+    handleSelectVariant(last.id);
+  }, [currentVariant, messages, isStreaming, handleSelectVariant]);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -601,8 +723,8 @@ export function ChatView() {
     );
   }
 
-  // Build display messages including streaming
-  const displayMessages = messages.filter((m) => m.role !== 'tool');
+  // Build the visible thread (root → active leaf), including streaming placeholders
+  const displayMessages = activeThread.filter((m) => m.role !== 'tool');
   const lastMsg = displayMessages[displayMessages.length - 1];
   const isLastMsgStreamingPlaceholder = lastMsg && lastMsg.role === 'assistant' && lastMsg.id.startsWith('temp-');
 
@@ -782,6 +904,27 @@ export function ChatView() {
               const activityEvents: StreamingActivityEvent[] | undefined = isStreamingMsg
                 ? streamingActivityEvents
                 : undefined;
+              // Variant switcher on ANY user message whose turn has alternatives —
+              // the active variant of that turn is the one on the visible chain.
+              const turnVariants = msg.role === 'user' && msg.turn_id
+                ? (variantsByTurn.get(msg.turn_id) ?? [])
+                : [];
+              const activeVariantInTurn = turnVariants.find((v) => activeChainIds.has(v.id));
+              const variantInfo = turnVariants.length > 1
+                ? {
+                    total: turnVariants.length,
+                    index: activeVariantInTurn?.variant_seq ?? 1,
+                    userMessageId: activeVariantInTurn?.id ?? msg.id,
+                  }
+                : null;
+              const showRetry =
+                !isStreamingMsg &&
+                !isLastMsgStreamingPlaceholder &&
+                msg.role === 'assistant' &&
+                !msg.id.startsWith('temp-') &&
+                !msg.is_council_synthesis &&
+                !msg.council_run_id &&
+                i === displayMessages.length - 1;
               return (
                 <MessageBubble
                   key={msg.id}
@@ -795,10 +938,53 @@ export function ChatView() {
                   toolActivityLive={isStreamingMsg && !!activityEvents?.some((ev) => ev.type === 'tool')}
                   streamingModel={isStreamingMsg ? (streamingModelSnapshot ?? effectiveModelForThisMessage) : undefined}
                   streamingProviderRouting={isStreamingMsg ? streamingProviderRoutingSnapshot : undefined}
+                  isEditing={editingMessageId === msg.id}
+                  editContent={editingMessageId === msg.id ? editContent : undefined}
+                  onEditContentChange={setEditContent}
+                  editModelOverride={editModelOverride}
+                  onEditModelOverrideChange={setEditModelOverride}
+                  editProviderRoutingOverride={editProviderRoutingOverride}
+                  onEditProviderRoutingOverrideChange={setEditProviderRoutingOverride}
+                  onStartEdit={() => handleStartEdit(msg)}
+                  onCancelEdit={handleCancelEdit}
+                  onSubmitEdit={handleSubmitEdit}
+                  streamingDisabled={isStreaming}
+                  agentModel={defaultModelForChat}
+                  conversationModel={activeConversation?.model ?? null}
+                  effectiveConversationModel={effectiveConversationModel}
+                  inheritedProviderRouting={effectiveConversationProviderRouting ?? defaultProviderRoutingForChat}
+                  variantTotal={variantInfo?.total}
+                  variantIndex={variantInfo?.index}
+                  variantMessages={variantInfo ? turnVariants : undefined}
+                  variantModels={variantModels}
+                  activeVariantId={variantInfo?.userMessageId}
+                  onNavigateVariant={handleNavigateVariant}
+                  onSelectVariant={handleSelectVariant}
+                  showRetry={showRetry}
+                  onRetry={handleRetry}
                 />
               );
             })}
             </>
+          )}
+
+          {/* Subtle hint when the visible thread ends at an earlier variant of the active turn */}
+          {currentVariant && currentVariant.index < currentVariant.total && !isStreaming && !editingMessageId && (
+            <div style={{ display: 'flex', justifyContent: 'center', marginTop: 10 }}>
+              <motion.button
+                type="button"
+                className="message-older-variant-banner"
+                onClick={handleGoToLatestVariant}
+                initial={prefersReducedMotion ? false : { opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.25, ease: [0.4, 0, 0.2, 1] }}
+                aria-label="View the latest variant"
+              >
+                <History size={12} />
+                <span>Viewing an earlier version</span>
+                <span className="message-older-variant-banner-link">· View the latest</span>
+              </motion.button>
+            </div>
           )}
         </div>
         </div>

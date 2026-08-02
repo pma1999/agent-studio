@@ -1,13 +1,18 @@
 import React from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { User, Sparkles, Copy, Check, Brain, ChevronDown, ChevronRight, ExternalLink, Globe, FileUp, Braces, Users, Laptop } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { User, Sparkles, Copy, Check, Brain, ChevronDown, ChevronRight, ChevronLeft, ExternalLink, Globe, FileUp, Braces, Users, Laptop, Pencil, RotateCcw, GitBranch, Send } from 'lucide-react';
 import { MarkdownContent } from './MarkdownContent';
 import { MessageTokenPills } from './TokenCounter';
 import { ToolCallTimeline } from './ToolCallTimeline';
 import { CouncilMessageView } from './CouncilMessageView';
+import { Button } from './ui/Button';
+import { ModelSelectorCore } from './ModelSelectorCore';
+import { ProviderRoutingSelector } from './ProviderRoutingSelector';
 import { formatModelId, getModelAuthor, getAuthorColor, formatAuthor } from '../utils/modelUtils';
 import { useIsMobile } from '../utils/breakpoints';
 import { getCouncilRun } from '../api/councilClient';
+import { formatVariantTime } from '../utils/variantUtils';
 import type { Message, Annotation, ToolExecution, StreamingActivityEvent, CouncilRunDetail, ProviderRoutingConfig } from '../types';
 
 /** Compact pill showing which model generated the message; provider color and full id in tooltip. */
@@ -183,6 +188,393 @@ function JsonContentView({ content }: { content: string }) {
   );
 }
 
+// ---------- Edit mode (user messages) ----------
+
+interface MessageEditEditorProps {
+  content: string;
+  onContentChange: (content: string) => void;
+  modelOverride: string | null;
+  onModelOverrideChange: (modelId: string | null) => void;
+  providerRoutingOverride: ProviderRoutingConfig | null;
+  onProviderRoutingOverrideChange: (routing: ProviderRoutingConfig | null) => void;
+  agentModel?: string;
+  conversationModel?: string | null;
+  effectiveConversationModel?: string | null;
+  inheritedProviderRouting?: ProviderRoutingConfig | null;
+  disabled?: boolean;
+  onCancel: () => void;
+  onSubmit: () => void;
+}
+
+function MessageEditEditor({
+  content,
+  onContentChange,
+  modelOverride,
+  onModelOverrideChange,
+  providerRoutingOverride,
+  onProviderRoutingOverrideChange,
+  agentModel = 'openrouter/auto',
+  conversationModel = null,
+  effectiveConversationModel = null,
+  inheritedProviderRouting = null,
+  disabled = false,
+  onCancel,
+  onSubmit,
+}: MessageEditEditorProps) {
+  const textareaRef = React.useRef<HTMLTextAreaElement>(null);
+
+  // Focus and place the cursor at the end when the editor mounts.
+  React.useEffect(() => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+  }, []);
+
+  // Auto-resize to content (same trick as the composer).
+  React.useEffect(() => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    ta.style.height = 'auto';
+    ta.style.height = `${Math.min(ta.scrollHeight, 240)}px`;
+  }, [content]);
+
+  const canSubmit = !disabled && content.trim().length > 0;
+
+  return (
+    <div className="message-edit-editor">
+      <textarea
+        ref={textareaRef}
+        className="message-edit-textarea"
+        value={content}
+        onChange={(e) => onContentChange(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') {
+            e.preventDefault();
+            onCancel();
+          } else if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+            e.preventDefault();
+            if (canSubmit) onSubmit();
+          }
+        }}
+        placeholder="Edita tu mensaje..."
+        aria-label="Edit message"
+        disabled={disabled}
+        rows={Math.max(2, Math.min(content.split('\n').length + 1, 8))}
+      />
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: '8px',
+        flexWrap: 'wrap',
+        padding: '10px 12px',
+        borderTop: '1px solid var(--border)',
+        background: 'var(--bg-surface)',
+      }}>
+        <ModelSelectorCore
+          variant="message"
+          value={modelOverride}
+          onChange={(modelId) => {
+            onModelOverrideChange(modelId);
+            // Picking a different model resets the routing override (mirrors the composer).
+            onProviderRoutingOverrideChange(null);
+          }}
+          agentModel={agentModel}
+          conversationModel={conversationModel}
+          disabled={disabled}
+          compact
+          placement="above"
+          ariaLabel="Modelo para re-lanzar el mensaje"
+        />
+        <ProviderRoutingSelector
+          modelId={modelOverride ?? effectiveConversationModel ?? conversationModel ?? agentModel}
+          value={providerRoutingOverride}
+          onChange={onProviderRoutingOverrideChange}
+          inheritedRouting={inheritedProviderRouting}
+          disabled={disabled}
+          allowDefault
+          compact
+          placement="above"
+        />
+        <span style={{ flex: 1 }} />
+        <Button variant="secondary" size="sm" onClick={onCancel} disabled={disabled}>
+          Cancel
+        </Button>
+        <Button
+          variant="primary"
+          size="sm"
+          icon={<Send size={13} />}
+          onClick={onSubmit}
+          disabled={!canSubmit}
+        >
+          Re-run
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Variant navigation (‹ 1/2 › + list popover) ----------
+
+interface VariantSelectorProps {
+  /** 1-based position of the active variant. */
+  index: number;
+  total: number;
+  /** All user variants of this turn, ordered by variant_seq. */
+  variants: Message[];
+  modelsByVariantId: Record<string, string | null>;
+  activeVariantId?: string;
+  onNavigate: (direction: -1 | 1) => void;
+  onSelect: (variantId: string) => void;
+  disabled?: boolean;
+}
+
+function VariantSelector({
+  index,
+  total,
+  variants,
+  modelsByVariantId,
+  activeVariantId,
+  onNavigate,
+  onSelect,
+  disabled = false,
+}: VariantSelectorProps) {
+  const [open, setOpen] = React.useState(false);
+  const [pos, setPos] = React.useState<{ top: number; left: number } | null>(null);
+  const triggerRef = React.useRef<HTMLButtonElement>(null);
+
+  const canPrev = !disabled && index > 1;
+  const canNext = !disabled && index < total;
+
+  // Popover follows the counter on scroll/resize (fixed positioning so it escapes
+  // the bubble's overflow:hidden content box).
+  React.useEffect(() => {
+    if (!open) return;
+    const update = () => {
+      const el = triggerRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      const width = Math.min(340, window.innerWidth - 24);
+      const left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
+      setPos({ top: rect.bottom + 8, left });
+    };
+    update();
+    window.addEventListener('resize', update);
+    window.addEventListener('scroll', update, true);
+    return () => {
+      window.removeEventListener('resize', update);
+      window.removeEventListener('scroll', update, true);
+    };
+  }, [open]);
+
+  // Close on outside click / Escape.
+  React.useEffect(() => {
+    if (!open) return;
+    const onMouseDown = (e: MouseEvent) => {
+      if (triggerRef.current && triggerRef.current.contains(e.target as Node)) return;
+      setOpen(false);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', onMouseDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onMouseDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [open]);
+
+  const handleSelect = (variantId: string) => {
+    setOpen(false);
+    onSelect(variantId);
+  };
+
+  const popoverWidth = Math.min(340, window.innerWidth - 24);
+
+  return (
+    <div className="message-variant-control" role="group" aria-label={`Variant ${index} of ${total}`}>
+      <button
+        type="button"
+        className="message-variant-arrow"
+        onClick={() => onNavigate(-1)}
+        disabled={!canPrev}
+        aria-label="Previous variant"
+        title="Previous variant"
+      >
+        <ChevronLeft size={13} />
+      </button>
+      <button
+        ref={triggerRef}
+        type="button"
+        className="message-variant-counter"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        aria-label={`Variant ${index} of ${total}`}
+        title="View variants"
+      >
+        <span>{index}</span>/<span>{total}</span>
+      </button>
+      <button
+        type="button"
+        className="message-variant-arrow"
+        onClick={() => onNavigate(1)}
+        disabled={!canNext}
+        aria-label="Next variant"
+        title="Next variant"
+      >
+        <ChevronRight size={13} />
+      </button>
+
+      {createPortal(
+        <AnimatePresence>
+          {open && pos && (
+            <motion.div
+              role="listbox"
+              aria-label={`Message variants (${total})`}
+              initial={{ opacity: 0, y: -6, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -6, scale: 0.98 }}
+              transition={{ duration: 0.15, ease: [0.4, 0, 0.2, 1] }}
+              style={{
+                position: 'fixed',
+                top: pos.top,
+                left: pos.left,
+                width: popoverWidth,
+                maxHeight: 'min(60vh, 420px)',
+                display: 'flex',
+                flexDirection: 'column',
+                background: 'var(--bg-elevated)',
+                border: '1px solid var(--border-light)',
+                borderRadius: 'var(--radius-lg)',
+                boxShadow: 'var(--shadow-lg), 0 0 0 1px rgba(255,255,255,0.04)',
+                zIndex: 1000,
+                overflow: 'hidden',
+              }}
+            >
+              <div style={{
+                padding: '10px 14px',
+                borderBottom: '1px solid var(--border)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                flexShrink: 0,
+              }}>
+                <GitBranch size={14} style={{ color: 'var(--accent)' }} />
+                <span style={{ fontSize: '0.8125rem', fontWeight: 600, color: 'var(--text-primary)' }}>
+                  Message variants
+                </span>
+                <span style={{
+                  marginLeft: 'auto',
+                  fontSize: '0.6875rem',
+                  color: 'var(--text-muted)',
+                  fontFamily: 'var(--font-mono)',
+                }}>
+                  {index}/{total}
+                </span>
+              </div>
+              <div style={{ overflow: 'auto', WebkitOverflowScrolling: 'touch', padding: '4px' }}>
+                {variants.map((v, i) => {
+                  const num = v.variant_seq ?? i + 1;
+                  const isActive = v.id === activeVariantId;
+                  const modelId = modelsByVariantId[v.id] ?? null;
+                  return (
+                    <button
+                      key={v.id}
+                      type="button"
+                      role="option"
+                      aria-selected={isActive}
+                      onClick={() => handleSelect(v.id)}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'flex-start',
+                        gap: 10,
+                        width: '100%',
+                        padding: '10px 12px',
+                        marginBottom: '2px',
+                        textAlign: 'left',
+                        background: isActive ? 'var(--accent-muted)' : 'transparent',
+                        border: 'none',
+                        borderLeft: `3px solid ${isActive ? 'var(--accent)' : 'transparent'}`,
+                        borderRadius: 'var(--radius-md)',
+                        cursor: 'pointer',
+                        color: 'var(--text-primary)',
+                        transition: 'background var(--transition-fast)',
+                      }}
+                      onMouseEnter={(e) => {
+                        if (!isActive) e.currentTarget.style.background = 'var(--bg-hover)';
+                      }}
+                      onMouseLeave={(e) => {
+                        if (!isActive) e.currentTarget.style.background = 'transparent';
+                      }}
+                    >
+                      <span style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        minWidth: 22,
+                        height: 22,
+                        padding: '0 6px',
+                        marginTop: 1,
+                        borderRadius: 'var(--radius-sm)',
+                        background: isActive ? 'var(--accent-ghost)' : 'var(--bg-surface)',
+                        border: '1px solid var(--border)',
+                        fontSize: '0.6875rem',
+                        fontFamily: 'var(--font-mono)',
+                        fontWeight: 600,
+                        color: isActive ? 'var(--accent)' : 'var(--text-secondary)',
+                        flexShrink: 0,
+                      }}>
+                        {num}
+                      </span>
+                      <span style={{ flex: 1, minWidth: 0 }}>
+                        <span style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 6,
+                          flexWrap: 'wrap',
+                          marginBottom: 3,
+                        }}>
+                          {modelId && <MessageModelBadge modelId={modelId} />}
+                          <span style={{
+                            fontSize: '0.625rem',
+                            color: 'var(--text-muted)',
+                            fontFamily: 'var(--font-mono)',
+                          }}>
+                            {formatVariantTime(v.created_at)}
+                          </span>
+                        </span>
+                        <span style={{
+                          display: '-webkit-box',
+                          WebkitLineClamp: 2,
+                          WebkitBoxOrient: 'vertical',
+                          overflow: 'hidden',
+                          fontSize: '0.75rem',
+                          lineHeight: 1.5,
+                          color: 'var(--text-muted)',
+                          whiteSpace: 'pre-wrap',
+                          wordBreak: 'break-word',
+                        }}>
+                          {v.content || '(sin contenido)'}
+                        </span>
+                      </span>
+                      {isActive && (
+                        <Check size={14} style={{ color: 'var(--accent)', flexShrink: 0, marginTop: 4 }} />
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>,
+        document.body
+      )}
+    </div>
+  );
+}
+
 interface MessageBubbleProps {
   message: Message;
   isStreaming?: boolean;
@@ -195,6 +587,41 @@ interface MessageBubbleProps {
   /** Model used for this message when streaming (before message.model is set). */
   streamingModel?: string;
   streamingProviderRouting?: ProviderRoutingConfig | null;
+
+  // --- Editing (user messages) ---
+  isEditing?: boolean;
+  editContent?: string;
+  onEditContentChange?: (content: string) => void;
+  editModelOverride?: string | null;
+  onEditModelOverrideChange?: (modelId: string | null) => void;
+  editProviderRoutingOverride?: ProviderRoutingConfig | null;
+  onEditProviderRoutingOverrideChange?: (routing: ProviderRoutingConfig | null) => void;
+  onStartEdit?: () => void;
+  onCancelEdit?: () => void;
+  onSubmitEdit?: () => void;
+  /** Disable edit affordances while a stream is running (pencil, save button). */
+  streamingDisabled?: boolean;
+  /** Default model of the chat (agent/general-chat) for the edit model selector. */
+  agentModel?: string;
+  /** Persisted conversation model, shown as fallback label in the edit selector. */
+  conversationModel?: string | null;
+  /** Override-aware conversation model (used by the edit provider routing selector). */
+  effectiveConversationModel?: string | null;
+  /** Inherited provider routing for the edit routing selector. */
+  inheritedProviderRouting?: ProviderRoutingConfig | null;
+
+  // --- Variants (active turn, user messages) ---
+  variantTotal?: number;
+  variantIndex?: number;
+  variantMessages?: Message[];
+  variantModels?: Record<string, string | null>;
+  activeVariantId?: string;
+  onNavigateVariant?: (direction: -1 | 1, userMessageId: string) => void;
+  onSelectVariant?: (variantId: string) => void;
+
+  // --- Retry (last assistant message of the active thread) ---
+  showRetry?: boolean;
+  onRetry?: () => void;
 }
 
 function formatCost(cost: number): string {
@@ -412,6 +839,30 @@ export function MessageBubble({
   toolActivityLive,
   streamingModel,
   streamingProviderRouting,
+  isEditing,
+  editContent,
+  onEditContentChange,
+  editModelOverride,
+  onEditModelOverrideChange,
+  editProviderRoutingOverride,
+  onEditProviderRoutingOverrideChange,
+  onStartEdit,
+  onCancelEdit,
+  onSubmitEdit,
+  streamingDisabled,
+  agentModel,
+  conversationModel,
+  effectiveConversationModel,
+  inheritedProviderRouting,
+  variantTotal,
+  variantIndex,
+  variantMessages,
+  variantModels,
+  activeVariantId,
+  onNavigateVariant,
+  onSelectVariant,
+  showRetry,
+  onRetry,
 }: MessageBubbleProps) {
   const [copied, setCopied] = React.useState(false);
   const [councilRun, setCouncilRun] = React.useState<CouncilRunDetail | null>(null);
@@ -454,6 +905,18 @@ export function MessageBubble({
     setTimeout(() => setCopied(false), 2000);
   };
 
+  // Variant switcher only makes sense under the ACTIVE variant's user message
+  // (ChatView passes the data) — never while streaming or editing.
+  const showVariants =
+    isUser &&
+    !isEditing &&
+    !streamingDisabled &&
+    variantTotal !== undefined &&
+    variantTotal > 1 &&
+    variantIndex !== undefined &&
+    !!variantMessages &&
+    variantMessages.length > 1;
+
   if (message.role === 'system' || message.role === 'tool') return null;
 
   return (
@@ -473,7 +936,12 @@ export function MessageBubble({
       </div>
 
       {/* Content */}
-      <div className="message-bubble-content">
+      <div
+        className="message-bubble-content"
+        // While editing, allow the model/routing dropdowns (which open above the
+        // editor's bottom row) to escape the bubble's overflow:hidden box.
+        style={isUser && isEditing ? { overflow: 'visible' } : undefined}
+      >
         {/* Role label */}
         <div className="message-bubble-role-row">
           <div className="message-bubble-role-left">
@@ -516,33 +984,94 @@ export function MessageBubble({
               </span>
             )}
           </div>
-          {!isUser && displayContent && !isStreaming && (
-            <button
-              type="button"
-              className="message-bubble-copy-btn"
-              onClick={handleCopy}
-              aria-label={copied ? 'Copied' : 'Copy message'}
-              style={{ color: copied ? 'var(--success)' : undefined }}
-            >
-              {copied ? <Check size={11} /> : <Copy size={11} />}
-              {copied ? 'Copied' : 'Copy'}
-            </button>
-          )}
+          <div className="message-bubble-role-actions">
+            {!isUser && displayContent && !isStreaming && (
+              <button
+                type="button"
+                className="message-bubble-copy-btn"
+                onClick={handleCopy}
+                aria-label={copied ? 'Copied' : 'Copy message'}
+                style={{ color: copied ? 'var(--success)' : undefined }}
+              >
+                {copied ? <Check size={11} /> : <Copy size={11} />}
+                {copied ? 'Copied' : 'Copy'}
+              </button>
+            )}
+            {!isUser && showRetry && !isStreaming && (
+              <button
+                type="button"
+                className="message-bubble-action-btn"
+                onClick={onRetry}
+                aria-label="Retry response"
+                title="Retry"
+              >
+                <RotateCcw size={11} />
+              </button>
+            )}
+            {isUser && !isEditing && !isStreaming && !streamingDisabled && (
+              <button
+                type="button"
+                className="message-bubble-action-btn"
+                onClick={onStartEdit}
+                aria-label="Edit message"
+                title="Edit"
+              >
+                <Pencil size={11} />
+                Edit
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Message body */}
         {isUser ? (
           <>
-            <div style={{
-              fontSize: '0.938rem',
-              lineHeight: 1.7,
-              color: 'var(--text-primary)',
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-word',
-            }}>
-              {displayContent}
-            </div>
-            {message.attachments && message.attachments.length > 0 && (
+            <AnimatePresence mode="wait" initial={false}>
+              {isEditing ? (
+                <motion.div
+                  key="edit"
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -6 }}
+                  transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
+                >
+                  <MessageEditEditor
+                    content={editContent ?? ''}
+                    onContentChange={onEditContentChange ?? (() => {})}
+                    modelOverride={editModelOverride ?? null}
+                    onModelOverrideChange={onEditModelOverrideChange ?? (() => {})}
+                    providerRoutingOverride={editProviderRoutingOverride ?? null}
+                    onProviderRoutingOverrideChange={onEditProviderRoutingOverrideChange ?? (() => {})}
+                    agentModel={agentModel}
+                    conversationModel={conversationModel ?? null}
+                    effectiveConversationModel={effectiveConversationModel ?? null}
+                    inheritedProviderRouting={inheritedProviderRouting ?? null}
+                    disabled={streamingDisabled}
+                    onCancel={onCancelEdit ?? (() => {})}
+                    onSubmit={onSubmitEdit ?? (() => {})}
+                  />
+                </motion.div>
+              ) : (
+                <motion.div
+                  key="content"
+                  initial={{ opacity: 0, y: -6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 6 }}
+                  transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
+                >
+                  <div style={{
+                    fontSize: '0.938rem',
+                    lineHeight: 1.7,
+                    color: 'var(--text-primary)',
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                  }}>
+                    {displayContent}
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+            {!isEditing && message.attachments && message.attachments.length > 0 && (
               <div style={{
                 marginTop: '8px',
                 display: 'flex',
@@ -568,6 +1097,18 @@ export function MessageBubble({
                   </>
                 )}
               </div>
+            )}
+            {showVariants && (
+              <VariantSelector
+                index={variantIndex!}
+                total={variantTotal!}
+                variants={variantMessages!}
+                modelsByVariantId={variantModels ?? {}}
+                activeVariantId={activeVariantId}
+                onNavigate={(dir) => onNavigateVariant?.(dir, message.id)}
+                onSelect={onSelectVariant ?? (() => {})}
+                disabled={streamingDisabled}
+              />
             )}
           </>
         ) : isCouncilMessage ? (

@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
+import { backfillMessageTree } from './messageTree.js';
 
 const require = createRequire(import.meta.url);
 
@@ -409,29 +410,37 @@ export function migrate() {
   }
 
   // Migration: make agent_id nullable in conversations for general chat support
-  // SQLite doesn't support ALTER COLUMN, so we need to recreate the table
+  // SQLite doesn't support ALTER COLUMN, so we need to recreate the table.
+  // foreign_keys must be OFF: DROP TABLE conversations is the FK parent of
+  // messages, and with cascading FKs enabled the implicit DELETE would wipe
+  // every message in the database. Same pattern as the tools recreation below.
   type PragmaCol = { name: string; notnull?: number };
   const agentIdCol = convCols.find((c) => c.name === 'agent_id') as PragmaCol | undefined;
   if (agentIdCol && agentIdCol.notnull === 1) {
-    db.exec(`
-      CREATE TABLE conversations_new (
-        id TEXT PRIMARY KEY,
-        user_id TEXT,
-        agent_id TEXT REFERENCES agents(id) ON DELETE CASCADE,
-        title TEXT DEFAULT 'New conversation',
-        model TEXT DEFAULT NULL,
-        provider_routing TEXT DEFAULT NULL,
-        created_at TEXT DEFAULT (datetime('now')),
-        updated_at TEXT DEFAULT (datetime('now'))
-      );
-      CREATE INDEX idx_conversations_new_agent ON conversations_new(agent_id);
-      CREATE INDEX idx_conversations_new_user_id ON conversations_new(user_id);
-      INSERT INTO conversations_new (id, user_id, agent_id, title, model, provider_routing, created_at, updated_at)
-        SELECT id, user_id, agent_id, title, model, provider_routing, created_at, updated_at FROM conversations;
-      DROP TABLE conversations;
-      ALTER TABLE conversations_new RENAME TO conversations;
-    `);
-    console.log('[Agent Studio] Migrated conversations: agent_id is now nullable');
+    db.pragma('foreign_keys = OFF');
+    try {
+      db.exec(`
+        CREATE TABLE conversations_new (
+          id TEXT PRIMARY KEY,
+          user_id TEXT,
+          agent_id TEXT REFERENCES agents(id) ON DELETE CASCADE,
+          title TEXT DEFAULT 'New conversation',
+          model TEXT DEFAULT NULL,
+          provider_routing TEXT DEFAULT NULL,
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX idx_conversations_new_agent ON conversations_new(agent_id);
+        CREATE INDEX idx_conversations_new_user_id ON conversations_new(user_id);
+        INSERT INTO conversations_new (id, user_id, agent_id, title, model, provider_routing, created_at, updated_at)
+          SELECT id, user_id, agent_id, title, model, provider_routing, created_at, updated_at FROM conversations;
+        DROP TABLE conversations;
+        ALTER TABLE conversations_new RENAME TO conversations;
+      `);
+      console.log('[Agent Studio] Migrated conversations: agent_id is now nullable');
+    } finally {
+      db.pragma('foreign_keys = ON');
+    }
   }
 
   // Migration: conversation-level tool/MCP override (tools_overridden flag + link tables)
@@ -902,6 +911,35 @@ export function migrate() {
   const convColsForSkillOverride = db.prepare("PRAGMA table_info(conversations)").all() as { name: string }[];
   if (!convColsForSkillOverride.some((c) => c.name === 'skills_overridden')) {
     db.exec('ALTER TABLE conversations ADD COLUMN skills_overridden INTEGER DEFAULT 0');
+  }
+
+  // --- Message tree: editing / retry / variants / threads ---
+  // Idempotent block: runs only when the columns are missing, so the legacy
+  // backfill below executes exactly once per database.
+  const msgColsTree = db.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
+  const msgColSetTree = new Set(msgColsTree.map((c) => c.name));
+  const convColsTree = db.prepare("PRAGMA table_info(conversations)").all() as { name: string }[];
+  const convColSetTree = new Set(convColsTree.map((c) => c.name));
+  if (!msgColSetTree.has('parent_id') || !convColSetTree.has('active_leaf_id')) {
+    if (!msgColSetTree.has('parent_id')) {
+      db.exec('ALTER TABLE messages ADD COLUMN parent_id TEXT');
+    }
+    if (!msgColSetTree.has('turn_id')) {
+      db.exec('ALTER TABLE messages ADD COLUMN turn_id TEXT');
+    }
+    if (!msgColSetTree.has('variant_seq')) {
+      db.exec('ALTER TABLE messages ADD COLUMN variant_seq INTEGER NOT NULL DEFAULT 1');
+    }
+    if (!convColSetTree.has('active_leaf_id')) {
+      db.exec('ALTER TABLE conversations ADD COLUMN active_leaf_id TEXT');
+    }
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_messages_parent ON messages(parent_id);
+      CREATE INDEX IF NOT EXISTS idx_messages_turn ON messages(turn_id);
+    `);
+    // Backfill legacy linear histories into parent/turn/variant chains (single transaction).
+    backfillMessageTree();
+    console.log('[Agent Studio] Migrated messages to message-tree (parent_id/turn_id/variant_seq)');
   }
 }
 

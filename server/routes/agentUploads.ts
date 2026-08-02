@@ -16,6 +16,7 @@ import type { AuthRequest } from '../middleware/auth.js';
 import { parseProviderRoutingConfig } from '../providerRouting.js';
 import { inferMimeType } from '../utils/mimeTypes.js';
 import { sanitizeFilename } from './agentFiles.js';
+import { buildThreadIds } from '../messageTree.js';
 
 export const RECEIVE_FILE_TIMEOUT_MS = 120_000;
 
@@ -58,8 +59,8 @@ agentUploadsRouter.post(
       }
 
       const conversation = db.prepare(
-        'SELECT id FROM conversations WHERE id = ? AND user_id = ?',
-      ).get(req.params.id, userId);
+        'SELECT id, active_leaf_id FROM conversations WHERE id = ? AND user_id = ?',
+      ).get(req.params.id, userId) as { id: string; active_leaf_id: string | null } | undefined;
       if (!conversation) {
         res.status(404).json({ error: 'Conversation not found' });
         return;
@@ -131,14 +132,31 @@ agentUploadsRouter.post(
       const attachments = JSON.stringify([{ filename, deliveredPath: writtenPath }]);
       const messageId = nanoid();
 
+      // Message-tree: the notice becomes the new active leaf. It is chained to the
+      // current leaf (or the last message when the leaf is missing) and joins the
+      // turn of the nearest user message walked upward from the leaf (its own id if none).
+      const lastMessageId = (db.prepare('SELECT id FROM messages WHERE conversation_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1').get(req.params.id) as { id: string } | undefined)?.id ?? null;
+      const leafId = conversation.active_leaf_id ?? lastMessageId;
+      let turnId: string = messageId;
+      if (leafId) {
+        const chain = buildThreadIds(req.params.id, leafId);
+        for (let i = chain.length - 1; i >= 0; i--) {
+          const row = db.prepare('SELECT turn_id FROM messages WHERE id = ? AND role = ?').get(chain[i], 'user') as { turn_id: string | null } | undefined;
+          if (row?.turn_id) {
+            turnId = row.turn_id;
+            break;
+          }
+        }
+      }
+
       db.transaction(() => {
         db.prepare(`
-          INSERT INTO messages (id, conversation_id, role, content, attachments)
-          VALUES (?, ?, 'user', ?, ?)
-        `).run(messageId, req.params.id, notice, attachments);
+          INSERT INTO messages (id, conversation_id, role, content, attachments, parent_id, turn_id, variant_seq)
+          VALUES (?, ?, 'user', ?, ?, ?, ?, 1)
+        `).run(messageId, req.params.id, notice, attachments, leafId, turnId);
         db.prepare(
-          "UPDATE conversations SET updated_at = datetime('now') WHERE id = ? AND user_id = ?",
-        ).run(req.params.id, userId);
+          "UPDATE conversations SET active_leaf_id = ?, updated_at = datetime('now') WHERE id = ? AND user_id = ?",
+        ).run(messageId, req.params.id, userId);
       })();
 
       const message = db.prepare(`

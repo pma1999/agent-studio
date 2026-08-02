@@ -3,6 +3,7 @@ import { useStore } from '../stores/store';
 import { streamChat } from '../api/client';
 import { conversationsApi } from '../api/client';
 import { streamCouncilChat } from '../api/councilClient';
+import { buildThread, getTurnVariants } from '../utils/threads';
 import type { Message, ChatAttachmentInput, PDFEngine, CouncilConfig, ProviderRoutingConfig } from '../types';
 
 export interface SendMessageOptions {
@@ -15,6 +16,8 @@ export interface SendMessageOptions {
   councilConfig?: CouncilConfig;
   /** When set, server loads full council config (including tool_ids) from DB instead of using councilConfig inline */
   councilMemberId?: string;
+  /** When set, the message is sent as a NEW VARIANT of the target user message's turn (edit/relaunch). */
+  editMessageId?: string;
 }
 
 export function useChat() {
@@ -200,27 +203,70 @@ export function useChat() {
     const providerRouting = options?.providerRouting;
     const invokeAgentId = options?.invokeAgentId;
     const invokeSkillNames = options?.invokeSkillNames;
+    const editMessageId = options?.editMessageId;
 
-    // Add user message to local state immediately
-    const userMsg: Message = {
-      id: `temp-user-${Date.now()}`,
-      conversation_id: activeConversationId,
-      role: 'user',
-      content: content.trim(),
-      created_at: new Date().toISOString(),
-      ...(attachments?.length && { attachments: attachments.map((a) => ({ filename: a.filename })) }),
-    };
-    addMessage(userMsg);
+    const now = new Date().toISOString();
+    const trimmed = content.trim();
 
-    // Add placeholder assistant message
-    const assistantMsg: Message = {
-      id: `temp-assistant-${Date.now()}`,
-      conversation_id: activeConversationId,
-      role: 'assistant',
-      content: '',
-      created_at: new Date().toISOString(),
-    };
-    addMessage(assistantMsg);
+    // Edit / relaunch flow: create a NEW VARIANT of the target message's turn
+    // optimistically (same parent, same turn_id, next variant_seq), switch the
+    // visible leaf to it, and stream with edit_message_id so the server does the
+    // same. loadMessages(silent) in onDone reconciles with the server.
+    let userMsg: Message;
+    let assistantMsg: Message;
+    if (editMessageId) {
+      const store = useStore.getState();
+      const target = store.messages.find((message) => message.id === editMessageId);
+      if (!target) {
+        console.error(`Cannot relaunch: message ${editMessageId} not found in store`);
+        return;
+      }
+      const variants = getTurnVariants(store.messages, target.id);
+      const maxSeq = variants.reduce((max, message) => Math.max(max, message.variant_seq ?? 1), 0);
+      userMsg = {
+        id: `temp-edit-${Date.now()}`,
+        conversation_id: activeConversationId,
+        role: 'user',
+        content: trimmed,
+        parent_id: target.parent_id ?? null,
+        turn_id: target.turn_id ?? null,
+        variant_seq: maxSeq + 1,
+        created_at: now,
+        ...(attachments?.length && { attachments: attachments.map((a) => ({ filename: a.filename })) }),
+      };
+      assistantMsg = {
+        id: `temp-assistant-${Date.now()}`,
+        conversation_id: activeConversationId,
+        role: 'assistant',
+        content: '',
+        parent_id: userMsg.id,
+        turn_id: userMsg.turn_id,
+        created_at: now,
+      };
+      addMessage(userMsg);
+      addMessage(assistantMsg);
+      store.setActiveLeaf(userMsg.id);
+    } else {
+      // Add user message to local state immediately
+      userMsg = {
+        id: `temp-user-${Date.now()}`,
+        conversation_id: activeConversationId,
+        role: 'user',
+        content: trimmed,
+        created_at: now,
+        ...(attachments?.length && { attachments: attachments.map((a) => ({ filename: a.filename })) }),
+      };
+      // Add placeholder assistant message
+      assistantMsg = {
+        id: `temp-assistant-${Date.now()}`,
+        conversation_id: activeConversationId,
+        role: 'assistant',
+        content: '',
+        created_at: now,
+      };
+      addMessage(userMsg);
+      addMessage(assistantMsg);
+    }
 
     // Create AbortController for cancellation
     const controller = new AbortController();
@@ -234,7 +280,7 @@ export function useChat() {
 
     await streamChat(
       activeConversationId,
-      content.trim(),
+      trimmed,
       (chunk) => {
         appendStreamingContent(chunk);
         appendStreamingContentEvent(chunk);
@@ -282,8 +328,52 @@ export function useChat() {
       (data) => updateConversationTitle(data.conversation_id, data.title),
       (data) => appendStreamingToolOutputChunk(data),
       invokeSkillNames,
+      editMessageId,
     );
   }, [activeConversationId, isStreaming, addMessage, setIsStreaming, setStreamingContent, appendStreamingContent, appendStreamingContentEvent, setAbortController, setStreamStartTime, setReasoningContent, appendReasoningContent, appendStreamingReasoningEvent, reasoningOverride, upsertStreamingToolCall, completeStreamingToolCall, appendStreamingToolOutputChunk, resetStreamingActivityEvents, loadMessages, loadConversations, updateConversationTitle, selectedAgentId]);
+
+  /**
+   * Re-launches the turn that produced `messageId` (a user message): streams a new
+   * variant of that turn with the given content. No-op while a stream is active.
+   */
+  const relaunchFromMessage = useCallback(async (
+    messageId: string,
+    opts: { content: string; model?: string | null; providerRouting?: ProviderRoutingConfig | null },
+  ): Promise<void> => {
+    if (useStore.getState().isStreaming) return;
+    await sendMessage(opts.content, {
+      editMessageId: messageId,
+      model: opts.model ?? undefined,
+      providerRouting: opts.providerRouting ?? undefined,
+    });
+  }, [sendMessage]);
+
+  /**
+   * Retries the last assistant response: re-runs the last user turn of the ACTIVE
+   * thread, reusing the model that produced the previous response (falling back to
+   * the user variant's model). No-op when the thread has no user message.
+   */
+  const retryLastAssistant = useCallback(async (): Promise<void> => {
+    const store = useStore.getState();
+    const thread = buildThread(store.messages, store.activeLeafId);
+    const userMsg = [...thread].reverse().find((message) => message.role === 'user');
+    if (!userMsg) return;
+
+    const lastAssistant = [...thread].reverse().find((message) => message.role === 'assistant');
+    const model = lastAssistant?.model ?? userMsg.model ?? null;
+
+    await relaunchFromMessage(userMsg.id, {
+      content: userMsg.content,
+      model,
+      providerRouting: userMsg.provider_routing ?? null,
+    });
+  }, [relaunchFromMessage]);
+
+  /** The visible thread (root → leaf) of the active conversation, per current store state. */
+  const getActiveThread = useCallback((): Message[] => {
+    const store = useStore.getState();
+    return buildThread(store.messages, store.activeLeafId);
+  }, []);
 
   const cancelStream = useCallback(() => {
     const controller = useStore.getState().abortController;
@@ -330,6 +420,9 @@ export function useChat() {
 
   return {
     sendMessage,
+    relaunchFromMessage,
+    retryLastAssistant,
+    getActiveThread,
     cancelStream,
     startNewChat,
     startGeneralChat,

@@ -113,6 +113,8 @@ export interface Conversation {
   mcp_server_ids?: string[];
   skills_overridden?: boolean;
   skill_ids?: string[];
+  /** Leaf id of the visible message tree for this conversation (null/absent when it has no variants). */
+  active_leaf_id?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -151,6 +153,12 @@ export interface Message {
   tool_calls?: ToolCallSpec[];
   model?: string;
   provider_routing?: ProviderRoutingConfig | null;
+  /** Message-tree linking: id of the parent message (null/absent = conversation root). */
+  parent_id?: string | null;
+  /** Id shared by every variant of the same turn (each variant is a role='user' message). */
+  turn_id?: string | null;
+  /** 1-based ordinal of this variant within its turn. */
+  variant_seq?: number;
   processed_by_agent_id?: string | null;
   processed_by_agent_name?: string | null;
   council_run_id?: string | null;

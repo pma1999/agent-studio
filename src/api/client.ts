@@ -181,11 +181,22 @@ export const conversationsApi = {
   delete: (id: string) => request<{ success: boolean }>(`/conversations/${id}`, {
     method: 'DELETE',
   }),
+  /** Moves the visible thread cursor of a conversation to a specific message. */
+  setActiveLeaf: (id: string, messageId: string) => request<{ success: boolean }>(`/conversations/${id}/active-leaf`, {
+    method: 'PUT',
+    body: JSON.stringify({ message_id: messageId }),
+  }),
 };
 
 // Messages
+/** Response of GET /conversations/:id/messages (new contract: also returns the active leaf id). */
+export interface MessagesListResponse {
+  messages: Message[];
+  active_leaf_id: string | null;
+}
+
 export const messagesApi = {
-  list: (conversationId: string) => request<Message[]>(`/conversations/${conversationId}/messages`),
+  list: (conversationId: string) => request<MessagesListResponse>(`/conversations/${conversationId}/messages`),
 };
 
 // Tools
@@ -416,6 +427,9 @@ export async function streamChat(
   onToolOutputChunk?: (data: StreamToolOutputChunkData) => void,
   // Same rule as onToolOutputChunk above: appended last, not inserted earlier.
   invokeSkillNames?: string[],
+  // Same rule as onToolOutputChunk above: appended last, not inserted earlier.
+  /** When set, the request creates a new variant of the target user message's turn (edit/relaunch). */
+  editMessageId?: string,
 ): Promise<void> {
   try {
     const body: Record<string, unknown> = { conversation_id: conversationId, content };
@@ -456,6 +470,9 @@ export async function streamChat(
     }
     if (providerRouting) {
       body.provider_routing = providerRouting;
+    }
+    if (editMessageId) {
+      body.edit_message_id = editMessageId;
     }
 
     // Retry loop for 503 (server restarting during deploy)

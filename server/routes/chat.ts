@@ -51,6 +51,7 @@ import {
   generateConversationTitleWithOpenRouter,
   isAutoConversationTitlesEnabled,
 } from '../conversationTitles.js';
+import { buildThreadIds } from '../messageTree.js';
 
 const router = Router();
 
@@ -83,6 +84,8 @@ interface Conversation {
   /** Per-conversation model override (from conversations.model column). */
   model?: string | null;
   provider_routing?: unknown;
+  /** Message-tree cursor: id of the last message of the currently visible thread. */
+  active_leaf_id?: string | null;
 }
 
 interface Annotation {
@@ -241,8 +244,8 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       res.status(401).json({ error: 'Unauthorized' });
       return;
     }
-    const body = req.body as { conversation_id?: string; content?: string; reasoning?: unknown; attachments?: unknown; pdf_engine?: string; model?: string; provider_routing?: unknown; invoke_agent_id?: string; invoke_skill_names?: unknown; timezone?: string };
-    const { conversation_id, content, reasoning, attachments: attachmentsRaw, pdf_engine: pdfEngineRaw, model: messageModel, provider_routing: messageProviderRoutingRaw, invoke_agent_id, invoke_skill_names, timezone: bodyTimezone } = body;
+    const body = req.body as { conversation_id?: string; content?: string; reasoning?: unknown; attachments?: unknown; pdf_engine?: string; model?: string; provider_routing?: unknown; invoke_agent_id?: string; invoke_skill_names?: unknown; timezone?: string; edit_message_id?: string };
+    const { conversation_id, content, reasoning, attachments: attachmentsRaw, pdf_engine: pdfEngineRaw, model: messageModel, provider_routing: messageProviderRoutingRaw, invoke_agent_id, invoke_skill_names, timezone: bodyTimezone, edit_message_id } = body;
 
     if (!conversation_id || !content) {
       res.status(400).json({ error: 'conversation_id and content are required' });
@@ -348,13 +351,50 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       ? serializeProviderRoutingConfig(effectiveProviderRouting)
       : null;
 
-    // Save user message (content + optional attachments metadata for UI)
+    // Save user message (content + optional attachments metadata for UI).
+    // Message-tree semantics:
+    //  - normal send: new turn (turn_id = own id, variant_seq = 1), parent = active leaf
+    //  - edit/retry (edit_message_id): new variant of the target's turn
+    //    (parent = target's parent, turn_id = target's turn_id, variant_seq = MAX+1).
+    //    Identical content = retry: a new variant is still created.
     const userMsgId = nanoid();
     const attachmentsMeta = attachments.length > 0 ? JSON.stringify(attachments.map((a) => ({ filename: a.filename }))) : null;
-    db.prepare(`
-      INSERT INTO messages (id, conversation_id, role, content, attachments)
-      VALUES (?, ?, 'user', ?, ?)
-    `).run(userMsgId, conversation_id, content, attachmentsMeta);
+
+    // Chain tail of this turn: every assistant/tool message inserted below is
+    // chained via parent_id to the previous insert of the turn.
+    let chainTailId: string = userMsgId;
+    let turnId: string = userMsgId;
+    let variantSeq: number = 1;
+
+    const updateActiveLeaf = (msgId: string) => {
+      db.prepare("UPDATE conversations SET active_leaf_id = ?, updated_at = datetime('now') WHERE id = ? AND user_id = ?").run(msgId, conversation_id, userId);
+    };
+
+    if (edit_message_id) {
+      const editTarget = db.prepare('SELECT id, role, parent_id, turn_id FROM messages WHERE id = ? AND conversation_id = ?').get(edit_message_id, conversation_id) as { id: string; role: string; parent_id: string | null; turn_id: string | null } | undefined;
+      if (!editTarget) {
+        res.status(404).json({ error: 'Message not found' });
+        return;
+      }
+      if (editTarget.role !== 'user') {
+        res.status(400).json({ error: 'Only user messages can be edited or re-run' });
+        return;
+      }
+      const maxSeq = (db.prepare('SELECT COALESCE(MAX(variant_seq), 0) as m FROM messages WHERE turn_id = ?').get(editTarget.turn_id) as { m: number }).m;
+      variantSeq = maxSeq + 1;
+      turnId = editTarget.turn_id ?? editTarget.id;
+      // v1: attachments are not re-sent when editing/retrying.
+      db.prepare(`
+        INSERT INTO messages (id, conversation_id, role, content, attachments, parent_id, turn_id, variant_seq, model)
+        VALUES (?, ?, 'user', ?, NULL, ?, ?, ?, ?)
+      `).run(userMsgId, conversation_id, content, editTarget.parent_id, turnId, variantSeq, messageModel ?? null);
+    } else {
+      db.prepare(`
+        INSERT INTO messages (id, conversation_id, role, content, attachments, parent_id, turn_id, variant_seq, model)
+        VALUES (?, ?, 'user', ?, ?, ?, ?, ?, ?)
+      `).run(userMsgId, conversation_id, content, attachmentsMeta, conversation.active_leaf_id ?? null, userMsgId, 1, messageModel ?? null);
+    }
+    updateActiveLeaf(userMsgId);
 
     // Update conversation title if first message
     const msgCount = db.prepare('SELECT COUNT(*) as cnt FROM messages WHERE conversation_id = ?').get(conversation_id) as { cnt: number };
@@ -382,15 +422,23 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       db.prepare("UPDATE conversations SET updated_at = datetime('now') WHERE id = ? AND user_id = ?").run(conversation_id, userId);
     }
 
-    // Build messages array (include tool_calls, tool role, annotations, reasoning for assistant → skip re-parse PDFs)
+    // Build messages array (include tool_calls, tool role, annotations, reasoning for assistant → skip re-parse PDFs).
+    // History is reconstructed by walking parent_id from the active leaf (thread
+    // semantics — hidden variant branches stay out of the LLM context). The leaf
+    // was just updated to the new user message; buildThreadIds falls back to
+    // created_at ASC defensively if the chain is broken or the leaf is missing.
     const historyRows = db.prepare(`
-      SELECT role, content, tool_call_id, tool_calls, annotations, reasoning_content
+      SELECT id, parent_id, role, content, tool_call_id, tool_calls, annotations, reasoning_content
       FROM messages
       WHERE conversation_id = ?
-      ORDER BY created_at ASC
-    `).all(conversation_id) as { role: string; content: string; tool_call_id: string | null; tool_calls: string | null; annotations: string | null; reasoning_content: string | null }[];
+    `).all(conversation_id) as { id: string; parent_id: string | null; role: string; content: string; tool_call_id: string | null; tool_calls: string | null; annotations: string | null; reasoning_content: string | null }[];
 
-    const history = historyRows.map((row) => {
+    const historyRowById = new Map(historyRows.map((r) => [r.id, r]));
+    const freshLeaf = (db.prepare('SELECT active_leaf_id FROM conversations WHERE id = ?').get(conversation_id) as { active_leaf_id: string | null }).active_leaf_id;
+    const history = buildThreadIds(conversation_id, freshLeaf ?? userMsgId)
+      .map((id) => historyRowById.get(id))
+      .filter((row): row is NonNullable<typeof row> => !!row)
+      .map((row) => {
       if (row.role === 'tool') {
         return { role: 'tool' as const, tool_call_id: row.tool_call_id!, content: row.content || '' };
       }
@@ -651,8 +699,8 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     const saveAssistantMessage = (content: string, reasoning: string, toolCallsJson: string | null, anns: unknown[]) => {
       const assistantMsgId = nanoid();
       db.prepare(`
-        INSERT INTO messages (id, conversation_id, role, content, provider_routing, tokens_used, prompt_tokens, completion_tokens, cost, annotations, reasoning_content, reasoning_tokens, cached_tokens, tool_calls, model, processed_by_agent_id)
-        VALUES (?, ?, 'assistant', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO messages (id, conversation_id, role, content, provider_routing, tokens_used, prompt_tokens, completion_tokens, cost, annotations, reasoning_content, reasoning_tokens, cached_tokens, tool_calls, model, processed_by_agent_id, parent_id, turn_id, variant_seq)
+        VALUES (?, ?, 'assistant', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         assistantMsgId,
         conversation_id,
@@ -670,8 +718,13 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         // Keep the namespaced id for DeepSeek so history/UI shows DeepSeek-direct
         // (the upstream response reports the bare upstream model name).
         provider.id === 'deepseek' ? effectiveModel : (actualModelFromResponse ?? effectiveModel),
-        processedByAgentId
+        processedByAgentId,
+        chainTailId,
+        turnId,
+        variantSeq
       );
+      chainTailId = assistantMsgId;
+      updateActiveLeaf(assistantMsgId);
       return assistantMsgId;
     };
 
@@ -1056,9 +1109,11 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
 
           const toolMsgId = nanoid();
           db.prepare(`
-            INSERT INTO messages (id, conversation_id, role, content, tool_call_id)
-            VALUES (?, ?, 'tool', ?, ?)
-          `).run(toolMsgId, conversation_id, result.output, id);
+            INSERT INTO messages (id, conversation_id, role, content, tool_call_id, parent_id, turn_id, variant_seq)
+            VALUES (?, ?, 'tool', ?, ?, ?, ?, ?)
+          `).run(toolMsgId, conversation_id, result.output, id, chainTailId, turnId, variantSeq);
+          chainTailId = toolMsgId;
+          updateActiveLeaf(toolMsgId);
         }
 
         iteration++;

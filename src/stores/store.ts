@@ -55,6 +55,9 @@ interface AppState {
   loadMessages: (conversationId: string, options?: { silent?: boolean }) => Promise<void>;
   addMessage: (message: Message) => void;
   updateLastAssistantMessage: (content: string) => void;
+  /** Id of the visible thread's leaf message for the active conversation (null when no tree data). */
+  activeLeafId: string | null;
+  setActiveLeaf: (messageId: string | null) => void;
 
   // Chat state
   isStreaming: boolean;
@@ -252,7 +255,16 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
   activeConversationId: null,
-  setActiveConversationId: (id) => set({ activeConversationId: id }),
+  setActiveConversationId: (id) => set((state) => {
+    if (id === state.activeConversationId) return state;
+    // When switching conversations, seed the active leaf from the selected
+    // conversation (the list already carries active_leaf_id), else reset.
+    const conversation = id ? state.conversations.find((c) => c.id === id) : undefined;
+    return {
+      activeConversationId: id,
+      activeLeafId: conversation?.active_leaf_id ?? null,
+    };
+  }),
   updateConversationTitle: (conversationId, title) => set((state) => ({
     conversations: state.conversations.map((conversation) =>
       conversation.id === conversationId
@@ -269,8 +281,8 @@ export const useStore = create<AppState>((set, get) => ({
       set({ messagesLoading: true });
     }
     try {
-      const messages = await messagesApi.list(conversationId);
-      set({ messages, messagesLoading: false });
+      const { messages, active_leaf_id } = await messagesApi.list(conversationId);
+      set({ messages, activeLeafId: active_leaf_id ?? null, messagesLoading: false });
     } catch (err) {
       console.error('Failed to load messages:', err);
       set({ messagesLoading: false });
@@ -287,6 +299,28 @@ export const useStore = create<AppState>((set, get) => ({
     }
     return { messages };
   }),
+  activeLeafId: null,
+  setActiveLeaf: (messageId) => {
+    set({ activeLeafId: messageId });
+    // Persist the cursor only for real (non-null) targets; null is a local reset and
+    // temp-* ids are optimistic placeholders the server doesn't know yet (the chat
+    // POST itself sets the server-side cursor) — sending them would 404 and trigger
+    // a mid-stream reload that wipes the temp messages from the UI.
+    const isTempId = typeof messageId === 'string' && messageId.startsWith('temp-');
+    if (messageId !== null && !isTempId) {
+      const conversationId = get().activeConversationId;
+      if (conversationId) {
+        conversationsApi.setActiveLeaf(conversationId, messageId).catch((err) => {
+          console.error('Failed to set active leaf:', err);
+          // Resync from the server so the local tree matches reality.
+          const currentId = get().activeConversationId;
+          if (currentId) {
+            get().loadMessages(currentId, { silent: true });
+          }
+        });
+      }
+    }
+  },
 
   // Chat state
   isStreaming: false,
