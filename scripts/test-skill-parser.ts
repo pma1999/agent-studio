@@ -88,6 +88,42 @@ const unknown = validateFrontmatter({
 });
 assert.ok(unknown.errors.includes('Unexpected field(s) in frontmatter: version'));
 
+// Third-party skills express `compatibility` in non-string shapes (YAML lists
+// of requirements, booleans, numbers). They must normalize, not reject.
+const listCompat = validateFrontmatter({
+  name: 'valid-name',
+  description: 'A valid description.',
+  compatibility: [
+    { requires: 'send_file tool' },
+    { requires: 'web_fetch tool (for GitHub API calls)' },
+    { requires: 'python3 for the download script' },
+  ],
+});
+assert.deepEqual(listCompat.errors, []);
+assert.equal(
+  listCompat.normalized?.compatibility,
+  'requires: send_file tool\nrequires: web_fetch tool (for GitHub API calls)\nrequires: python3 for the download script',
+);
+assert.deepEqual(
+  validateFrontmatter({ name: 'valid-name', description: 'A valid description.', compatibility: ['a', 'b'] })
+    .normalized?.compatibility,
+  'a\nb',
+);
+assert.deepEqual(
+  validateFrontmatter({ name: 'valid-name', description: 'A valid description.', compatibility: true })
+    .normalized?.compatibility,
+  'true',
+);
+assert.deepEqual(
+  validateFrontmatter({ name: 'valid-name', description: 'A valid description.', compatibility: null }).errors,
+  [],
+);
+assert.equal(
+  validateFrontmatter({ name: 'valid-name', description: 'A valid description.', compatibility: null })
+    .normalized?.compatibility,
+  undefined,
+);
+
 const lenient = parseSkillMd(`---
 name: url-skill
 description: Explain: this value contains an unquoted colon

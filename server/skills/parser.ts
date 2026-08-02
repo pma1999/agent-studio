@@ -136,6 +136,32 @@ function characterCount(value: string): number {
   return Array.from(value).length;
 }
 
+/**
+ * Third-party SKILL.md files frequently express `compatibility` as a YAML
+ * list (e.g. `- requires: <tool>`) or a boolean/number instead of a plain
+ * string. Normalize any of those shapes to a readable multi-line string
+ * instead of rejecting the import. Returns undefined only for absent/null
+ * values.
+ */
+function stringifyCompatibility(value: unknown): string | undefined {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (value === null || value === undefined) return undefined;
+  if (Array.isArray(value)) {
+    const lines: string[] = [];
+    for (const entry of value) {
+      const line = stringifyCompatibility(entry);
+      if (line !== undefined) lines.push(line);
+    }
+    return lines.length > 0 ? lines.join('\n') : undefined;
+  }
+  if (isPlainObject(value)) {
+    const lines = Object.entries(value).map(([key, entry]) => `${key}: ${String(entry)}`);
+    return lines.length > 0 ? lines.join(', ') : undefined;
+  }
+  return String(value);
+}
+
 export function validateFrontmatter(
   fm: RawSkillFrontmatter,
   opts?: { expectedDirectoryName?: string },
@@ -198,13 +224,9 @@ export function validateFrontmatter(
 
   let compatibility: string | undefined;
   if (hasOwn(fm, 'compatibility')) {
-    if (typeof fm.compatibility !== 'string') {
-      errors.push('compatibility must be a string');
-    } else {
-      compatibility = fm.compatibility;
-      if (characterCount(fm.compatibility) > 500) {
-        errors.push('compatibility must be 500 characters or fewer');
-      }
+    compatibility = stringifyCompatibility(fm.compatibility);
+    if (compatibility !== undefined && characterCount(compatibility) > 500) {
+      errors.push('compatibility must be 500 characters or fewer');
     }
   }
 
