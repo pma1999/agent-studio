@@ -612,7 +612,8 @@ pre code {
 
 .markdown-content table {
   border-collapse: collapse;
-  width: 100%;
+  width: max-content;
+  min-width: 100%;
   margin: 0.75em 0;
 }
 
@@ -626,6 +627,75 @@ pre code {
 .markdown-content th {
   background: var(--bg-elevated);
   font-weight: 600;
+}
+
+/* Wide tables live in a horizontally scrollable wrapper (.markdown-table-wrap,
+   rendered by MarkdownContent). The table grows to its content width and the
+   wrapper scrolls; the edge fades are pinned with position: sticky and only
+   shown while there is content beyond (data-fade set from the scroll handler). */
+.markdown-table-wrap {
+  --markdown-table-fade: var(--bg-base);
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  max-width: 100%;
+  border-radius: var(--radius-sm);
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+.markdown-table-wrap::-webkit-scrollbar {
+  height: 4px;
+}
+
+.markdown-table-wrap::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.markdown-table-wrap::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 2px;
+}
+
+.markdown-table-wrap::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+.markdown-table-wrap::before,
+.markdown-table-wrap::after {
+  content: '';
+  position: sticky;
+  display: block;
+  float: left;
+  width: 28px;
+  height: 100%;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+
+.markdown-table-wrap::before {
+  left: 0;
+  background: linear-gradient(to right, var(--markdown-table-fade), transparent);
+}
+
+.markdown-table-wrap::after {
+  right: 0;
+  float: right;
+  background: linear-gradient(to left, var(--markdown-table-fade), transparent);
+}
+
+.markdown-table-wrap[data-fade='right']::after,
+.markdown-table-wrap[data-fade='left']::before,
+.markdown-table-wrap[data-fade='both']::before,
+.markdown-table-wrap[data-fade='both']::after {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .markdown-table-wrap::before,
+  .markdown-table-wrap::after {
+    transition: none;
+  }
 }
 
 .markdown-content hr {
@@ -643,6 +713,13 @@ pre code {
   .markdown-content h1 { font-size: 1.35rem; }
   .markdown-content h2 { font-size: 1.2rem; }
   .markdown-content h3 { font-size: 1.05rem; }
+
+  /* Compact cells on small screens; font-size stays inherited so headers
+     remain legible. */
+  .markdown-content th,
+  .markdown-content td {
+    padding: var(--space-xs) var(--space-sm);
+  }
 }
 
 /* ---------- Conversation delete button reveal ---------- */

@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useRef, useLayoutEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
@@ -79,6 +79,47 @@ function CodeBlock({ children, className, ...props }: React.HTMLAttributes<HTMLE
   );
 }
 
+function MarkdownTable({ children, ...props }: React.HTMLAttributes<HTMLTableElement>) {
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  // Toggles `data-fade` on the wrapper so the CSS edge fades only appear while
+  // there is content beyond the edge: 'right' (more to the right), 'left'
+  // (more to the left), 'both', or 'none' when the table fits.
+  useLayoutEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+
+    const updateFade = () => {
+      const { scrollLeft, scrollWidth, clientWidth } = el;
+      const overflow = scrollWidth - clientWidth;
+      if (overflow <= 1) {
+        el.dataset.fade = 'none';
+      } else if (scrollLeft <= 1) {
+        el.dataset.fade = 'right';
+      } else if (scrollLeft + clientWidth >= scrollWidth - 1) {
+        el.dataset.fade = 'left';
+      } else {
+        el.dataset.fade = 'both';
+      }
+    };
+
+    updateFade();
+    el.addEventListener('scroll', updateFade, { passive: true });
+    const observer = new ResizeObserver(updateFade);
+    observer.observe(el);
+    return () => {
+      el.removeEventListener('scroll', updateFade);
+      observer.disconnect();
+    };
+  }, []);
+
+  return (
+    <div ref={wrapRef} className="markdown-table-wrap">
+      <table {...props}>{children}</table>
+    </div>
+  );
+}
+
 interface MarkdownContentProps {
   content: string;
 }
@@ -86,6 +127,7 @@ interface MarkdownContentProps {
 export function MarkdownContent({ content }: MarkdownContentProps) {
   const components = useMemo(() => ({
     code: CodeBlock as any,
+    table: MarkdownTable as any,
   }), []);
 
   return (
