@@ -706,6 +706,8 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     let maxEffortFallbackDone = false;
     const effortMaxRejected = (msg: string): boolean =>
       /unsupported value: ?'?max|'max' is not supported|max is not supported/i.test(msg);
+    const shouldRetryMaxEffort = (errorMsg: string): boolean =>
+      requestedMaxEffort && !maxEffortFallbackDone && effortMaxRejected(errorMsg);
     const degradeMaxEffort = (): void => {
       maxEffortFallbackDone = true;
       const reasoningParam = requestBody.reasoning as Record<string, unknown> | undefined;
@@ -921,7 +923,8 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
           } catch {
             errorMsg = errorText || errorMsg;
           }
-          if (requestedMaxEffort && !maxEffortFallbackDone && effortMaxRejected(errorMsg)) {
+          if (shouldRetryMaxEffort(errorMsg)) {
+            if (clientDisconnected) return;
             console.warn('[chat] Model rejected reasoning effort "max", retrying with "xhigh":', errorMsg);
             degradeMaxEffort();
             continue;
@@ -931,7 +934,8 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
           res.end();
           return;
         }
-      let data: { choices?: { message?: { content?: string; reasoning_content?: string }; usage?: unknown }[]; usage?: Record<string, unknown> };
+
+        let data: { choices?: { message?: { content?: string; reasoning_content?: string }; usage?: unknown }[]; usage?: Record<string, unknown> };
       try {
         data = (await apiRes.json()) as typeof data;
       } catch {
@@ -1030,7 +1034,8 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         } catch {
           errorMsg = errorText || errorMsg;
         }
-        if (requestedMaxEffort && !maxEffortFallbackDone && effortMaxRejected(errorMsg)) {
+        if (shouldRetryMaxEffort(errorMsg)) {
+          if (clientDisconnected) return;
           console.warn('[chat] Model rejected reasoning effort "max", retrying with "xhigh":', errorMsg);
           degradeMaxEffort();
           continue;
