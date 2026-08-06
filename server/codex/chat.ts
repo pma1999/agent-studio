@@ -85,15 +85,17 @@ const TOOL_NAME_RE = /^[a-zA-Z0-9_-]{1,128}$/;
 /**
  * Maps the app's reasoning-effort vocabulary to the values Codex models accept
  * ('none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'). The app's 'minimal'
- * level does not exist upstream; 'low' is the closest non-zero option.
+ * level does not exist upstream; 'low' is the closest non-zero option. 'none'
+ * is passed through explicitly so "thinking off" really disables reasoning
+ * instead of falling back to the thread's default effort.
  */
 export function mapCodexEffort(effort: string | null | undefined): string | null {
   switch (effort) {
     case 'none':
-      return null; // caller omits the field entirely
+      return 'none';
     case 'xhigh':
     case 'max':
-      return 'xhigh';
+      return effort;
     case 'high':
       return 'high';
     case 'medium':
@@ -432,8 +434,10 @@ export async function runCodexTurn(input: CodexTurnInput): Promise<CodexTurnResu
       if (effort) turnParams.effort = effort;
       // The app-server only streams item/reasoning/summaryTextDelta when the
       // turn requests summaries; 'auto' lets the server decide per model
-      // (OpenAI models get readable reasoning summaries).
-      if (input.reasoningEffort != null) turnParams.summary = 'auto';
+      // (OpenAI models get readable reasoning summaries). Summaries are gated
+      // on the mapped effort so 'none' neither requests them nor leaks the
+      // thread's default effort.
+      if (effort && effort !== 'none') turnParams.summary = 'auto';
       if (input.outputSchema && typeof input.outputSchema === 'object') {
         turnParams.outputSchema = input.outputSchema;
       }

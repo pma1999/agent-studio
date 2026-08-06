@@ -57,6 +57,7 @@ const EFFORT_OPTIONS: { value: ReasoningEffort; label: string; short: string }[]
   { value: 'medium', label: 'Medium', short: 'Med' },
   { value: 'high', label: 'High', short: 'High' },
   { value: 'xhigh', label: 'Maximum', short: 'Max' },
+  { value: 'max', label: 'Ultra', short: 'Ultra' },
 ];
 
 const BUILTIN_TOOL_NAMES = new Set(['web_search', 'get_current_time', 'web_fetch', 'run_command', 'read_file', 'write_file', 'edit_file', 'delete_file', 'list_directory']);

@@ -677,6 +677,7 @@ function GeneralChatSettingsSection() {
     { value: 'medium', label: 'Medium', description: 'Balanced' },
     { value: 'high', label: 'High', description: 'Deep analysis' },
     { value: 'xhigh', label: 'Maximum', description: 'Best quality' },
+    { value: 'max', label: 'Ultra', description: 'Max effort (ChatGPT)' },
   ];
 
   return (

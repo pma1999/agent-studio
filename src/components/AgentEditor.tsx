@@ -47,7 +47,8 @@ const EFFORT_LEVELS: { value: ReasoningEffort; label: string; desc: string }[] =
   { value: 'low', label: 'Low', desc: '~20% tokens' },
   { value: 'medium', label: 'Medium', desc: '~50% tokens' },
   { value: 'high', label: 'High', desc: '~80% tokens' },
-  { value: 'xhigh', label: 'Max', desc: '~95% tokens' },
+  { value: 'xhigh', label: 'Maximum', desc: '~95% tokens' },
+  { value: 'max', label: 'Ultra', desc: 'Max effort (ChatGPT)' },
 ];
 
 export function AgentEditor() {

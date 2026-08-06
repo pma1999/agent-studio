@@ -162,6 +162,7 @@ export function resolveAssistantHistoryContent(content: string, hasToolCalls: bo
 /** Maps the app's reasoning-effort vocabulary to DeepSeek's accepted values. */
 export function mapDeepSeekEffort(effort: string | null | undefined): 'high' | 'max' | undefined {
   switch (effort) {
+    case 'max':
     case 'xhigh':
       return 'max';
     case 'high':

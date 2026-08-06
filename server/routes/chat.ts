@@ -632,9 +632,12 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     if (provider.supportsReasoningParam) {
       if (reasoningEnabled) {
         const reasoningParam: Record<string, unknown> = {};
-        if (reasoningEffort && reasoningEffort !== 'none') {
-          reasoningParam.effort = reasoningEffort;
-        } else if (reasoningEffort === 'none') {
+        // 'max' is a ChatGPT/Codex-only effort tier; clamp it for other
+        // providers so an Ultra selection never 400s on OpenRouter models.
+        const safeEffort = reasoningEffort === 'max' && provider.id !== 'codex' ? 'xhigh' : reasoningEffort;
+        if (safeEffort && safeEffort !== 'none') {
+          reasoningParam.effort = safeEffort;
+        } else if (safeEffort === 'none') {
           reasoningParam.effort = 'none';
         }
         if (reasoningMaxTokens && reasoningMaxTokens > 0) {

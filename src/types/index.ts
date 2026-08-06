@@ -4,7 +4,7 @@ export type ProviderRoutingConfig =
   | { mode: 'auto' }
   | { mode: 'provider'; provider_slug: string; allow_fallbacks: boolean };
 
-export type ReasoningEffort = 'xhigh' | 'high' | 'medium' | 'low' | 'minimal' | 'none';
+export type ReasoningEffort = 'max' | 'xhigh' | 'high' | 'medium' | 'low' | 'minimal' | 'none';
 
 export interface ReasoningConfig {
   enabled: boolean;
