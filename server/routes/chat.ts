@@ -1030,6 +1030,11 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         } catch {
           errorMsg = errorText || errorMsg;
         }
+        if (requestedMaxEffort && !maxEffortFallbackDone && effortMaxRejected(errorMsg)) {
+          console.warn('[chat] Model rejected reasoning effort "max", retrying with "xhigh":', errorMsg);
+          degradeMaxEffort();
+          continue;
+        }
         res.write(`data: ${JSON.stringify({ error: errorMsg })}\n\n`);
         res.write('data: [DONE]\n\n');
         res.end();
