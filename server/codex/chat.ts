@@ -430,6 +430,10 @@ export async function runCodexTurn(input: CodexTurnInput): Promise<CodexTurnResu
       if (input.model) turnParams.model = input.model;
       const effort = mapCodexEffort(input.reasoningEffort);
       if (effort) turnParams.effort = effort;
+      // The app-server only streams item/reasoning/summaryTextDelta when the
+      // turn requests summaries; 'auto' lets the server decide per model
+      // (OpenAI models get readable reasoning summaries).
+      if (input.reasoningEffort != null) turnParams.summary = 'auto';
       if (input.outputSchema && typeof input.outputSchema === 'object') {
         turnParams.outputSchema = input.outputSchema;
       }
