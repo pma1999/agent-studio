@@ -23,7 +23,6 @@ import {
   AUTO_CONVERSATION_TITLES_SETTING_KEY,
   createFallbackConversationTitle,
   generateConversationTitleWithOpenRouter,
-  generateConversationTitleWithCodex,
   isAutoConversationTitlesEnabled,
 } from '../conversationTitles.js';
 
@@ -309,8 +308,6 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
           userMessage: content,
           systemPrompt: agent.system_prompt,
         }).then(titleFallback);
-      } else if (titleEnabled && isUserAllowed(userId)) {
-        generatedTitlePromise = generateConversationTitleWithCodex(userId, content, agent.system_prompt).then(titleFallback);
       }
     } else {
       db.prepare("UPDATE conversations SET updated_at = datetime('now') WHERE id = ? AND user_id = ?").run(conversation_id, userId);
