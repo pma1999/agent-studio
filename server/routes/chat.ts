@@ -632,12 +632,12 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     if (provider.supportsReasoningParam) {
       if (reasoningEnabled) {
         const reasoningParam: Record<string, unknown> = {};
-        // 'max' is a ChatGPT/Codex-only effort tier; clamp it for other
-        // providers so an Ultra selection never 400s on OpenRouter models.
-        const safeEffort = reasoningEffort === 'max' && provider.id !== 'codex' ? 'xhigh' : reasoningEffort;
-        if (safeEffort && safeEffort !== 'none') {
-          reasoningParam.effort = safeEffort;
-        } else if (safeEffort === 'none') {
+        // 'max' is supported by some OpenRouter models only; it is sent
+        // as-is and degraded to 'xhigh' with a single retry when the model
+        // rejects it (see effortMaxRejected handling below).
+        if (reasoningEffort && reasoningEffort !== 'none') {
+          reasoningParam.effort = reasoningEffort;
+        } else if (reasoningEffort === 'none') {
           reasoningParam.effort = 'none';
         }
         if (reasoningMaxTokens && reasoningMaxTokens > 0) {
@@ -699,6 +699,20 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         requestBody.plugins = [...plugins, { id: 'response-healing' }];
       }
     }
+
+    // Ultra effort ('max') is model-dependent on OpenRouter: send it as-is and
+    // retry once with 'xhigh' when the model rejects the value.
+    const requestedMaxEffort = reasoningEnabled && reasoningEffort === 'max' && provider.id !== 'codex';
+    let maxEffortFallbackDone = false;
+    const effortMaxRejected = (msg: string): boolean =>
+      /unsupported value: ?'?max|'max' is not supported|max is not supported/i.test(msg);
+    const degradeMaxEffort = (): void => {
+      maxEffortFallbackDone = true;
+      const reasoningParam = requestBody.reasoning as Record<string, unknown> | undefined;
+      if (reasoningParam && typeof reasoningParam === 'object') {
+        reasoningParam.effort = 'xhigh';
+      }
+    };
 
     // Helpers for persistence and SSE (annotations can be citation or file type from OpenRouter)
     let totalTokens = 0;
@@ -871,46 +885,52 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     // Non-streaming path (Response Healing): single request, then forward full response as SSE
     if (requestBody.stream === false) {
       requestBody.messages = messages;
-      abortController = new AbortController();
-      const fetchTimeout = setTimeout(() => {
-        if (abortController) abortController.abort();
-      }, 120_000);
-      let apiRes: globalThis.Response;
-      try {
-        apiRes = await fetch(apiUrl, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(requestBody),
-          signal: abortController.signal,
-        });
-        clearTimeout(fetchTimeout);
-      } catch (fetchErr: unknown) {
-        clearTimeout(fetchTimeout);
-        const err = fetchErr as Error;
-        if (err.name === 'AbortError') {
-          if (!clientDisconnected) {
-            res.write(`data: ${JSON.stringify({ error: 'Request timed out or was cancelled' })}\n\n`);
-            res.write('data: [DONE]\n\n');
-            res.end();
+      while (true) {
+        abortController = new AbortController();
+        const fetchTimeout = setTimeout(() => {
+          if (abortController) abortController.abort();
+        }, 120_000);
+        let apiRes: globalThis.Response;
+        try {
+          apiRes = await fetch(apiUrl, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(requestBody),
+            signal: abortController.signal,
+          });
+          clearTimeout(fetchTimeout);
+        } catch (fetchErr: unknown) {
+          clearTimeout(fetchTimeout);
+          const err = fetchErr as Error;
+          if (err.name === 'AbortError') {
+            if (!clientDisconnected) {
+              res.write(`data: ${JSON.stringify({ error: 'Request timed out or was cancelled' })}\n\n`);
+              res.write('data: [DONE]\n\n');
+              res.end();
+            }
+            return;
           }
+          throw fetchErr;
+        }
+        if (!apiRes.ok) {
+          const errorText = await apiRes.text();
+          let errorMsg = `API error (${apiRes.status})`;
+          try {
+            const errorJson = JSON.parse(errorText);
+            errorMsg = errorJson.error?.message || errorMsg;
+          } catch {
+            errorMsg = errorText || errorMsg;
+          }
+          if (requestedMaxEffort && !maxEffortFallbackDone && effortMaxRejected(errorMsg)) {
+            console.warn('[chat] Model rejected reasoning effort "max", retrying with "xhigh":', errorMsg);
+            degradeMaxEffort();
+            continue;
+          }
+          res.write(`data: ${JSON.stringify({ error: errorMsg })}\n\n`);
+          res.write('data: [DONE]\n\n');
+          res.end();
           return;
         }
-        throw fetchErr;
-      }
-      if (!apiRes.ok) {
-        const errorText = await apiRes.text();
-        let errorMsg = `API error (${apiRes.status})`;
-        try {
-          const errorJson = JSON.parse(errorText);
-          errorMsg = errorJson.error?.message || errorMsg;
-        } catch {
-          errorMsg = errorText || errorMsg;
-        }
-        res.write(`data: ${JSON.stringify({ error: errorMsg })}\n\n`);
-        res.write('data: [DONE]\n\n');
-        res.end();
-        return;
-      }
       let data: { choices?: { message?: { content?: string; reasoning_content?: string }; usage?: unknown }[]; usage?: Record<string, unknown> };
       try {
         data = (await apiRes.json()) as typeof data;
@@ -953,6 +973,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       sendDoneEvent([]);
       res.end();
       return;
+      }
     }
 
     abortController = new AbortController();
