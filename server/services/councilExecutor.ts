@@ -7,6 +7,7 @@ import type {
   ToolCallSpec,
   ToolResultRecord,
 } from '../types.js';
+import type { McpConnection } from '../mcp/index.js';
 import { runTool, toOpenRouterTools } from '../tools/index.js';
 import { parseReasoningToolCalls } from '../utils/parseReasoningToolCalls.js';
 import {
@@ -21,10 +22,12 @@ import {
   toUpstreamModelId,
   assistantReasoningField,
   computeDeepSeekCost,
+  resolveProviderId,
   type ProviderConfig,
   type ProviderId,
 } from '../providers/index.js';
 import { injectDateTimeIntoCurrentTurn } from '../dateTimeContext.js';
+import { runCodexTurn } from '../codex/chat.js';
 
 const MEMBER_TIMEOUT_MS = 240000; // 4 minutes per member
 const SYNTHESIS_TIMEOUT_MS = 240000; // 4 minutes for synthesis
@@ -328,6 +331,11 @@ export class CouncilExecutor {
     index: number,
     options: CouncilExecutionOptions
   ): Promise<Omit<MemberResult, 'responseTimeMs' | 'status'>> {
+    // ChatGPT (Codex) members: bridge the member turn to the user's app-server.
+    if (resolveProviderId(modelId) === 'codex') {
+      return this.executeMemberStreamCodex(modelId, options);
+    }
+
     const ep = this.resolveEndpoint(modelId);
     const headers = ep.headers;
 
@@ -586,6 +594,51 @@ export class CouncilExecutor {
     };
   }
 
+  private async executeMemberStreamCodex(
+    modelId: string,
+    options: CouncilExecutionOptions
+  ): Promise<Omit<MemberResult, 'responseTimeMs' | 'status'>> {
+    const upstreamModel = toUpstreamModelId(modelId);
+    const messages: Array<{ role: string; content?: string | unknown[] | null; tool_call_id?: string | null; tool_calls?: unknown[] | null }> = [
+      { role: 'system', content: options.systemPrompt },
+      ...(options.messageHistory as Array<{ role: string; content?: string | unknown[] | null }>),
+    ];
+
+    const result = await runCodexTurn({
+      userId: options.userId,
+      conversationId: null,
+      threadId: null,
+      systemPrompt: options.systemPrompt,
+      messages,
+      model: upstreamModel,
+      tools: options.tools || [],
+      mcpClients: options.mcpClients as Map<string, McpConnection> | undefined,
+      signal: options.signal,
+    });
+
+    return {
+      modelId,
+      providerRouting: { mode: 'auto' },
+      content: result.content,
+      reasoningContent: result.reasoning || undefined,
+      tokensUsed: result.totalTokens,
+      promptTokens: result.inputTokens,
+      completionTokens: result.outputTokens,
+      reasoningTokens: result.reasoningOutputTokens,
+      cost: result.cost,
+      toolCalls: result.toolCalls.length > 0
+        ? result.toolCalls.map((tc) => ({
+            id: tc.id,
+            type: 'function' as const,
+            function: { name: tc.name, arguments: tc.arguments },
+          }))
+        : undefined,
+      toolResults: result.toolCalls.length > 0
+        ? result.toolCalls.map((tc) => ({ id: tc.id, content: '' }))
+        : undefined,
+    };
+  }
+
   private async synthesize(
     memberResults: MemberResult[],
     options: CouncilExecutionOptions
@@ -603,6 +656,11 @@ export class CouncilExecutor {
 
     // Build synthesis prompt
     const synthesisPrompt = this.buildSynthesisPrompt(successfulResults, options.content);
+
+    // ChatGPT (Codex) synthesizer: bridge through the user's app-server.
+    if (resolveProviderId(synthesizerModel) === 'codex') {
+      return this.synthesizeCodex(synthesisPrompt, synthesizerModel, options);
+    }
 
     const ep = this.resolveEndpoint(synthesizerModel);
     const headers = ep.headers;
@@ -743,6 +801,53 @@ export class CouncilExecutor {
   }
 
   /**
+   * Codex-backed synthesis: streams chunks to the client exactly like the
+   * generic streaming path (via options.onSynthesisChunk).
+   */
+  private async synthesizeCodex(
+    synthesisPrompt: string,
+    synthesizerModel: string,
+    options: CouncilExecutionOptions
+  ): Promise<SynthesisResult> {
+    const startTime = Date.now();
+    const messages = [
+      { role: 'user' as const, content: synthesisPrompt },
+    ];
+
+    const result = await runCodexTurn({
+      userId: options.userId,
+      conversationId: null,
+      threadId: null,
+      systemPrompt: 'You are a synthesis expert. Your task is to analyze multiple AI model responses and create a unified, comprehensive answer.',
+      messages,
+      model: toUpstreamModelId(synthesizerModel),
+      tools: [],
+      mcpClients: options.mcpClients as Map<string, McpConnection> | undefined,
+      signal: options.signal,
+      emit: (evt) => {
+        const chunk = evt.content;
+        if (typeof chunk === 'string' && chunk) {
+          options.onSynthesisChunk(chunk);
+        }
+      },
+    });
+
+    const responseTimeMs = Date.now() - startTime;
+    console.log(`   ✅ Synthesis Complete (Codex): ${result.totalTokens.toLocaleString()} tokens | ${(responseTimeMs / 1000).toFixed(1)}s`);
+
+    return {
+      content: result.content,
+      reasoningContent: result.reasoning || undefined,
+      tokensUsed: result.totalTokens,
+      promptTokens: result.inputTokens,
+      completionTokens: result.outputTokens,
+      cost: result.cost,
+      responseTimeMs,
+      providerRouting: { mode: 'auto' },
+    };
+  }
+
+  /**
    * Single request to OpenRouter for comparison JSON (structured output).
    * Returns raw content string or throws on API error / missing content.
    */
@@ -751,8 +856,26 @@ export class CouncilExecutor {
     maxTokens: number,
     synthesizerModel: string,
     providerRouting?: ProviderRoutingConfig | null,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    userId?: string
   ): Promise<string> {
+    // ChatGPT (Codex) synthesizer: structured output via turn outputSchema.
+    if (resolveProviderId(synthesizerModel) === 'codex' && userId) {
+      const result = await runCodexTurn({
+        userId,
+        conversationId: null,
+        threadId: null,
+        systemPrompt: 'You are an analyst. Output only the JSON object that matches the provided schema.',
+        messages: [{ role: 'user', content: messages[0]?.content ?? '' }],
+        model: toUpstreamModelId(synthesizerModel),
+        outputSchema: COUNCIL_COMPARISON_JSON_SCHEMA.schema as Record<string, unknown>,
+        tools: [],
+        signal,
+      });
+      const raw = result.content.trim();
+      if (!raw) throw new Error('Comparison API returned no content');
+      return raw;
+    }
     const ep = this.resolveEndpoint(synthesizerModel);
     const providerPreference = ep.provider.supportsProviderRouting
       ? buildOpenRouterProviderPreference(providerRouting)
@@ -824,7 +947,8 @@ export class CouncilExecutor {
     userQuery: string,
     synthesizerModel: string,
     providerRouting?: ProviderRoutingConfig | null,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    userId?: string
   ): Promise<string | null> {
     // Structured comparison needs json_schema response_format (OpenRouter only).
     // For other providers (e.g. a DeepSeek synthesizer) skip gracefully — council still completes.
@@ -869,7 +993,8 @@ Output only the JSON object that matches the schema. Use the exact model_id valu
         COMPARISON_EXTRACTION_MAX_TOKENS,
         synthesizerModel,
         normalizedProviderRouting,
-        signal
+        signal,
+        userId
       );
     } catch (requestError) {
       if (requestError instanceof Error && requestError.name === 'AbortError') {
@@ -897,7 +1022,8 @@ Output only the JSON object that matches the schema. Use the exact model_id valu
           COMPARISON_EXTRACTION_MAX_TOKENS,
           synthesizerModel,
           normalizedProviderRouting,
-          signal
+          signal,
+          userId
         );
         const result = this.parseComparisonJson(repairRaw);
         console.log(`   📊 Comparison extraction OK after repair`);

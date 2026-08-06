@@ -448,6 +448,12 @@ export function migrate() {
   if (!convColsForToolOverride.some((c) => c.name === 'tools_overridden')) {
     db.exec('ALTER TABLE conversations ADD COLUMN tools_overridden INTEGER DEFAULT 0');
   }
+  // Migration: per-conversation Codex thread id (ChatGPT provider). Must run
+  // after the conversations table recreation above or the column would be lost.
+  const convColsForCodex = db.prepare("PRAGMA table_info(conversations)").all() as { name: string }[];
+  if (!convColsForCodex.some((c) => c.name === 'codex_thread_id')) {
+    db.exec('ALTER TABLE conversations ADD COLUMN codex_thread_id TEXT DEFAULT NULL');
+  }
   db.exec(`
     CREATE TABLE IF NOT EXISTS conversation_tools (
       conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,

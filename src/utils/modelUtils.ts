@@ -1,4 +1,13 @@
-import { DEEPSEEK_PREFIX, DEEPSEEK_DIRECT_GROUP, DEEPSEEK_ACCENT, isDeepSeekDirectModel } from './providers';
+import {
+  DEEPSEEK_PREFIX,
+  DEEPSEEK_DIRECT_GROUP,
+  DEEPSEEK_ACCENT,
+  isDeepSeekDirectModel,
+  CODEX_PREFIX,
+  CODEX_DIRECT_GROUP,
+  CODEX_ACCENT,
+  isCodexModel,
+} from './providers';
 
 export const FAVORITES_STORAGE_KEY = 'agent-studio:favorite-models';
 export const RECENT_STORAGE_KEY = 'modelSelector.recent';
@@ -8,6 +17,8 @@ export const MAX_RECENT = 5;
 export function getModelAuthor(id: string): string {
   // DeepSeek-direct models (`deepseek:...`) group separately from OpenRouter's `deepseek/...` slugs.
   if (isDeepSeekDirectModel(id)) return DEEPSEEK_DIRECT_GROUP;
+  // ChatGPT (Codex) models (`codex:...`) group under their own label.
+  if (isCodexModel(id)) return CODEX_DIRECT_GROUP;
   const slash = id.indexOf('/');
   return slash > 0 ? id.substring(0, slash) : 'other';
 }
@@ -15,6 +26,7 @@ export function getModelAuthor(id: string): string {
 /** Short display name from model ID e.g. "openai/gpt-4o" -> "gpt-4o", "deepseek:deepseek-v4-pro" -> "deepseek-v4-pro" */
 export function formatModelId(modelId: string): string {
   if (modelId.startsWith(DEEPSEEK_PREFIX)) return modelId.slice(DEEPSEEK_PREFIX.length);
+  if (modelId.startsWith(CODEX_PREFIX)) return modelId.slice(CODEX_PREFIX.length);
   const parts = modelId.split('/');
   if (parts.length > 1) return parts[parts.length - 1];
   return modelId;
@@ -28,6 +40,7 @@ const AUTHOR_DISPLAY_NAMES: Record<string, string> = {
   mistralai: 'Mistral',
   deepseek: 'DeepSeek',
   [DEEPSEEK_DIRECT_GROUP]: 'DeepSeek · Direct',
+  [CODEX_DIRECT_GROUP]: 'ChatGPT · Codex',
   microsoft: 'Microsoft',
   amazon: 'Amazon',
   cohere: 'Cohere',
@@ -48,6 +61,7 @@ const AUTHOR_COLORS: Record<string, string> = {
   mistralai: '#f97316',
   deepseek: '#4f46e5',
   [DEEPSEEK_DIRECT_GROUP]: DEEPSEEK_ACCENT,
+  [CODEX_DIRECT_GROUP]: CODEX_ACCENT,
   microsoft: '#00a4ef',
   amazon: '#ff9900',
   cohere: '#ff6b6b',
@@ -109,6 +123,7 @@ export function formatContext(length: number): string {
 
 export const PROVIDER_PRIORITY = [
   DEEPSEEK_DIRECT_GROUP,
+  CODEX_DIRECT_GROUP,
   'openai',
   'anthropic',
   'google',

@@ -24,6 +24,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
     "@mozilla/readability": "^0.6.0",
+    "@openai/codex": "^0.146.1",
     "adm-zip": "^0.5.16",
     "bcrypt": "^6.0.0",
     "better-sqlite3": "^11.7.0",

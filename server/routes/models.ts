@@ -3,6 +3,7 @@ import { AuthRequest } from '../middleware/auth.js';
 import { getSettingValue } from './settings.js';
 import { normalizeOpenRouterEndpoints } from '../providerRouting.js';
 import { DEEPSEEK_BASE_URL, DEEPSEEK_CATALOG } from '../providers/index.js';
+import { listChatgptModels, CodexForbiddenError } from '../codex/instanceManager.js';
 
 const router = Router();
 
@@ -122,6 +123,31 @@ router.get('/deepseek', (_req: AuthRequest, res: Response) => {
   res.json({ data: DEEPSEEK_CATALOG });
 });
 
+// GET /api/models/codex - Models available to the user's connected ChatGPT account
+const codexModelsCache = new Map<string, { data: unknown[]; timestamp: number }>();
+const CODEX_MODELS_CACHE_TTL = 60_000; // 1 minute
+
+router.get('/codex', async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.userId;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const cached = codexModelsCache.get(userId);
+    if (cached && Date.now() - cached.timestamp < CODEX_MODELS_CACHE_TTL) {
+      return res.json({ data: cached.data });
+    }
+
+    const models = await listChatgptModels(userId);
+    codexModelsCache.set(userId, { data: models, timestamp: Date.now() });
+    res.json({ data: models });
+  } catch (err) {
+    if (err instanceof CodexForbiddenError) {
+      return res.status(403).json({ error: err.message });
+    }
+    console.error('Error fetching Codex models:', err);
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to fetch Codex models' });
+  }
+});
 // GET /api/models/deepseek/validate - Verify the saved DeepSeek key and report balance
 router.get('/deepseek/validate', async (req: AuthRequest, res: Response) => {
   try {

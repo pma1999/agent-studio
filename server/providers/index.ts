@@ -10,16 +10,18 @@
  *
  *   - OpenRouter models keep their native ids: `anthropic/claude-3.5-sonnet`, `openrouter/auto`.
  *   - DeepSeek-direct models use the `deepseek:` prefix: `deepseek:deepseek-v4-flash`.
+ *   - ChatGPT (Codex app-server) models use the `codex:` prefix: `codex:gpt-5.1-codex`.
  *
  * `resolveProviderId` decides routing; `toUpstreamModelId` strips the prefix
  * before the id is sent upstream. The colon cleanly disambiguates from
  * OpenRouter's own `deepseek/...` slugs.
  */
 
-export type ProviderId = 'openrouter' | 'deepseek';
+export type ProviderId = 'openrouter' | 'deepseek' | 'codex';
 
 export const DEEPSEEK_PREFIX = 'deepseek:';
 export const DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
+export const CODEX_PREFIX = 'codex:';
 
 export interface ProviderConfig {
   id: ProviderId;
@@ -72,19 +74,48 @@ const DEEPSEEK_CONFIG: ProviderConfig = {
   supportsJsonSchema: false,
 };
 
+/**
+ * ChatGPT (Codex app-server). There is no chat-completions URL or API key: the
+ * backend bridges to a per-user `codex app-server` process over JSON-RPC/stdio
+ * and usage is billed to the user's ChatGPT plan. apiKeySetting is left empty
+ * so generic key lookups fail closed; the codex code paths check the account
+ * state instead. Structured output is supported via turn `outputSchema`.
+ */
+const CODEX_CONFIG: ProviderConfig = {
+  id: 'codex',
+  label: 'ChatGPT (Codex)',
+  chatCompletionsUrl: '',
+  apiKeySetting: '',
+  buildHeaders: () => ({}),
+  supportsProviderRouting: false,
+  supportsPlugins: false,
+  supportsReasoningParam: false,
+  supportsJsonSchema: true,
+};
+
 const CONFIGS: Record<ProviderId, ProviderConfig> = {
   openrouter: OPENROUTER_CONFIG,
   deepseek: DEEPSEEK_CONFIG,
+  codex: CODEX_CONFIG,
 };
 
 /** Returns the provider that should serve a given namespaced model id. */
 export function resolveProviderId(modelId: string | null | undefined): ProviderId {
-  return typeof modelId === 'string' && modelId.startsWith(DEEPSEEK_PREFIX) ? 'deepseek' : 'openrouter';
+  if (typeof modelId === 'string' && modelId.startsWith(DEEPSEEK_PREFIX)) return 'deepseek';
+  if (typeof modelId === 'string' && modelId.startsWith(CODEX_PREFIX)) return 'codex';
+  return 'openrouter';
 }
 
 /** Strips the provider scheme prefix, yielding the id the upstream API expects. */
 export function toUpstreamModelId(modelId: string): string {
-  return modelId.startsWith(DEEPSEEK_PREFIX) ? modelId.slice(DEEPSEEK_PREFIX.length) : modelId;
+  if (modelId.startsWith(DEEPSEEK_PREFIX)) return modelId.slice(DEEPSEEK_PREFIX.length);
+  if (modelId.startsWith(CODEX_PREFIX)) return modelId.slice(CODEX_PREFIX.length);
+  return modelId;
+}
+
+/** True when the model id targets the ChatGPT (Codex app-server) provider. */
+export function isCodexModel(modelId: string | null | undefined): boolean {
+  return resolveProviderId(modelId) === 'codex';
 }
 
 export function getProviderConfig(id: ProviderId): ProviderConfig {

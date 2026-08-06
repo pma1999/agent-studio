@@ -1,10 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { CheckCircle, AlertCircle, ExternalLink, Zap, Coins, BarChart3, Loader2, Globe, KeyRound, Database, MessageSquare, Brain, Check, ChevronDown, Sparkles, Lightbulb, SlidersHorizontal, Wrench, Plug, Layers, Link, Box } from 'lucide-react';
+import { CheckCircle, AlertCircle, ExternalLink, Zap, Coins, BarChart3, Loader2, Globe, KeyRound, Database, MessageSquare, Brain, Check, ChevronDown, Sparkles, Lightbulb, SlidersHorizontal, Wrench, Plug, Layers, Link, Box, LogOut, Copy, RefreshCw } from 'lucide-react';
 import { useStore } from '../stores/store';
 import { settingsApi, toolsApi, mcpServersApi, skillsApi, deepseekApi } from '../api/client';
 import type { ProviderRoutingConfig, ReasoningEffort, Tool, McpServer, Skill } from '../types';
-import { DEEPSEEK_ACCENT } from '../utils/providers';
+import { DEEPSEEK_ACCENT, CODEX_ACCENT } from '../utils/providers';
+import { chatgptApi, type ChatgptStatus } from '../api/client';
 import { Modal } from './ui/Modal';
 import { Input } from './ui/Input';
 import { Button } from './ui/Button';
@@ -308,6 +309,259 @@ function DeepSeekSection() {
       helpLabel="DeepSeek Platform"
       onTest={handleTest}
     />
+  );
+}
+
+/**
+ * ChatGPT (Codex) provider section.
+ *
+ * Links the user's ChatGPT account via the app-server device-code flow. Once
+ * connected, Codex models (`codex:*`) appear in the model selector and usage
+ * is billed to the user's ChatGPT plan (rate limits shown here).
+ */
+function ChatGPTSection() {
+  const [status, setStatus] = useState<ChatgptStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [loginStarting, setLoginStarting] = useState(false);
+  const [logoutSaving, setLogoutSaving] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const loadStatus = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
+    try {
+      const s = await chatgptApi.status();
+      setStatus(s);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load ChatGPT status');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadStatus();
+  }, [loadStatus]);
+
+  // Poll while a sign-in is pending so connection completes without a manual refresh.
+  useEffect(() => {
+    if (!status?.pendingLogin) return;
+    const timer = setInterval(() => loadStatus(true), 4000);
+    return () => clearInterval(timer);
+  }, [status?.pendingLogin, loadStatus]);
+
+  const handleConnect = async () => {
+    setLoginStarting(true);
+    setError(null);
+    try {
+      const pending = await chatgptApi.login();
+      setStatus((s) => (s ? { ...s, pendingLogin: pending } : s));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to start ChatGPT sign-in');
+    } finally {
+      setLoginStarting(false);
+    }
+  };
+
+  const handleCancel = async () => {
+    try {
+      await chatgptApi.cancel();
+      setStatus((s) => (s ? { ...s, pendingLogin: null } : s));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to cancel sign-in');
+    }
+  };
+
+  const handleLogout = async () => {
+    setLogoutSaving(true);
+    setError(null);
+    try {
+      await chatgptApi.logout();
+      setStatus((s) =>
+        s ? { ...s, connected: false, email: null, planType: null, rateLimits: null } : s
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to disconnect ChatGPT');
+    } finally {
+      setLogoutSaving(false);
+    }
+  };
+
+  const copyCode = async () => {
+    if (!status?.pendingLogin) return;
+    try {
+      await navigator.clipboard.writeText(status.pendingLogin.userCode);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // clipboard unavailable — the code is still shown inline
+    }
+  };
+
+  const pending = status?.pendingLogin;
+  const primaryRateLimit = status?.rateLimits;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+        <div style={{
+          width: '28px',
+          height: '28px',
+          borderRadius: 'var(--radius-sm)',
+          background: `${CODEX_ACCENT}18`,
+          border: `1px solid ${CODEX_ACCENT}30`,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          color: CODEX_ACCENT,
+        }}>
+          <Sparkles size={15} />
+        </div>
+        <h4 style={{
+          fontFamily: 'var(--font-display)',
+          fontSize: '1.1rem',
+          fontWeight: 500,
+          color: 'var(--text-primary)',
+        }}>
+          ChatGPT
+        </h4>
+      </div>
+
+      <p style={{ fontSize: '0.8125rem', color: 'var(--text-muted)', lineHeight: 1.6, margin: 0 }}>
+        Link your ChatGPT account to use GPT models with the usage included in your ChatGPT plan
+        (no separate API billing). Sign-in happens on OpenAI's site — your credentials never reach
+        this server.
+      </p>
+
+      {loading && !status && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-muted)', fontSize: '0.8125rem' }}>
+          <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} />
+          Checking ChatGPT connection...
+        </div>
+      )}
+
+      {!loading && status && !status.allowed && (
+        <div style={{ padding: '12px 14px', background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', fontSize: '0.8125rem', color: 'var(--text-muted)' }}>
+          The ChatGPT provider is not enabled for your account.
+        </div>
+      )}
+
+      {error && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: '8px',
+          padding: '12px 14px', background: 'rgba(201, 107, 107, 0.1)',
+          border: '1px solid rgba(201, 107, 107, 0.2)', borderRadius: 'var(--radius-sm)',
+          fontSize: '0.8125rem', color: 'var(--error)',
+        }}>
+          <AlertCircle size={14} />
+          <span style={{ flex: 1 }}>{error}</span>
+        </div>
+      )}
+
+      {!loading && status?.allowed && pending && (
+        <div style={{ padding: '16px', background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          <div style={{ fontSize: '0.875rem', fontWeight: 600, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <Loader2 size={14} style={{ animation: 'spin 1s linear infinite', color: CODEX_ACCENT }} />
+            Waiting for sign-in
+          </div>
+          <div style={{ fontSize: '0.8125rem', color: 'var(--text-muted)', lineHeight: 1.6 }}>
+            Open the link below on any device, sign in with your ChatGPT account, and enter the code:
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+            <a
+              href={pending.verificationUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ color: CODEX_ACCENT, fontSize: '0.8125rem', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+            >
+              {pending.verificationUrl} <ExternalLink size={11} />
+            </a>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <span style={{
+              fontFamily: 'var(--font-mono)', fontSize: '1.25rem', fontWeight: 700, letterSpacing: '0.12em',
+              padding: '8px 14px', background: 'var(--bg-elevated)', border: '1px solid var(--border)',
+              borderRadius: 'var(--radius-sm)', color: 'var(--text-primary)',
+            }}>
+              {pending.userCode}
+            </span>
+            <Button variant="secondary" size="sm" onClick={copyCode}>
+              {copied ? <Check size={14} /> : <Copy size={14} />}
+              {copied ? 'Copied' : 'Copy code'}
+            </Button>
+          </div>
+          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+            <Button variant="primary" size="sm" onClick={() => window.open(pending.verificationUrl, '_blank', 'noopener,noreferrer')}>
+              Open verification page
+            </Button>
+            <Button variant="secondary" size="sm" onClick={handleCancel}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {!loading && status?.allowed && !status.connected && !pending && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          <Button variant="primary" size="sm" onClick={handleConnect} loading={loginStarting} style={{ alignSelf: 'flex-start' }}>
+            <Link size={14} />
+            Connect ChatGPT account
+          </Button>
+          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+            Requires a ChatGPT plan that includes Codex usage (Plus, Pro, Team, Business or Enterprise).
+          </div>
+        </div>
+      )}
+
+      {!loading && status?.allowed && status.connected && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          <div style={{ padding: '12px 14px', background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+              <CheckCircle size={15} style={{ color: 'var(--success)' }} />
+              <span style={{ fontSize: '0.875rem', fontWeight: 600, color: 'var(--text-primary)' }}>Connected</span>
+              {status.email && (
+                <span style={{ fontSize: '0.8125rem', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>{status.email}</span>
+              )}
+              {status.planType && (
+                <span style={{
+                  fontSize: '0.625rem', padding: '2px 6px', background: `${CODEX_ACCENT}18`,
+                  color: CODEX_ACCENT, borderRadius: '4px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em',
+                }}>
+                  {status.planType}
+                </span>
+              )}
+            </div>
+            {primaryRateLimit && typeof primaryRateLimit.usedPercent === 'number' && (
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '4px' }}>
+                  <span>ChatGPT plan usage</span>
+                  <span>{primaryRateLimit.usedPercent}%</span>
+                </div>
+                <div style={{ height: 6, borderRadius: 3, background: 'var(--bg-elevated)', overflow: 'hidden' }}>
+                  <div style={{
+                    height: '100%', borderRadius: 3,
+                    width: `${Math.min(primaryRateLimit.usedPercent, 100)}%`,
+                    background: primaryRateLimit.usedPercent > 85 ? 'var(--error)' : primaryRateLimit.usedPercent > 60 ? 'var(--state-warning)' : CODEX_ACCENT,
+                    transition: 'width 0.3s ease',
+                  }} />
+                </div>
+              </div>
+            )}
+          </div>
+          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+            <Button variant="secondary" size="sm" onClick={() => loadStatus()} disabled={loading}>
+              <RefreshCw size={14} />
+              Refresh
+            </Button>
+            <Button variant="secondary" size="sm" onClick={handleLogout} loading={logoutSaving} style={{ color: 'var(--error)' }}>
+              <LogOut size={14} />
+              Disconnect
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1676,6 +1930,12 @@ export function SettingsPanel() {
 
         {/* DeepSeek (Direct) */}
         <DeepSeekSection />
+
+        {/* Divider */}
+        <div style={{ height: '1px', background: 'var(--border)' }} />
+
+        {/* ChatGPT (Codex) */}
+        <ChatGPTSection />
 
         {/* Divider */}
         <div style={{ height: '1px', background: 'var(--border)' }} />

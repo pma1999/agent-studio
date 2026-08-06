@@ -25,6 +25,8 @@ import { mountWsProbe } from './routes/agentProbe.js';
 import agentRouter, { mountAgentTransport } from './routes/agent.js';
 import agentFilesRouter from './routes/agentFiles.js';
 import { startAgentFileSweep } from './agentFiles/storage.js';
+import chatgptRouter from './routes/chatgpt.js';
+import { startCodexReaper } from './codex/instanceManager.js';
 
 const app = express();
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3001;
@@ -117,6 +119,7 @@ app.use('/api/chat/council', authMiddleware, chatCouncilRouter);
 app.use('/api/council', authMiddleware, councilMembersRouter);
 app.use('/api/agent/files', agentFilesRouter);
 app.use('/api/agent', agentRouter);
+app.use('/api/chatgpt', authMiddleware, chatgptRouter);
 
 // Root: for load balancer / health probes that hit /
 app.get('/', (_req, res) => {
@@ -155,6 +158,7 @@ server.headersTimeout = 65_000;
 setupGracefulShutdown(server, db);
 mountAgentTransport(server);
 startAgentFileSweep();
+startCodexReaper();
 
 // Temporary WebSocket viability probe (task-04) — off unless explicitly enabled.
 if (process.env.ENABLE_WS_PROBE === 'true') {

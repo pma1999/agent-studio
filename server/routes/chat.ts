@@ -27,7 +27,10 @@ import {
   buildDeepSeekThinking,
   computeDeepSeekCost,
   deepSeekCachedTokens,
+  isCodexModel,
 } from '../providers/index.js';
+import { runCodexTurn } from '../codex/chat.js';
+import { CodexUnavailableError } from '../codex/instanceManager.js';
 import { buildDateTimeContext, injectDateTimeIntoCurrentTurn } from '../dateTimeContext.js';
 import {
   appendSkillCatalogIfNeeded,
@@ -49,8 +52,10 @@ import {
   AUTO_CONVERSATION_TITLES_SETTING_KEY,
   createFallbackConversationTitle,
   generateConversationTitleWithOpenRouter,
+  generateConversationTitleWithCodex,
   isAutoConversationTitlesEnabled,
 } from '../conversationTitles.js';
+import { isUserAllowed } from '../codex/instanceManager.js';
 import { buildThreadIds } from '../messageTree.js';
 
 const router = Router();
@@ -315,9 +320,11 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     const provider = getProviderForModel(effectiveModel);
     const upstreamModel = toUpstreamModelId(effectiveModel);
 
-    // API key for the resolved provider (decrypted server-side).
+    // API key for the resolved provider (decrypted server-side). The ChatGPT
+    // (Codex) provider has no API key — its account state is validated in the
+    // codex branch below.
     const apiKey = getSettingValue(userId, provider.apiKeySetting);
-    if (!apiKey?.trim()) {
+    if (!apiKey?.trim() && !isCodexModel(effectiveModel)) {
       res.status(400).json({ error: `${provider.label} API key not configured. Please set your API key in Settings.` });
       return;
     }
@@ -407,16 +414,20 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
 
       const titleApiKey = getSettingValue(userId, 'openrouter_api_key');
       const titleEnabled = isAutoConversationTitlesEnabled(getSettingValue(userId, AUTO_CONVERSATION_TITLES_SETTING_KEY));
+      const titleFallback = (title: string | null) => {
+        if (!title || title === fallbackTitle) return null;
+        db.prepare('UPDATE conversations SET title = ? WHERE id = ? AND user_id = ?').run(title, conversation_id, userId);
+        return title;
+      };
       if (titleEnabled && titleApiKey.trim()) {
         generatedTitlePromise = generateConversationTitleWithOpenRouter({
           apiKey: titleApiKey,
           userMessage: content,
           systemPrompt: agent.system_prompt,
-        }).then((title) => {
-          if (!title || title === fallbackTitle) return null;
-          db.prepare('UPDATE conversations SET title = ? WHERE id = ? AND user_id = ?').run(title, conversation_id, userId);
-          return title;
-        });
+        }).then(titleFallback);
+      } else if (titleEnabled && isUserAllowed(userId)) {
+        // No OpenRouter key: generate the title through the ChatGPT connection.
+        generatedTitlePromise = generateConversationTitleWithCodex(userId, content, agent.system_prompt).then(titleFallback);
       }
     } else {
       db.prepare("UPDATE conversations SET updated_at = datetime('now') WHERE id = ? AND user_id = ?").run(conversation_id, userId);
@@ -677,7 +688,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       }
     }
 
-    const useResponseHealing = !!agent.response_healing_enabled && !!responseFormat;
+    const useResponseHealing = !!agent.response_healing_enabled && !!responseFormat && provider.id !== 'codex';
     if (useResponseHealing) {
       requestBody.stream = false;
       const plugins = (requestBody.plugins as { id: string; pdf?: { engine: string } }[]) || [];
@@ -755,6 +766,104 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       res.write(`data: ${JSON.stringify(doneData)}\n\n`);
       res.write('data: [DONE]\n\n');
     };
+
+    // -----------------------------------------------------------------------
+    // ChatGPT (Codex app-server) branch
+    //
+    // No chat-completions fetch: the turn is bridged to the user's per-user
+    // `codex app-server` process (server/codex/chat.ts). Content/reasoning
+    // deltas and tool events map onto the same SSE shapes the frontend already
+    // consumes; tool calls run through the app's own tool executors.
+    // -----------------------------------------------------------------------
+    if (provider.id === 'codex') {
+      abortController = new AbortController();
+
+      const codexRow = db.prepare('SELECT codex_thread_id FROM conversations WHERE id = ?').get(conversation_id) as
+        | { codex_thread_id: string | null }
+        | undefined;
+      let codexThreadId = codexRow?.codex_thread_id ?? null;
+      // Editing/retrying rewrites the visible history — start a fresh thread
+      // (seeded with the reconstructed history) so the model sees the edit.
+      if (edit_message_id) codexThreadId = null;
+
+      // Tool rows are buffered and persisted after the assistant message so the
+      // message tree keeps the generic path's order: user → assistant → tools.
+      const pendingToolRows: Array<{ callId: string; output: string }> = [];
+
+      const codexResult = await runCodexTurn({
+        userId,
+        conversationId: conversation_id,
+        threadId: codexThreadId,
+        systemPrompt: agent.system_prompt,
+        messages,
+        model: upstreamModel,
+        reasoningEffort: reasoningEnabled ? reasoningEffort : null,
+        outputSchema: responseFormat?.json_schema?.schema ?? null,
+        tools: resolvedTools,
+        toolChoice: agent.tool_choice === 'none' ? 'none' : 'auto',
+        mcpClients,
+        signal: abortController.signal,
+        emit: (evt) => {
+          if (clientDisconnected || res.writableEnded) return;
+          res.write(`data: ${JSON.stringify(evt)}\n\n`);
+        },
+        persistToolResult: (callId, _name, result) => {
+          pendingToolRows.push({ callId, output: result.output });
+        },
+      });
+
+      db.prepare('UPDATE conversations SET codex_thread_id = ? WHERE id = ? AND user_id = ?')
+        .run(codexResult.threadId, conversation_id, userId);
+
+      totalTokens = codexResult.totalTokens;
+      promptTokens = codexResult.inputTokens;
+      completionTokens = codexResult.outputTokens;
+      reasoningTokens = codexResult.reasoningOutputTokens;
+      cachedTokens = codexResult.cachedInputTokens;
+
+      // Persist the assistant message (with tool_calls when any ran)…
+      const toolCallsJson = codexResult.toolCalls.length > 0
+        ? JSON.stringify(codexResult.toolCalls.map((tc) => ({
+            id: tc.id,
+            type: 'function',
+            function: { name: tc.name, arguments: tc.arguments },
+          })))
+        : null;
+      const codexAssistantMsgId = saveAssistantMessage(codexResult.content, codexResult.reasoning, toolCallsJson, []);
+
+      // …then the tool result rows in execution order.
+      for (const row of pendingToolRows) {
+        const toolMsgId = nanoid();
+        db.prepare(`
+          INSERT INTO messages (id, conversation_id, role, content, tool_call_id, parent_id, turn_id, variant_seq)
+          VALUES (?, ?, 'tool', ?, ?, ?, ?, ?)
+        `).run(toolMsgId, conversation_id, row.output, row.callId, chainTailId, turnId, variantSeq);
+        chainTailId = toolMsgId;
+        updateActiveLeaf(toolMsgId);
+      }
+
+      // Merge web-search citations from tool outputs, mirroring the generic path.
+      const finalAnnots: unknown[] = [];
+      for (const row of pendingToolRows) {
+        try {
+          const data = JSON.parse(row.output);
+          const results = Array.isArray(data) ? data : (data.results || []);
+          if (Array.isArray(results) && results.length > 0 && results[0].url) {
+            finalAnnots.push(...annotationsFromWebSearchResults(results));
+            break;
+          }
+        } catch {
+          // ignore non-JSON tool outputs
+        }
+      }
+
+      if (codexResult.content || codexResult.reasoning) {
+        updateAssistantMessage(codexAssistantMsgId, codexResult.content, codexResult.reasoning, finalAnnots);
+      }
+      sendDoneEvent(finalAnnots);
+      res.end();
+      return;
+    }
 
     // Non-streaming path (Response Healing): single request, then forward full response as SSE
     if (requestBody.stream === false) {

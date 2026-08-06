@@ -594,6 +594,43 @@ export const modelsApi = {
     `/models/openrouter/endpoints?model=${encodeURIComponent(model)}`
   ),
   deepseek: () => request<{ data: OpenRouterModel[] }>('/models/deepseek'),
+  codex: () => request<{ data: OpenRouterModel[] }>('/models/codex'),
+};
+
+// ChatGPT (Codex app-server) provider
+export interface ChatgptPendingLogin {
+  loginId: string;
+  verificationUrl: string;
+  userCode: string;
+  startedAt: number;
+}
+
+export interface ChatgptRateLimitBucket {
+  limitId: string;
+  usedPercent: number;
+  windowDurationMins: number;
+  resetsAt: number | null;
+}
+
+export interface ChatgptStatus {
+  allowed: boolean;
+  connected: boolean;
+  email: string | null;
+  planType: string | null;
+  pendingLogin: ChatgptPendingLogin | null;
+  rateLimits: {
+    usedPercent?: number;
+    windowDurationMins?: number;
+    resetsAt?: number | null;
+    byLimitId?: ChatgptRateLimitBucket[];
+  } | null;
+}
+
+export const chatgptApi = {
+  status: () => request<ChatgptStatus>('/chatgpt/status'),
+  login: () => request<ChatgptPendingLogin>('/chatgpt/login', { method: 'POST' }),
+  cancel: () => request<{ ok: true }>('/chatgpt/cancel', { method: 'POST' }),
+  logout: () => request<{ ok: true }>('/chatgpt/logout', { method: 'POST' }),
 };
 
 // DeepSeek (direct provider)

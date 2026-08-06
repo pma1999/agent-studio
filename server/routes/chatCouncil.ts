@@ -5,6 +5,7 @@ import { getSettingValue } from './settings.js';
 import { resolveToolsForAgent, resolveToolsFromIds, toOpenRouterTools, appendToolInstructionsIfNeeded } from '../tools/index.js';
 import { CouncilExecutor } from '../services/councilExecutor.js';
 import { getProviderConfig, resolveProviderId, resolveAssistantHistoryContent, type ProviderId } from '../providers/index.js';
+import { isUserAllowed } from '../codex/instanceManager.js';
 import { buildDateTimeContext } from '../dateTimeContext.js';
 import { AuthRequest } from '../middleware/auth.js';
 import { trackStream, untrackStream } from '../shutdown.js';
@@ -22,6 +23,7 @@ import {
   AUTO_CONVERSATION_TITLES_SETTING_KEY,
   createFallbackConversationTitle,
   generateConversationTitleWithOpenRouter,
+  generateConversationTitleWithCodex,
   isAutoConversationTitlesEnabled,
 } from '../conversationTitles.js';
 
@@ -250,12 +252,21 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     }
 
     // Pre-flight: ensure an API key exists for every provider this run needs (members + synthesizer).
+    // The ChatGPT (Codex) provider has no API key — it is gated by account allowlist and its
+    // connected-account state is validated when the member/synthesizer turn actually runs.
     const requiredProviders = new Set<ProviderId>();
     for (const modelId of councilConfig.member_models) requiredProviders.add(resolveProviderId(modelId));
     requiredProviders.add(resolveProviderId(councilConfig.synthesizer_model || 'anthropic/claude-3.5-sonnet'));
     const apiKeyByProvider = new Map<ProviderId, string>();
     for (const providerId of requiredProviders) {
       const cfg = getProviderConfig(providerId);
+      if (providerId === 'codex') {
+        if (!isUserAllowed(userId)) {
+          res.status(403).json({ error: 'ChatGPT provider is not enabled for your account' });
+          return;
+        }
+        continue;
+      }
       const key = getSettingValue(userId, cfg.apiKeySetting);
       if (!key?.trim()) {
         res.status(400).json({ error: `${cfg.label} API key not configured. Please set your API key in Settings.` });
@@ -287,16 +298,19 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
 
       const titleApiKey = getSettingValue(userId, 'openrouter_api_key');
       const titleEnabled = isAutoConversationTitlesEnabled(getSettingValue(userId, AUTO_CONVERSATION_TITLES_SETTING_KEY));
+      const titleFallback = (title: string | null) => {
+        if (!title || title === fallbackTitle) return null;
+        db.prepare('UPDATE conversations SET title = ? WHERE id = ? AND user_id = ?').run(title, conversation_id, userId);
+        return title;
+      };
       if (titleEnabled && titleApiKey.trim()) {
         generatedTitlePromise = generateConversationTitleWithOpenRouter({
           apiKey: titleApiKey,
           userMessage: content,
           systemPrompt: agent.system_prompt,
-        }).then((title) => {
-          if (!title || title === fallbackTitle) return null;
-          db.prepare('UPDATE conversations SET title = ? WHERE id = ? AND user_id = ?').run(title, conversation_id, userId);
-          return title;
-        });
+        }).then(titleFallback);
+      } else if (titleEnabled && isUserAllowed(userId)) {
+        generatedTitlePromise = generateConversationTitleWithCodex(userId, content, agent.system_prompt).then(titleFallback);
       }
     } else {
       db.prepare("UPDATE conversations SET updated_at = datetime('now') WHERE id = ? AND user_id = ?").run(conversation_id, userId);
@@ -573,7 +587,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     // Run comparison extraction in background; update council_run when done so next load shows tables
     const successfulResults = result.memberResults.filter((r) => r.status === 'success' && r.content);
     if (successfulResults.length > 0) {
-      executor.extractComparison(successfulResults, result.synthesis.content, content, synthesizerModel, result.synthesis.providerRouting, undefined)
+      executor.extractComparison(successfulResults, result.synthesis.content, content, synthesizerModel, result.synthesis.providerRouting, undefined, userId)
         .then((comparisonJson) => {
           if (comparisonJson) {
             db.prepare('UPDATE council_runs SET comparison_json = ? WHERE id = ?').run(comparisonJson, councilRunId);

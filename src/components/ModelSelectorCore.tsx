@@ -29,10 +29,11 @@ import {
 import type { OpenRouterModel as OpenRouterModelType } from '../types';
 import { useOpenRouterModels } from '../hooks/useOpenRouterModels';
 import { useDeepSeekModels } from '../hooks/useDeepSeekModels';
+import { useCodexModels } from '../hooks/useCodexModels';
 import { useFavoriteModels } from '../hooks/useFavoriteModels';
 import { useRecentModels } from '../hooks/useRecentModels';
 import { useIsMobile } from '../utils/breakpoints';
-import { DEEPSEEK_DIRECT_GROUP } from '../utils/providers';
+import { DEEPSEEK_DIRECT_GROUP, CODEX_DIRECT_GROUP } from '../utils/providers';
 
 const ICON_MAP = { sparkles: Sparkles, zap: Zap, eye: Eye, brain: Brain };
 
@@ -80,20 +81,21 @@ export function ModelSelectorCore({
 }: ModelSelectorCoreProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [search, setSearch] = useState('');
-  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set([DEEPSEEK_DIRECT_GROUP, 'openai', 'anthropic']));
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set([DEEPSEEK_DIRECT_GROUP, CODEX_DIRECT_GROUP, 'openai', 'anthropic']));
   const dropdownRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const isMobile = useIsMobile();
 
   const { models: openRouterModels, loading } = useOpenRouterModels();
   const { models: deepSeekModels } = useDeepSeekModels();
+  const { models: codexModels } = useCodexModels();
   const { favorites, toggleFavorite } = useFavoriteModels();
   const { recent, addRecent } = useRecentModels();
 
-  // DeepSeek-direct models lead the list so their group sorts to the top.
+  // DeepSeek-direct and ChatGPT (Codex) models lead the list so their groups sort to the top.
   const rawModels = useMemo(
-    () => [...deepSeekModels, ...openRouterModels],
-    [deepSeekModels, openRouterModels]
+    () => [...deepSeekModels, ...codexModels, ...openRouterModels],
+    [deepSeekModels, codexModels, openRouterModels]
   );
 
   const models = useMemo(() => {
