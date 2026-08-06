@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { CheckCircle, AlertCircle, ExternalLink, Zap, Coins, BarChart3, Loader2, Globe, KeyRound, Database, MessageSquare, Brain, Check, ChevronDown, Sparkles, Lightbulb, SlidersHorizontal, Wrench, Plug, Layers, Link, Box, LogOut, Copy, RefreshCw } from 'lucide-react';
 import { useStore } from '../stores/store';
@@ -6,6 +6,7 @@ import { settingsApi, toolsApi, mcpServersApi, skillsApi, deepseekApi } from '..
 import type { ProviderRoutingConfig, ReasoningEffort, Tool, McpServer, Skill } from '../types';
 import { DEEPSEEK_ACCENT, CODEX_ACCENT } from '../utils/providers';
 import { chatgptApi, type ChatgptStatus } from '../api/client';
+import { CHATGPT_STATUS_CHANGED_EVENT } from '../hooks/useCodexModels';
 import { Modal } from './ui/Modal';
 import { Input } from './ui/Input';
 import { Button } from './ui/Button';
@@ -326,13 +327,20 @@ function ChatGPTSection() {
   const [loginStarting, setLoginStarting] = useState(false);
   const [logoutSaving, setLogoutSaving] = useState(false);
   const [copied, setCopied] = useState(false);
+  const statusRef = useRef<ChatgptStatus | null>(null);
 
   const loadStatus = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
     try {
       const s = await chatgptApi.status();
+      const wasConnected = statusRef.current?.connected ?? false;
+      statusRef.current = s;
       setStatus(s);
       setError(null);
+      // Connection state changed → refresh the model catalog without a page reload.
+      if (s.connected && !wasConnected) {
+        window.dispatchEvent(new Event(CHATGPT_STATUS_CHANGED_EVENT));
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load ChatGPT status');
     } finally {
@@ -381,6 +389,7 @@ function ChatGPTSection() {
       setStatus((s) =>
         s ? { ...s, connected: false, email: null, planType: null, rateLimits: null } : s
       );
+      window.dispatchEvent(new Event(CHATGPT_STATUS_CHANGED_EVENT));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to disconnect ChatGPT');
     } finally {

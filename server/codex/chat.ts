@@ -82,6 +82,30 @@ interface TurnUsage {
 const ACTIVE_TURN_WAIT_MS = 60_000;
 const TOOL_NAME_RE = /^[a-zA-Z0-9_-]{1,128}$/;
 
+/**
+ * Maps the app's reasoning-effort vocabulary to the values Codex models accept
+ * ('none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'). The app's 'minimal'
+ * level does not exist upstream; 'low' is the closest non-zero option.
+ */
+export function mapCodexEffort(effort: string | null | undefined): string | null {
+  switch (effort) {
+    case 'none':
+      return null; // caller omits the field entirely
+    case 'xhigh':
+    case 'max':
+      return 'xhigh';
+    case 'high':
+      return 'high';
+    case 'medium':
+      return 'medium';
+    case 'low':
+    case 'minimal':
+      return 'low';
+    default:
+      return null;
+  }
+}
+
 function lastTextMessage(messages: CodexTurnInput['messages']): string {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
@@ -352,6 +376,17 @@ export async function runCodexTurn(input: CodexTurnInput): Promise<CodexTurnResu
       }
       if (method === 'error') {
         failMessage = p.error?.message ?? 'Codex error';
+        // Some errors are terminal (invalid params, unsupported model/effort) —
+        // no turn/completed will follow. Surface them immediately instead of
+        // waiting for the turn timeout. Transient errors (reconnect, rate
+        // limits) keep waiting for turn/completed.
+        const codexErrorInfo = (p as { error?: { codexErrorInfo?: unknown } }).error?.codexErrorInfo;
+        const infoStr = JSON.stringify(codexErrorInfo ?? '');
+        const isFatal = /BadRequest/i.test(infoStr) || /HttpConnectionFailed.*40[0-9]/.test(infoStr) ||
+          /unsupported_value|invalid_request_error|Unsupported value/i.test(failMessage);
+        if (isFatal) {
+          finish(new CodexUnavailableError(failMessage));
+        }
       }
     };
 
@@ -393,9 +428,8 @@ export async function runCodexTurn(input: CodexTurnInput): Promise<CodexTurnResu
         sandboxPolicy: { type: 'readOnly' },
       };
       if (input.model) turnParams.model = input.model;
-      if (input.reasoningEffort && input.reasoningEffort !== 'none') {
-        turnParams.effort = input.reasoningEffort;
-      }
+      const effort = mapCodexEffort(input.reasoningEffort);
+      if (effort) turnParams.effort = effort;
       if (input.outputSchema && typeof input.outputSchema === 'object') {
         turnParams.outputSchema = input.outputSchema;
       }
