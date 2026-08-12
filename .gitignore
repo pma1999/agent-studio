@@ -66,5 +66,9 @@ temp/
 # .netlify
 
 # Local-agent test artifacts (not part of the repo)
-local-agent/.playwright-mcp/
 local-agent/substack-home.png
+
+# Playwright (MCP browser automation traces and test output)
+.playwright-mcp/
+playwright-report/
+test-results/

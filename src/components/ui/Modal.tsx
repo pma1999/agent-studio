@@ -41,6 +41,14 @@ export function Modal({ isOpen, onClose, title, children, maxWidth = '560px', fo
       ? { initial: { y: '100%' }, animate: { y: 0 }, exit: { y: '100%' } }
       : { initial: { opacity: 0, scale: 0.95, y: 10 }, animate: { opacity: 1, scale: 1, y: 0 }, exit: { opacity: 0, scale: 0.95, y: 10 } };
 
+  // Ownership rule: the modal panel owns its entire React subtree. Clicks that
+  // propagate through the panel's React tree — including clicks on React portals
+  // rendered inside the modal (e.g. the mobile model/provider picker sheets that
+  // portal to document.body) — are "inside" clicks and are stopped here, so they
+  // never reach the overlay's outside-click handler below. Only clicks whose
+  // target is the overlay itself (never entered the panel's subtree) close the
+  // modal. React events on portaled children still bubble through the fiber
+  // tree, which is what makes this work where physical DOM containment fails.
   return (
     <AnimatePresence>
       {isOpen && (
@@ -50,6 +58,9 @@ export function Modal({ isOpen, onClose, title, children, maxWidth = '560px', fo
           exit={{ opacity: 0 }}
           transition={{ duration: prefersReducedMotion ? 0 : 0.2 }}
           onClick={(e) => {
+            // Defensive: after the panel stops propagation this handler can only
+            // see clicks on the overlay itself, but keep the containment check as
+            // a safeguard against content mounted outside the React tree.
             if (contentRef.current && !contentRef.current.contains(e.target as Node)) {
               onClose();
             }
@@ -73,6 +84,7 @@ export function Modal({ isOpen, onClose, title, children, maxWidth = '560px', fo
             animate={panelMotion.animate}
             exit={panelMotion.exit}
             transition={{ duration: prefersReducedMotion ? 0 : (isMobile ? 0.32 : 0.25), ease: [0.4, 0, 0.2, 1] }}
+            onClick={(e) => e.stopPropagation()}
             style={{
               background: 'var(--bg-base)',
               border: isMobile ? 'none' : '1px solid var(--border)',
