@@ -15,7 +15,7 @@
 import { runTool } from '../tools/index.js';
 import { runCommandTool } from '../tools/execCommand.js';
 import type { ResolvedTool, RunToolResult } from '../tools/index.js';
-import type { McpConnection } from '../mcp/index.js';
+import type { McpConnection, McpToolAuthorizationRequest } from '../mcp/index.js';
 import { CodexRpc } from './rpc.js';
 import { getConnectedInstance, CodexUnavailableError, type CodexInstance } from './instanceManager.js';
 
@@ -51,6 +51,8 @@ export interface CodexTurnInput {
   toolChoice?: 'auto' | 'none';
   mcpClients?: Map<string, McpConnection>;
   signal?: AbortSignal;
+  /** Mandatory per-call human authorization for MCP tools. */
+  authorizeMcpCall?: (request: McpToolAuthorizationRequest) => Promise<boolean>;
   /** SSE relay: receives {content|reasoning|tool_call|tool_result|tool_output_chunk} events. */
   emit?: (evt: CodexTurnEvent) => void;
   /** Persists a tool-result message row (chat.ts owns the DB writes). */
@@ -270,7 +272,13 @@ export async function runCodexTurn(input: CodexTurnInput): Promise<CodexTurnResu
             input.mcpClients,
             input.userId,
             input.conversationId ?? undefined,
-            input.messages as Array<{ role: string; content?: unknown }>
+            input.messages as Array<{ role: string; content?: unknown }>,
+            {
+              ...(input.authorizeMcpCall ? { authorizeMcpCall: input.authorizeMcpCall } : {}),
+              mcpControl: {
+                ...(input.signal ? { signal: input.signal } : {}),
+              },
+            }
           );
         }
       } catch (err) {

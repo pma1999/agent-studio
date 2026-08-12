@@ -9,7 +9,11 @@ import { isUserAllowed } from '../codex/instanceManager.js';
 import { buildDateTimeContext } from '../dateTimeContext.js';
 import { AuthRequest } from '../middleware/auth.js';
 import { trackStream, untrackStream } from '../shutdown.js';
-import type { McpConnection } from '../mcp/index.js';
+import {
+  requestMcpToolApproval,
+  type McpConnection,
+  type McpToolAuthorizationRequest,
+} from '../mcp/index.js';
 import type { CouncilConfig, CouncilMember } from '../types.js';
 import {
   assertProviderRoutingCompatible,
@@ -351,13 +355,12 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     let resolvedTools = resolved.resolvedTools;
     mcpClients = resolved.mcpClients;
 
-    // Add council-specific tools if configured (resolve by id only: council belongs to user, tool_ids are from their config)
+    // Add council-specific tools. Explicit IDs remain strictly tenant-scoped.
     if (councilConfig.tool_ids?.length || councilConfig.mcp_server_ids?.length) {
       const councilResolved = await resolveToolsFromIds(
         councilConfig.tool_ids || [],
         councilConfig.mcp_server_ids || [],
-        userId,
-        { byIdOnly: true }
+        userId
       );
       // Merge tools avoiding duplicates
       const existingNames = new Set(resolvedTools.map((t) => t.name));
@@ -369,8 +372,13 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       }
       // Merge MCP clients
       for (const [key, value] of councilResolved.mcpClients) {
-        if (!mcpClients.has(key)) {
+        const existing = mcpClients.get(key);
+        if (!existing) {
           mcpClients.set(key, value);
+        } else if (existing !== value) {
+          await value.close().catch((error) => {
+            console.error(`[council] Duplicate MCP connection close failed for ${key}:`, error);
+          });
         }
       }
     }
@@ -421,6 +429,20 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
 
     abortController = new AbortController();
 
+    const authorizeMcpCall = async (request: McpToolAuthorizationRequest): Promise<boolean> => {
+      if (clientDisconnected || res.writableEnded) return false;
+      return requestMcpToolApproval({
+        userId,
+        conversationId: conversation_id,
+        request,
+        signal: abortController!.signal,
+        emit: (approval) => {
+          if (clientDisconnected || res.writableEnded) throw new Error('Council stream is closed');
+          res.write(`data: ${JSON.stringify({ type: 'mcp_approval_required', ...approval })}\n\n`);
+        },
+      });
+    };
+
     // Create executor and run council (resolves the right key per member/synthesizer provider)
     const executor = new CouncilExecutor(getApiKey);
 
@@ -440,6 +462,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       pdfEngine: pdf_engine,
       tools: resolvedTools,
       mcpClients,
+      authorizeMcpCall,
       onMemberStart: (index, modelId) => {
         if (!clientDisconnected) {
           res.write(`data: ${JSON.stringify({
@@ -616,9 +639,13 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     }
   } finally {
     untrackStream(res);
-    for (const conn of mcpClients.values()) {
-      conn.close().catch((e) => console.error('[council] MCP close error:', e));
+    const closeResults = await Promise.allSettled(
+      [...new Set(mcpClients.values())].map((connection) => connection.close())
+    );
+    for (const result of closeResults) {
+      if (result.status === 'rejected') console.error('[council] MCP close error:', result.reason);
     }
+    mcpClients.clear();
   }
 });
 

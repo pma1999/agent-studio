@@ -46,9 +46,33 @@ export interface Agent {
 
 export type McpTransport = 'url' | 'stdio' | 'relay';
 
+export type McpUrlAuth =
+  | {
+      type: 'bearer';
+      token: string;
+    }
+  | {
+      type: 'client_credentials';
+      clientId: string;
+      clientSecret: string;
+      scope?: string;
+      expectedIssuer: string;
+    };
+
 export interface McpConfigUrl {
   url: string;
   headers?: Record<string, string>;
+  /** Explicit opt-in for loopback, private, or link-local destinations. */
+  allowPrivateNetwork?: boolean;
+  /** Explicit opt-in for clear-text HTTP. HTTPS is the safe default. */
+  allowInsecureHttp?: boolean;
+  auth?: McpUrlAuth;
+}
+
+export interface McpExecutionApproval {
+  /** The API masks this value; the client only uses its presence as status. */
+  fingerprint: string;
+  approvedAt: string;
 }
 
 export interface McpConfigStdio {
@@ -56,6 +80,7 @@ export interface McpConfigStdio {
   args?: string[];
   env?: Record<string, string>;
   cwd?: string;
+  executionApproval?: McpExecutionApproval;
 }
 
 export type McpServerConfig = McpConfigUrl | McpConfigStdio;
@@ -547,6 +572,21 @@ export type ConversationTitleEvent = {
   title: string;
 };
 
+export type CouncilMcpApprovalRequiredEvent = {
+  type: 'mcp_approval_required';
+  id: string;
+  server_id: string;
+  server_name?: string;
+  exposed_name: string;
+  tool_name: string;
+  arguments: Record<string, unknown>;
+  arguments_sha256: string;
+  possible_cross_tool_data: boolean;
+  annotations?: Record<string, unknown>;
+  execution?: Record<string, unknown>;
+  expires_at: string;
+};
+
 export type CouncilStreamEvent =
   | CouncilMemberStartEvent
   | CouncilMemberCompleteEvent
@@ -555,6 +595,7 @@ export type CouncilStreamEvent =
   | CouncilSynthesisReasoningEvent
   | CouncilCompleteEvent
   | ConversationTitleEvent
+  | CouncilMcpApprovalRequiredEvent
   | CouncilErrorEvent;
 
 // Council Chat Request

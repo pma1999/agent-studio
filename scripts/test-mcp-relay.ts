@@ -32,6 +32,7 @@ const {
   teardownRelaySession,
 } = await import('../server/mcp/relaySessions.js');
 const { callMcpToolDetailed, listMcpTools } = await import('../server/mcp/client.js');
+const { normalizeMcpConfig } = await import('../server/mcp/config.js');
 const { resolveToolsFromIds } = await import('../server/tools/resolve.js');
 
 type AgentToBackendMessage = import('../server/agentRelay/protocol.js').AgentToBackendMessage;
@@ -44,7 +45,11 @@ const FIXTURE_PATH = path.join(
   'fixtures',
   'mcp-echo-server.cjs',
 );
-const RELAY_CONFIG: McpConfigStdio = { command: process.execPath, args: [FIXTURE_PATH] };
+const RELAY_CONFIG = normalizeMcpConfig(
+  'relay',
+  { command: process.execPath, args: [FIXTURE_PATH] },
+  { localExecutionApproved: true },
+) as McpConfigStdio;
 
 /**
  * Simulates the LOCAL AGENT side of the relay: when it receives an
@@ -268,7 +273,9 @@ async function main(): Promise<void> {
     await second.close();
     check('roundtrip: releases do not kill the pooled session', () => {
       const startRequests = bridge.sent.filter((message) => message.type === 'mcp_start_request');
-      assert.equal(startRequests.length, 1, 'only one child should ever have been spawned');
+      assert.equal(startRequests.length, 2, 'one disposable era probe and one pooled child should have been spawned');
+      assert.ok(startRequests.some((message) => message.channelId.includes(':probe:')));
+      assert.ok(startRequests.some((message) => message.channelId === serverId));
     });
 
     const third = await getOrCreateRelaySession(userId, serverId, RELAY_CONFIG);
@@ -306,7 +313,7 @@ async function main(): Promise<void> {
     check('teardown: fresh acquire spawns a NEW child that works', () => {
       assert.match(post.output, /echo:post/);
       const startRequests = bridge.sent.filter((message) => message.type === 'mcp_start_request');
-      assert.equal(startRequests.length, 2, 'a second child should have been spawned');
+      assert.equal(startRequests.length, 3, 'the cached era should allow exactly one fresh pooled child');
     });
     await respawned.close();
   }

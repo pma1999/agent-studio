@@ -58,7 +58,7 @@ try {
         { transport: 'stdio', config: { command: 'format C:' } },
         { userId: 'test-mcp-stdio-refusal' }
       ),
-    /Refused: command matches a blocked pattern \(disk-format\)/
+    /Refused: command or arguments match a blocked pattern \(disk-format\)/
   );
 
   const refusalRow = db

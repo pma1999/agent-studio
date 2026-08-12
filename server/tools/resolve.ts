@@ -5,6 +5,7 @@
  */
 
 import db from '../db.js';
+import { SdkError, SdkErrorCode } from '@modelcontextprotocol/client';
 import { getSettingValue } from '../routes/settings.js';
 import { isAgentConnected } from '../agentRelay/registry.js';
 import { getBuiltinDefinition, getBuiltinExecutor } from './registry.js';
@@ -12,15 +13,20 @@ import { buildRunCommandDisclosure, isRunCommandUsable } from './execCommand.js'
 import {
   createAndConnectMcpClient,
   listMcpTools,
+  parseStoredMcpConfig,
   type McpConnection,
+  type McpToolDef,
 } from '../mcp/index.js';
-import type { McpServerConfig, McpTransport } from '../mcp/types.js';
+import type { McpTransport } from '../mcp/types.js';
 import type { ResolvedSkill } from '../skills/resolve.js';
 
 export interface ResolvedToolMcpConfig {
   mcp_server_id: string;
+  mcp_server_name?: string;
   mcp_tool_name: string;
   annotations?: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
+  execution?: Record<string, unknown>;
 }
 
 export interface McpToolCatalogEntry {
@@ -31,7 +37,9 @@ export interface McpToolCatalogEntry {
   title?: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
   annotations?: Record<string, unknown>;
+  execution?: Record<string, unknown>;
 }
 
 export interface ResolvedToolMcpMetaConfig {
@@ -142,9 +150,81 @@ interface McpServerRowForConnect {
   config: string;
 }
 
+interface ConnectedMcpServer {
+  serverRow: McpServerRowForConnect;
+  connection: McpConnection;
+  tools: McpToolDef[];
+}
+
+const TRANSIENT_NODE_ERROR_CODES = new Set([
+  'ECONNABORTED',
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'EHOSTUNREACH',
+  'ENETDOWN',
+  'ENETUNREACH',
+  'EPIPE',
+  'ETIMEDOUT',
+]);
+
+const TRANSIENT_SDK_ERROR_CODES = new Set<SdkErrorCode>([
+  SdkErrorCode.RequestTimeout,
+  SdkErrorCode.ConnectionClosed,
+  SdkErrorCode.SendFailed,
+]);
+
+/** True only for failures where opening a fresh connection can reasonably recover. */
+export function isTransientMcpConnectionError(error: unknown): boolean {
+  if (error instanceof Error && error.name === 'AbortError') return false;
+  if (SdkError.isInstance(error)) return TRANSIENT_SDK_ERROR_CODES.has(error.code);
+  if (!error || typeof error !== 'object') return false;
+
+  const candidate = error as { code?: unknown; status?: unknown; cause?: unknown };
+  if (typeof candidate.code === 'string' && TRANSIENT_NODE_ERROR_CODES.has(candidate.code)) return true;
+  if (typeof candidate.status === 'number') {
+    return candidate.status === 408 || candidate.status === 425 || candidate.status === 429 || candidate.status >= 500;
+  }
+  return candidate.cause !== undefined && candidate.cause !== error
+    ? isTransientMcpConnectionError(candidate.cause)
+    : false;
+}
+
+function positiveIntegerEnv(name: string, fallback: number, maximum: number): number {
+  const parsed = Number.parseInt(process.env[name] || '', 10);
+  if (!Number.isFinite(parsed) || parsed < 1) return fallback;
+  return Math.min(parsed, maximum);
+}
+
+const MCP_CONNECT_CONCURRENCY = positiveIntegerEnv('MCP_CONNECT_CONCURRENCY', 4, 8);
+const MCP_CONNECT_RETRY_DELAY_MS = positiveIntegerEnv('MCP_CONNECT_RETRY_DELAY_MS', 300, 5_000);
+const PROGRESSIVE_MCP_TOOL_THRESHOLD = positiveIntegerEnv('MCP_PROGRESSIVE_TOOL_THRESHOLD', 20, 10_000);
+const PROGRESSIVE_MCP_SCHEMA_TOKEN_THRESHOLD = positiveIntegerEnv('MCP_PROGRESSIVE_SCHEMA_TOKEN_THRESHOLD', 3_000, 1_000_000);
+const MAX_EXPLICIT_TOOL_IDS = 200;
+const MAX_EXPLICIT_MCP_SERVER_IDS = 50;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function safeErrorSummary(error: unknown): string {
+  const candidate = error && typeof error === 'object'
+    ? error as { name?: unknown; message?: unknown; code?: unknown; status?: unknown }
+    : null;
+  const name = typeof candidate?.name === 'string' ? candidate.name : 'Error';
+  const code = typeof candidate?.code === 'string' ? ` code=${candidate.code}` : '';
+  const status = typeof candidate?.status === 'number' ? ` status=${candidate.status}` : '';
+  const rawMessage = typeof candidate?.message === 'string' ? candidate.message : String(error);
+  const message = rawMessage
+    .replace(/([?&](?:access_token|api_key|key|secret|token)=)[^&\s]+/gi, '$1[redacted]')
+    .replace(/(authorization|client_secret|password)\s*[:=]\s*[^,;\s]+/gi, '$1=[redacted]')
+    .slice(0, 1_000);
+  return `${name}${code}${status}: ${message}`;
+}
+
 /**
- * Load the mcp_servers row, parse the config, connect an MCP client (with one
- * retry on transient failures), and compute the tool name prefix.
+ * Load the mcp_servers row, decrypt/parse the config, connect an MCP client,
+ * and compute the tool name prefix. One retry is allowed only for a failure
+ * classified as transient.
  * Returns null when the server is skipped (bad config, unknown transport,
  * offline local agent, or connection failure) — callers then just continue.
  */
@@ -152,10 +232,8 @@ async function connectMcpServer(
   serverRow: McpServerRowForConnect,
   userId: string
 ): Promise<{ connection: McpConnection; slug: string; namePrefix: string } | null> {
-  let config: McpServerConfig;
-  try {
-    config = JSON.parse(serverRow.config) as McpServerConfig;
-  } catch {
+  const config = parseStoredMcpConfig(serverRow.config);
+  if (!config) {
     console.error(`[resolve] Invalid MCP server config for ${serverRow.id}`);
     return null;
   }
@@ -173,18 +251,19 @@ async function connectMcpServer(
     return null;
   }
 
-  // Connect with one retry on transient failures
+  // A fresh connection is retried once only for timeout/closed/network failures.
   let connection: McpConnection | null = null;
   for (let attempt = 0; attempt <= 1; attempt++) {
     try {
       connection = await createAndConnectMcpClient({ transport, config, serverId: serverRow.id }, { userId });
       break;
     } catch (err) {
-      if (attempt < 1) {
-        console.warn(`[resolve] MCP connect attempt ${attempt + 1} failed for ${serverRow.name}, retrying in 2s...`);
-        await new Promise(resolve => setTimeout(resolve, 2000));
+      if (attempt < 1 && isTransientMcpConnectionError(err)) {
+        console.warn(`[resolve] Transient MCP connection failure for ${serverRow.name}; retrying once`);
+        await delay(MCP_CONNECT_RETRY_DELAY_MS);
       } else {
-        console.error(`[resolve] Failed to connect to MCP server ${serverRow.name} (${serverRow.id}) after 2 attempts:`, err);
+        console.error(`[resolve] Failed to connect to MCP server ${serverRow.name} (${serverRow.id}): ${safeErrorSummary(err)}`);
+        break;
       }
     }
   }
@@ -195,26 +274,168 @@ async function connectMcpServer(
   return { connection, slug, namePrefix };
 }
 
-const PROGRESSIVE_MCP_TOOL_THRESHOLD = Number.parseInt(process.env.MCP_PROGRESSIVE_TOOL_THRESHOLD || '20', 10);
-
-function shouldUseProgressiveDiscovery(mcpToolCount: number): boolean {
-  return mcpToolCount >= Math.max(1, PROGRESSIVE_MCP_TOOL_THRESHOLD);
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  worker: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const runners = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (true) {
+      const index = nextIndex++;
+      if (index >= items.length) return;
+      results[index] = await worker(items[index]);
+    }
+  });
+  await Promise.all(runners);
+  return results;
 }
 
-function buildMcpMetaTools(catalog: McpToolCatalogEntry[]): ResolvedTool[] {
+async function connectAndListMcpServers(
+  serverRows: readonly McpServerRowForConnect[],
+  userId: string
+): Promise<ConnectedMcpServer[]> {
+  const outcomes = await mapWithConcurrency(serverRows, MCP_CONNECT_CONCURRENCY, async (serverRow) => {
+    const connected = await connectMcpServer(serverRow, userId);
+    if (!connected) return null;
+    try {
+      const tools = await listMcpTools(connected.connection.client, connected.namePrefix);
+      return { serverRow, connection: connected.connection, tools } satisfies ConnectedMcpServer;
+    } catch (error) {
+      await connected.connection.close().catch((closeError) => {
+        console.error(`[resolve] Failed to close MCP server ${serverRow.name} after list failure: ${safeErrorSummary(closeError)}`);
+      });
+      console.error(`[resolve] Failed to list tools from MCP server ${serverRow.name} (${serverRow.id}): ${safeErrorSummary(error)}`);
+      return null;
+    }
+  });
+  return outcomes.filter((outcome): outcome is ConnectedMcpServer => outcome !== null);
+}
+
+function allocateProviderFacingName(baseName: string, serverId: string, occupied: Set<string>): string {
+  if (!occupied.has(baseName)) {
+    occupied.add(baseName);
+    return baseName;
+  }
+  const stableSuffix = serverId.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 8) || 'server';
+  let sequence = 1;
+  while (true) {
+    const suffix = `__${stableSuffix}${sequence === 1 ? '' : `_${sequence}`}`;
+    const candidate = `${baseName.slice(0, Math.max(1, 64 - suffix.length))}${suffix}`;
+    if (!occupied.has(candidate)) {
+      occupied.add(candidate);
+      return candidate;
+    }
+    sequence++;
+  }
+}
+
+async function appendConnectedMcpServers(
+  connectedServers: readonly ConnectedMcpServer[],
+  resolved: ResolvedTool[],
+  catalog: McpToolCatalogEntry[],
+  clients: Map<string, McpConnection>
+): Promise<void> {
+  const occupiedNames = new Set(resolved.map((tool) => tool.name));
+  for (const connected of connectedServers) {
+    const { serverRow, connection, tools } = connected;
+    const existing = clients.get(serverRow.id);
+    if (existing) {
+      await connection.close().catch((error) => console.error(`[resolve] Duplicate MCP connection close failed: ${safeErrorSummary(error)}`));
+      continue;
+    }
+
+    for (const tool of tools) {
+      const exposedName = allocateProviderFacingName(tool.name, serverRow.id, occupiedNames);
+      const openAIDef = exposedName === tool.name
+        ? tool.openAIDef
+        : {
+            ...tool.openAIDef,
+            function: {
+              ...tool.openAIDef.function,
+              name: exposedName,
+              description: `${tool.description} Call it only by its exact exposed name: ${exposedName}.`,
+            },
+          };
+      catalog.push({
+        serverId: serverRow.id,
+        serverName: serverRow.name,
+        name: exposedName,
+        mcpToolName: tool.mcpToolName,
+        title: tool.title,
+        description: tool.description,
+        inputSchema: tool.inputSchema,
+        outputSchema: tool.outputSchema,
+        annotations: tool.annotations,
+        execution: tool.execution,
+      });
+      resolved.push({
+        id: `mcp_${serverRow.id}_${tool.mcpToolName}`,
+        name: exposedName,
+        type: 'mcp',
+        config: {
+          mcp_server_id: serverRow.id,
+          mcp_server_name: serverRow.name,
+          mcp_tool_name: tool.mcpToolName,
+          annotations: tool.annotations,
+          outputSchema: tool.outputSchema,
+          execution: tool.execution,
+        } satisfies ResolvedToolMcpConfig,
+        openAIDef,
+      });
+    }
+    clients.set(serverRow.id, connection);
+  }
+}
+
+/** Conservative four-characters-per-token estimate for catalog definitions. */
+export function estimateMcpCatalogTokens(catalog: readonly McpToolCatalogEntry[]): number {
+  try {
+    return Math.ceil(JSON.stringify(catalog.map((entry) => ({
+      name: entry.name,
+      description: entry.description,
+      inputSchema: entry.inputSchema,
+      outputSchema: entry.outputSchema,
+      annotations: entry.annotations,
+      execution: entry.execution,
+    }))).length / 4);
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
+export function shouldUseProgressiveMcpDiscovery(catalog: readonly McpToolCatalogEntry[]): boolean {
+  return catalog.length >= PROGRESSIVE_MCP_TOOL_THRESHOLD
+    || estimateMcpCatalogTokens(catalog) >= PROGRESSIVE_MCP_SCHEMA_TOKEN_THRESHOLD;
+}
+
+function allocateUniqueToolName(baseName: string, occupied: Set<string>): string {
+  let candidate = baseName;
+  let suffix = 2;
+  while (occupied.has(candidate)) candidate = `${baseName}_${suffix++}`;
+  occupied.add(candidate);
+  return candidate;
+}
+
+function buildMcpMetaTools(catalog: McpToolCatalogEntry[], occupiedNames: Iterable<string>): ResolvedTool[] {
   const commonCatalog = catalog;
+  const occupied = new Set(occupiedNames);
+  const searchName = allocateUniqueToolName('search_mcp_tools', occupied);
+  const detailsName = allocateUniqueToolName('get_mcp_tool_details', occupied);
+  const callName = allocateUniqueToolName('call_mcp_tool', occupied);
   return [
     {
-      id: 'mcp_meta_search_tools',
-      name: 'search_mcp_tools',
+      id: `mcp_meta_search_tools_${searchName}`,
+      name: searchName,
       type: 'mcp',
       config: { kind: 'mcp_search' } as ResolvedToolMcpMetaConfig,
       mcpCatalog: commonCatalog,
       openAIDef: {
         type: 'function',
         function: {
-          name: 'search_mcp_tools',
-          description: 'Search available MCP tools by natural-language query. Returns concise matches; call get_mcp_tool_details before executing a tool.',
+          name: searchName,
+          description: `Search available MCP tools by natural-language query. Returns concise matches; call ${detailsName} before executing a tool.`,
           parameters: {
             type: 'object',
             properties: {
@@ -228,16 +449,16 @@ function buildMcpMetaTools(catalog: McpToolCatalogEntry[]): ResolvedTool[] {
       },
     },
     {
-      id: 'mcp_meta_get_tool_details',
-      name: 'get_mcp_tool_details',
+      id: `mcp_meta_get_tool_details_${detailsName}`,
+      name: detailsName,
       type: 'mcp',
       config: { kind: 'mcp_details' } as ResolvedToolMcpMetaConfig,
       mcpCatalog: commonCatalog,
       openAIDef: {
         type: 'function',
         function: {
-          name: 'get_mcp_tool_details',
-          description: 'Fetch the full input schema and safety annotations for one MCP tool found by search_mcp_tools.',
+          name: detailsName,
+          description: `Fetch the full schemas and safety metadata for one MCP tool found by ${searchName}.`,
           parameters: {
             type: 'object',
             properties: { name: { type: 'string', description: 'Exact exposed MCP tool name.' } },
@@ -247,15 +468,15 @@ function buildMcpMetaTools(catalog: McpToolCatalogEntry[]): ResolvedTool[] {
       },
     },
     {
-      id: 'mcp_meta_call_tool',
-      name: 'call_mcp_tool',
+      id: `mcp_meta_call_tool_${callName}`,
+      name: callName,
       type: 'mcp',
       config: { kind: 'mcp_call' } as ResolvedToolMcpMetaConfig,
       mcpCatalog: commonCatalog,
       openAIDef: {
         type: 'function',
         function: {
-          name: 'call_mcp_tool',
+          name: callName,
           description: 'Execute an MCP tool by exact exposed name after inspecting it. Use this stable broker tool for MCP calls.',
           parameters: {
             type: 'object',
@@ -281,13 +502,14 @@ export async function resolveToolsForAgent(agentId: string, userId: string): Pro
   const mcpClients = new Map<string, McpConnection>();
   const mcpCatalog: McpToolCatalogEntry[] = [];
 
-  // 1. Tools from tools table (builtin, http)
+  // The agent and every assigned capability must belong to the same tenant.
   const rows = db.prepare(`
-    SELECT t.id, t.name, t.description, t.parameters_schema, t.type, t.config
+    SELECT DISTINCT t.id, t.name, t.description, t.parameters_schema, t.type, t.config
     FROM tools t
     INNER JOIN agent_tools at ON at.tool_id = t.id
-    WHERE at.agent_id = ?
-  `).all(agentId) as ToolRow[];
+    INNER JOIN agents a ON a.id = at.agent_id
+    WHERE at.agent_id = ? AND a.user_id = ? AND t.user_id = ?
+  `).all(agentId, userId, userId) as ToolRow[];
 
   for (const row of rows) {
     if (!isUsable(row, userId)) continue;
@@ -321,95 +543,58 @@ export async function resolveToolsForAgent(agentId: string, userId: string): Pro
     }
   }
 
-  // 2. MCP servers linked to this agent
-  const mcpLinks = db.prepare(`
-    SELECT mcp_server_id FROM agent_mcp_servers WHERE agent_id = ?
-  `).all(agentId) as { mcp_server_id: string }[];
+  const serverRows = db.prepare(`
+    SELECT DISTINCT ms.id, ms.name, ms.transport, ms.config
+    FROM mcp_servers ms
+    INNER JOIN agent_mcp_servers ams ON ams.mcp_server_id = ms.id
+    INNER JOIN agents a ON a.id = ams.agent_id
+    WHERE ams.agent_id = ? AND a.user_id = ? AND ms.user_id = ?
+    ORDER BY ms.id
+  `).all(agentId, userId, userId) as McpServerRowForConnect[];
+  const connectedServers = await connectAndListMcpServers(serverRows, userId);
+  await appendConnectedMcpServers(connectedServers, resolved, mcpCatalog, mcpClients);
 
-  for (const { mcp_server_id } of mcpLinks) {
-    const serverRow = db.prepare('SELECT id, name, transport, config FROM mcp_servers WHERE id = ?').get(mcp_server_id) as
-      | McpServerRowForConnect
-      | undefined;
-    if (!serverRow) continue;
-
-    const connected = await connectMcpServer(serverRow, userId);
-    if (!connected) continue;
-    const { connection, namePrefix } = connected;
-
-    try {
-      const mcpTools = await listMcpTools(connection.client, namePrefix);
-
-      for (const mt of mcpTools) {
-        mcpCatalog.push({
-          serverId: mcp_server_id,
-          serverName: serverRow.name,
-          name: mt.name,
-          mcpToolName: mt.mcpToolName,
-          title: mt.title,
-          description: mt.description,
-          inputSchema: mt.inputSchema,
-          annotations: mt.annotations,
-        });
-        resolved.push({
-          id: `mcp_${mcp_server_id}_${mt.mcpToolName}`,
-          name: mt.name,
-          type: 'mcp',
-          config: { mcp_server_id, mcp_tool_name: mt.mcpToolName, annotations: mt.annotations } as ResolvedToolMcpConfig,
-          openAIDef: mt.openAIDef,
-        });
-      }
-      mcpClients.set(mcp_server_id, connection);
-    } catch (err) {
-      await connection.close();
-      console.error(`[resolve] Failed to list tools from MCP server ${serverRow.name} (${mcp_server_id}):`, err);
-      // Do not fail the whole request; skip this MCP server
-    }
-  }
-
-  const mcpToolCount = mcpCatalog.length;
-  if (shouldUseProgressiveDiscovery(mcpToolCount)) {
+  if (shouldUseProgressiveMcpDiscovery(mcpCatalog)) {
     const nonMcpTools = resolved.filter((tool) => tool.type !== 'mcp');
-    return { resolvedTools: [...nonMcpTools, ...buildMcpMetaTools(mcpCatalog)], mcpClients };
+    const occupied = nonMcpTools.map((tool) => tool.name);
+    return { resolvedTools: [...nonMcpTools, ...buildMcpMetaTools(mcpCatalog, occupied)], mcpClients };
   }
 
   return { resolvedTools: resolved, mcpClients };
 }
 
 export interface ResolveToolsFromIdsOptions {
-  /** When true, resolve tools by id only (no user_id filter). Use for council merge when council belongs to current user. */
-  byIdOnly?: boolean;
+  /** Reserved for backwards-compatible call sites. Tenant scoping can never be disabled. */
+  readonly tenantScopeCannotBeDisabled?: true;
 }
 
 /**
  * Resolve tools and MCP servers by explicit IDs (for general chat or council merge).
- * By default only resolves tools that belong to the user (user_id filter).
+ * Always resolves only records owned by the authenticated user.
  * MCP clients are connected and must be closed by the caller when done.
  */
 export async function resolveToolsFromIds(
   toolIds: string[],
   mcpServerIds: string[],
   userId: string,
-  options?: ResolveToolsFromIdsOptions
+  _options?: ResolveToolsFromIdsOptions
 ): Promise<ResolveToolsResult> {
   const resolved: ResolvedTool[] = [];
   const mcpClients = new Map<string, McpConnection>();
   const mcpCatalog: McpToolCatalogEntry[] = [];
-  const byIdOnly = options?.byIdOnly === true;
+  const ownedToolIds = [...new Set(toolIds.filter((id): id is string => typeof id === 'string' && id.length > 0))]
+    .slice(0, MAX_EXPLICIT_TOOL_IDS);
+  const ownedMcpServerIds = [...new Set(mcpServerIds.filter((id): id is string => typeof id === 'string' && id.length > 0))]
+    .slice(0, MAX_EXPLICIT_MCP_SERVER_IDS);
 
-  // 1. Tools from tools table by id; optionally scoped to user
-  if (toolIds.length > 0) {
-    const placeholders = toolIds.map(() => '?').join(',');
-    const rows = byIdOnly
-      ? (db.prepare(`
-          SELECT id, name, description, parameters_schema, type, config
-          FROM tools
-          WHERE id IN (${placeholders})
-        `).all(...toolIds) as ToolRow[])
-      : (db.prepare(`
-          SELECT id, name, description, parameters_schema, type, config
-          FROM tools
-          WHERE id IN (${placeholders}) AND user_id = ?
-        `).all(...toolIds, userId) as ToolRow[]);
+  if (ownedToolIds.length > 0) {
+    const placeholders = ownedToolIds.map(() => '?').join(',');
+    const rows = db.prepare(`
+      SELECT id, name, description, parameters_schema, type, config
+      FROM tools
+      WHERE id IN (${placeholders}) AND user_id = ?
+      ORDER BY id
+    `).all(...ownedToolIds, userId) as ToolRow[];
 
     for (const row of rows) {
       if (!isUsable(row, userId)) continue;
@@ -444,52 +629,21 @@ export async function resolveToolsFromIds(
     }
   }
 
-  // 2. MCP servers by id; optionally scoped to user
-  for (const mcp_server_id of mcpServerIds) {
-    const serverRow = (byIdOnly
-      ? db.prepare('SELECT id, name, transport, config FROM mcp_servers WHERE id = ?').get(mcp_server_id)
-      : db.prepare('SELECT id, name, transport, config FROM mcp_servers WHERE id = ? AND user_id = ?').get(mcp_server_id, userId)) as
-      | McpServerRowForConnect
-      | undefined;
-    if (!serverRow) continue;
+  const serverRows = ownedMcpServerIds.length > 0
+    ? db.prepare(`
+        SELECT id, name, transport, config
+        FROM mcp_servers
+        WHERE id IN (${ownedMcpServerIds.map(() => '?').join(',')}) AND user_id = ?
+        ORDER BY id
+      `).all(...ownedMcpServerIds, userId) as McpServerRowForConnect[]
+    : [];
+  const connectedServers = await connectAndListMcpServers(serverRows, userId);
+  await appendConnectedMcpServers(connectedServers, resolved, mcpCatalog, mcpClients);
 
-    const connected = await connectMcpServer(serverRow, userId);
-    if (!connected) continue;
-    const { connection, namePrefix } = connected;
-
-    try {
-      const mcpTools = await listMcpTools(connection.client, namePrefix);
-
-      for (const mt of mcpTools) {
-        mcpCatalog.push({
-          serverId: mcp_server_id,
-          serverName: serverRow.name,
-          name: mt.name,
-          mcpToolName: mt.mcpToolName,
-          title: mt.title,
-          description: mt.description,
-          inputSchema: mt.inputSchema,
-          annotations: mt.annotations,
-        });
-        resolved.push({
-          id: `mcp_${mcp_server_id}_${mt.mcpToolName}`,
-          name: mt.name,
-          type: 'mcp',
-          config: { mcp_server_id, mcp_tool_name: mt.mcpToolName, annotations: mt.annotations } as ResolvedToolMcpConfig,
-          openAIDef: mt.openAIDef,
-        });
-      }
-      mcpClients.set(mcp_server_id, connection);
-    } catch (err) {
-      await connection.close();
-      console.error(`[resolve] Failed to list tools from MCP server ${serverRow.name} (${mcp_server_id}):`, err);
-    }
-  }
-
-  const mcpToolCount = mcpCatalog.length;
-  if (shouldUseProgressiveDiscovery(mcpToolCount)) {
+  if (shouldUseProgressiveMcpDiscovery(mcpCatalog)) {
     const nonMcpTools = resolved.filter((tool) => tool.type !== 'mcp');
-    return { resolvedTools: [...nonMcpTools, ...buildMcpMetaTools(mcpCatalog)], mcpClients };
+    const occupied = nonMcpTools.map((tool) => tool.name);
+    return { resolvedTools: [...nonMcpTools, ...buildMcpMetaTools(mcpCatalog, occupied)], mcpClients };
   }
 
   return { resolvedTools: resolved, mcpClients };
@@ -506,13 +660,24 @@ export interface ConversationToolOverride {
  * Always returns a value (never null) — { tools_overridden: false, tool_ids: [], mcp_server_ids: [] } when no
  * override row/flag is set, so callers never need a null-check.
  */
-export function getConversationToolOverride(conversationId: string): ConversationToolOverride {
-  const row = db.prepare('SELECT tools_overridden FROM conversations WHERE id = ?').get(conversationId) as
+export function getConversationToolOverride(conversationId: string, userId: string): ConversationToolOverride {
+  const row = db.prepare('SELECT tools_overridden FROM conversations WHERE id = ? AND user_id = ?').get(conversationId, userId) as
     | { tools_overridden: number }
     | undefined;
+  if (!row) return { tools_overridden: false, tool_ids: [], mcp_server_ids: [] };
   const tools_overridden = !!row?.tools_overridden;
-  const toolLinks = db.prepare('SELECT tool_id FROM conversation_tools WHERE conversation_id = ?').all(conversationId) as { tool_id: string }[];
-  const mcpLinks = db.prepare('SELECT mcp_server_id FROM conversation_mcp_servers WHERE conversation_id = ?').all(conversationId) as { mcp_server_id: string }[];
+  const toolLinks = db.prepare(`
+    SELECT DISTINCT ct.tool_id
+    FROM conversation_tools ct
+    INNER JOIN tools t ON t.id = ct.tool_id
+    WHERE ct.conversation_id = ? AND t.user_id = ?
+  `).all(conversationId, userId) as { tool_id: string }[];
+  const mcpLinks = db.prepare(`
+    SELECT DISTINCT cms.mcp_server_id
+    FROM conversation_mcp_servers cms
+    INNER JOIN mcp_servers ms ON ms.id = cms.mcp_server_id
+    WHERE cms.conversation_id = ? AND ms.user_id = ?
+  `).all(conversationId, userId) as { mcp_server_id: string }[];
   return {
     tools_overridden,
     tool_ids: toolLinks.map((l) => l.tool_id),
@@ -572,15 +737,24 @@ export function toOpenRouterTools(resolved: ResolvedTool[]): { type: 'function';
 export function appendToolInstructionsIfNeeded(systemPrompt: string, resolvedTools: ResolvedTool[]): string {
   const hasMcp = resolvedTools.some((t) => t.type === 'mcp');
   if (!hasMcp) return systemPrompt;
-  const hasMeta = resolvedTools.some((t) => t.name === 'search_mcp_tools' || t.name === 'call_mcp_tool');
-  const extra = hasMeta
-    ? ' When many MCP tools are available, first use search_mcp_tools, then get_mcp_tool_details, and execute through call_mcp_tool with the exact tool name.'
+  const searchTool = resolvedTools.find((tool) => isMcpMetaTool(tool, 'mcp_search'));
+  const detailsTool = resolvedTools.find((tool) => isMcpMetaTool(tool, 'mcp_details'));
+  const callTool = resolvedTools.find((tool) => isMcpMetaTool(tool, 'mcp_call'));
+  const extra = searchTool && detailsTool && callTool
+    ? ` When many MCP tools are available, first use ${searchTool.name}, then ${detailsTool.name}, and execute through ${callTool.name} with the exact exposed tool name.`
     : '';
   return (
     systemPrompt +
     '\n\nWhen calling tools, always use the exact tool name from the tools list. MCP tools have names starting with mcp_; do not omit this prefix.' +
     extra
   );
+}
+
+function isMcpMetaTool(tool: ResolvedTool, kind: ResolvedToolMcpMetaConfig['kind']): boolean {
+  return tool.type === 'mcp'
+    && !!tool.config
+    && typeof tool.config === 'object'
+    && (tool.config as Partial<ResolvedToolMcpMetaConfig>).kind === kind;
 }
 
 function tryParse(s: string): unknown {

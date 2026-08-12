@@ -558,7 +558,15 @@ export class CouncilExecutor {
             name,
             args,
             options.mcpClients || new Map(),
-            options.userId
+            options.userId,
+            undefined,
+            undefined,
+            {
+              ...(options.authorizeMcpCall ? { authorizeMcpCall: options.authorizeMcpCall } : {}),
+              mcpControl: {
+                ...(options.signal ? { signal: options.signal } : {}),
+              },
+            }
           );
 
           const output = result.output ?? '';
@@ -613,6 +621,7 @@ export class CouncilExecutor {
       model: upstreamModel,
       tools: options.tools || [],
       mcpClients: options.mcpClients as Map<string, McpConnection> | undefined,
+      authorizeMcpCall: options.authorizeMcpCall,
       signal: options.signal,
     });
 
@@ -823,6 +832,7 @@ export class CouncilExecutor {
       model: toUpstreamModelId(synthesizerModel),
       tools: [],
       mcpClients: options.mcpClients as Map<string, McpConnection> | undefined,
+      authorizeMcpCall: options.authorizeMcpCall,
       signal: options.signal,
       emit: (evt) => {
         const chunk = evt.content;

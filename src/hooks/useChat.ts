@@ -1,7 +1,7 @@
 import { useCallback } from 'react';
 import { useStore } from '../stores/store';
 import { streamChat } from '../api/client';
-import { conversationsApi } from '../api/client';
+import { conversationsApi, mcpServersApi, type McpApprovalRequiredData } from '../api/client';
 import { streamCouncilChat } from '../api/councilClient';
 import { buildThread, getTurnVariants } from '../utils/threads';
 import type { Message, ChatAttachmentInput, PDFEngine, CouncilConfig, ProviderRoutingConfig } from '../types';
@@ -157,6 +157,22 @@ export function useChat() {
           },
           onConversationTitle: (event) => {
             updateConversationTitle(event.conversation_id, event.title);
+          },
+          onMcpApprovalRequired: (approval) => {
+            let argumentsText = '{}';
+            try { argumentsText = JSON.stringify(approval.arguments, null, 2); } catch { /* fail closed below */ }
+            const flowWarning = approval.possible_cross_tool_data
+              ? '\n\nWarning: these arguments may contain data returned by another tool or server.'
+              : '';
+            const approved = window.confirm(
+              `Allow this exact MCP tool call from the council?\n\n`
+              + `Server: ${approval.server_name || approval.server_id}\n`
+              + `Tool: ${approval.tool_name}\n`
+              + `Arguments (SHA-256 ${approval.arguments_sha256.slice(0, 12)}…):\n${argumentsText}`
+              + flowWarning
+              + '\n\nServer annotations are untrusted hints and were not used to approve this action.',
+            );
+            void mcpServersApi.resolveApproval(approval.id, approved).catch(() => {});
           },
           onComplete: async () => {
             setCouncilIsExecuting(false);
@@ -346,6 +362,28 @@ export function useChat() {
       (data) => appendStreamingToolOutputChunk(data),
       invokeSkillNames,
       editMessageId,
+      (approval: McpApprovalRequiredData) => {
+        let argumentsText = '{}';
+        try {
+          argumentsText = JSON.stringify(approval.arguments, null, 2);
+        } catch {
+          // The server already rejects values that cannot be reviewed fully.
+        }
+        const flowWarning = approval.possible_cross_tool_data
+          ? '\n\nWarning: these arguments may contain data returned by another tool or server.'
+          : '';
+        const approved = window.confirm(
+          `Allow this exact MCP tool call?\n\n`
+          + `Server: ${approval.server_name || approval.server_id}\n`
+          + `Tool: ${approval.tool_name}\n`
+          + `Arguments (SHA-256 ${approval.arguments_sha256.slice(0, 12)}…):\n${argumentsText}`
+          + flowWarning
+          + '\n\nServer annotations are untrusted hints and were not used to approve this action.',
+        );
+        void mcpServersApi.resolveApproval(approval.id, approved).catch(() => {
+          // The backend remains fail-closed and will expire the pending call.
+        });
+      },
     );
   }, [activeConversationId, isStreaming, addMessage, setIsStreaming, setStreamingContent, appendStreamingContent, appendStreamingContentEvent, setAbortController, setStreamStartTime, setReasoningContent, appendReasoningContent, appendStreamingReasoningEvent, reasoningOverride, upsertStreamingToolCall, completeStreamingToolCall, appendStreamingToolOutputChunk, resetStreamingActivityEvents, loadMessages, loadConversations, updateConversationTitle, selectedAgentId]);
 

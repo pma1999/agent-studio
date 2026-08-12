@@ -29,10 +29,10 @@ type PendingRequest = {
 
 const connections = new Map<string, AgentConnection>();
 const pendingRequests = new Map<string, PendingRequest>();
-const messageHooks = new Set<(message: AgentToBackendMessage) => void>();
+const messageHooks = new Set<(userId: string, message: AgentToBackendMessage) => void>();
 const disconnectHooks = new Set<(userId: string) => void>();
 
-export function registerMessageHook(cb: (message: AgentToBackendMessage) => void): () => void {
+export function registerMessageHook(cb: (userId: string, message: AgentToBackendMessage) => void): () => void {
   messageHooks.add(cb);
   return () => {
     messageHooks.delete(cb);
@@ -66,10 +66,10 @@ function startTimeout(requestId: string, pending: PendingRequest): NodeJS.Timeou
   }, pending.timeoutMs);
 }
 
-function handleMessage(connection: AgentConnection, message: AgentToBackendMessage): void {
+function handleMessage(userId: string, connection: AgentConnection, message: AgentToBackendMessage): void {
   for (const hook of messageHooks) {
     try {
-      hook(message);
+      hook(userId, message);
     } catch (e) {
       console.error('[agentRelay] message hook error:', e);
     }
@@ -122,7 +122,7 @@ export function registerAgentConnection(userId: string, connection: AgentConnect
     previous.close('replaced by a newer connection');
   }
   connections.set(userId, connection);
-  connection.onMessage((message) => handleMessage(connection, message));
+  connection.onMessage((message) => handleMessage(userId, connection, message));
 }
 
 export function unregisterAgentConnection(

@@ -7,7 +7,11 @@ import { annotationsFromWebSearchResults } from '../tools/registry.js';
 import { runCommandTool } from '../tools/execCommand.js';
 import type { RunToolResult } from '../tools/run.js';
 import { parseReasoningToolCalls } from '../utils/parseReasoningToolCalls.js';
-import type { McpConnection } from '../mcp/index.js';
+import {
+  requestMcpToolApproval,
+  type McpConnection,
+  type McpToolAuthorizationRequest,
+} from '../mcp/index.js';
 import { AuthRequest } from '../middleware/auth.js';
 import { trackStream, untrackStream, isShuttingDown } from '../shutdown.js';
 import {
@@ -255,6 +259,20 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       return;
     }
 
+    const authorizeMcpCall = async (request: McpToolAuthorizationRequest): Promise<boolean> => {
+      if (clientDisconnected || res.writableEnded) return false;
+      return requestMcpToolApproval({
+        userId,
+        conversationId: conversation_id,
+        request,
+        ...(abortController?.signal ? { signal: abortController.signal } : {}),
+        emit: (approval) => {
+          if (clientDisconnected || res.writableEnded) throw new Error('Chat stream is closed');
+          res.write(`data: ${JSON.stringify({ mcp_approval_required: approval })}\n\n`);
+        },
+      });
+    };
+
     if (invoke_skill_names !== undefined && (!Array.isArray(invoke_skill_names) || !invoke_skill_names.every((n: unknown) => typeof n === 'string'))) {
       res.status(400).json({ error: 'invoke_skill_names must be an array of strings' });
       return;
@@ -497,7 +515,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
 
     // Resolve tools for this agent (with user context for settings)
     // Hierarchy: conversation tool/MCP override > agent/general default (no message-level tier for tools)
-    const conversationToolOverride = getConversationToolOverride(conversation.id);
+    const conversationToolOverride = getConversationToolOverride(conversation.id, userId);
     const toolSource = selectToolResolutionSource({
       conversationOverride: conversationToolOverride,
       isGeneralChat: agent.id === 'general',
@@ -817,6 +835,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         toolChoice: agent.tool_choice === 'none' ? 'none' : 'auto',
         mcpClients,
         signal: abortController.signal,
+        authorizeMcpCall,
         emit: (evt) => {
           if (clientDisconnected || res.writableEnded) return;
           res.write(`data: ${JSON.stringify(evt)}\n\n`);
@@ -1224,6 +1243,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
           }, 15_000);
 
           let result;
+          let lastMcpProgressAt = 0;
           try {
             let outputSeq = 0;
             result = name === 'run_command'
@@ -1234,7 +1254,37 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
                   res.write(`data: ${JSON.stringify(buildToolOutputChunkEvent(id, chunk, outputSeq++))}\n\n`);
                 },
               })
-              : await runTool(resolvedTools, name, args, mcpClients, userId, conversation_id, messages);
+              : await runTool(
+                  resolvedTools,
+                  name,
+                  args,
+                  mcpClients,
+                  userId,
+                  conversation_id,
+                  messages,
+                  {
+                    authorizeMcpCall,
+                    possibleCrossToolData: toolCallCount > 0,
+                    mcpControl: {
+                      ...(abortController?.signal ? { signal: abortController.signal } : {}),
+                      onProgress: (progress) => {
+                        if (clientDisconnected || res.writableEnded) return;
+                        const now = Date.now();
+                        if (now - lastMcpProgressAt < 100 && progress.progress !== progress.total) return;
+                        lastMcpProgressAt = now;
+                        res.write(`data: ${JSON.stringify({
+                          tool_progress: {
+                            id,
+                            name,
+                            progress: progress.progress,
+                            ...(progress.total !== undefined ? { total: progress.total } : {}),
+                            ...(progress.message ? { message: progress.message.slice(0, 2_000) } : {}),
+                          },
+                        })}\n\n`);
+                      },
+                    },
+                  }
+                );
           } finally {
             clearInterval(keepaliveTimer);
           }
@@ -1313,9 +1363,13 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     // Unregister this SSE connection from the shutdown tracker.
     untrackStream(res);
     // Close MCP connections so stdio processes and HTTP sessions are released
-    for (const conn of mcpClients.values()) {
-      conn.close().catch((e) => console.error('[chat] MCP close error:', e));
+    const closeResults = await Promise.allSettled(
+      [...new Set(mcpClients.values())].map((connection) => connection.close())
+    );
+    for (const result of closeResults) {
+      if (result.status === 'rejected') console.error('[chat] MCP close error:', result.reason);
     }
+    mcpClients.clear();
   }
 });
 

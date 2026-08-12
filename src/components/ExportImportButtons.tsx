@@ -75,7 +75,14 @@ export function ExportImportButtons({
       if (created.agents > 0) parts.push(`${created.agents} agent${created.agents !== 1 ? 's' : ''}`);
       if (created.tools > 0) parts.push(`${created.tools} tool${created.tools !== 1 ? 's' : ''}`);
       if (created.mcp_servers > 0) parts.push(`${created.mcp_servers} MCP server${created.mcp_servers !== 1 ? 's' : ''}`);
-      setResult({ type: 'success', text: parts.length ? `Imported: ${parts.join(', ')}` : 'Import complete' });
+      const setupCount = res.requires_configuration?.length ?? 0;
+      const base = parts.length ? `Imported: ${parts.join(', ')}` : 'Import complete';
+      setResult({
+        type: 'success',
+        text: setupCount > 0
+          ? `${base}. ${setupCount} MCP server${setupCount === 1 ? '' : 's'} imported safely as setup-required draft${setupCount === 1 ? '' : 's'}; add the missing private values before enabling.`
+          : base,
+      });
       onAfterImport?.();
       setTimeout(clearResult, 3500);
     } catch (err) {

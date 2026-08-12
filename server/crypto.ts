@@ -19,6 +19,11 @@ function getEncryptionKey(): Buffer | null {
   return crypto.createHash('sha256').update(raw.slice(0, 64)).digest();
 }
 
+/** True when secrets can be encrypted at rest in this process. */
+export function hasEncryptionKey(): boolean {
+  return getEncryptionKey() !== null;
+}
+
 export function encrypt(plaintext: string): string {
   const key = getEncryptionKey();
   if (!key) return plaintext;

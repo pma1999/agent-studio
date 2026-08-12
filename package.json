@@ -16,40 +16,45 @@
     "start": "node dist/server/index.js",
     "preview": "vite preview",
     "test": "tsx scripts/test-provider-routing.ts && tsx scripts/test-conversation-titles.ts && tsx scripts/test-web-fetch-detection.ts && tsx scripts/test-conversation-tool-overrides.ts && tsx scripts/test-deepseek-assistant-history-content.ts && tsx scripts/test-tool-call-budget.ts && tsx scripts/test-command-safety.ts && tsx scripts/test-exec-audit.ts && tsx scripts/test-run-command-e2b.ts && tsx scripts/test-mcp-stdio-hardening.ts && tsx scripts/test-agent-relay.ts && tsx scripts/test-file-ops.ts && tsx scripts/test-agent-files.ts && tsx scripts/test-agent-uploads.ts && tsx scripts/test-send-file.ts && tsx scripts/test-skill-parser.ts && tsx scripts/test-skill-storage.ts && tsx scripts/test-skill-resolution.ts && tsx scripts/test-skill-activation.ts && tsx scripts/test-skill-run-script.ts && tsx scripts/test-skill-tool-name-collision.ts && tsx scripts/test-mcp-relay.ts && tsx scripts/test-message-editing.ts",
+    "posttest": "npm run test:mcp",
+    "test:mcp": "tsx scripts/test-mcp-client-v2.ts && tsx scripts/test-mcp-client-hardening.ts && tsx scripts/test-mcp-config-security.ts && tsx scripts/test-mcp-runtime-integration.ts && tsx scripts/test-mcp-tenant-isolation.ts",
     "db:restore": "node scripts/restore-db-from-stdin.mjs",
     "db:migrate-local": "node scripts/migrate-local-db.mjs",
     "test:web-fetch": "node scripts/test-web-fetch.mjs",
     "test:ws-probe": "node scripts/test-ws-probe.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.26.0",
+    "@modelcontextprotocol/client": "^2.0.0",
     "@mozilla/readability": "^0.6.0",
     "@openai/codex": "^0.146.1",
-    "adm-zip": "^0.5.16",
+    "adm-zip": "^0.6.0",
     "bcrypt": "^6.0.0",
     "better-sqlite3": "^11.7.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
-    "e2b": "^2.35.3",
-    "express": "^4.21.0",
-    "express-rate-limit": "^8.2.1",
+    "e2b": "^2.38.3",
+    "express": "^4.22.2",
+    "express-rate-limit": "^8.6.2",
     "framer-motion": "^11.15.0",
     "highlight.js": "^11.10.0",
-    "js-yaml": "^4.1.0",
+    "js-yaml": "^4.3.1",
     "jsdom": "^29.1.1",
     "jsonwebtoken": "^9.0.3",
     "lucide-react": "^0.468.0",
-    "nanoid": "^5.0.9",
+    "nanoid": "^5.1.16",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^9.0.1",
     "rehype-highlight": "^7.0.1",
     "remark-gfm": "^4.0.0",
+    "undici": "^7.29.0",
     "ws": "^8.18.0",
     "zod": "^4.3.6",
     "zustand": "^5.0.2"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "@modelcontextprotocol/server": "^2.0.0",
     "@types/adm-zip": "^0.5.7",
     "@types/bcrypt": "^6.0.0",
     "@types/better-sqlite3": "^7.6.12",
@@ -68,5 +73,10 @@
     "typescript": "^5.6.3",
     "vite": "^6.0.3",
     "wait-on": "^8.0.1"
+  },
+  "overrides": {
+    "express": {
+      "path-to-regexp": "0.1.13"
+    }
   }
 }

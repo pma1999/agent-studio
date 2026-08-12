@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { nanoid } from 'nanoid';
 import db from '../db.js';
 import { AuthRequest } from '../middleware/auth.js';
+import { validateOwnedIds } from '../mcp/ownership.js';
 import type { CouncilMember, CouncilRun, CouncilResponse, CouncilRunDetail, CouncilComparison, ToolResultRecord, ToolCallSpec } from '../types.js';
 import {
   assertProviderRoutingCompatible,
@@ -266,6 +267,17 @@ router.post('/members', (req: AuthRequest, res: Response) => {
       return;
     }
 
+    const ownedToolIds = validateOwnedIds(tool_ids ?? [], 'tool_ids', userId);
+    if (!ownedToolIds.ok) {
+      res.status(400).json({ error: ownedToolIds.error });
+      return;
+    }
+    const ownedMcpServerIds = validateOwnedIds(mcp_server_ids ?? [], 'mcp_server_ids', userId);
+    if (!ownedMcpServerIds.ok) {
+      res.status(400).json({ error: ownedMcpServerIds.error });
+      return;
+    }
+
     const parsedMemberProviderRouting = parseProviderRoutingMap(member_provider_routing);
     const parsedSynthesizerProviderRouting = parseProviderRoutingConfig(synthesizer_provider_routing);
     try {
@@ -302,13 +314,13 @@ router.post('/members', (req: AuthRequest, res: Response) => {
       synthesis_prompt_template || null,
       auto_expand_responses ? 1 : 0,
       show_member_responses !== false ? 1 : 0,
-      JSON.stringify(tool_ids || []),
-      JSON.stringify(mcp_server_ids || []),
+      JSON.stringify(ownedToolIds.ids),
+      JSON.stringify(ownedMcpServerIds.ids),
       now,
       now
     );
 
-    const created = db.prepare('SELECT * FROM council_members WHERE id = ?').get(id) as CouncilMember;
+    const created = db.prepare('SELECT * FROM council_members WHERE id = ? AND user_id = ?').get(id, userId) as CouncilMember;
     res.status(201).json({
       ...created,
       member_models: JSON.parse(created.member_models as unknown as string),
@@ -386,6 +398,25 @@ router.put('/members/:id', (req: AuthRequest, res: Response) => {
       return;
     }
 
+    let ownedToolIds: string[] | undefined;
+    if (tool_ids !== undefined) {
+      const validation = validateOwnedIds(tool_ids, 'tool_ids', userId);
+      if (!validation.ok) {
+        res.status(400).json({ error: validation.error });
+        return;
+      }
+      ownedToolIds = validation.ids;
+    }
+    let ownedMcpServerIds: string[] | undefined;
+    if (mcp_server_ids !== undefined) {
+      const validation = validateOwnedIds(mcp_server_ids, 'mcp_server_ids', userId);
+      if (!validation.ok) {
+        res.status(400).json({ error: validation.error });
+        return;
+      }
+      ownedMcpServerIds = validation.ids;
+    }
+
     const updates: string[] = [];
     const values: unknown[] = [];
 
@@ -425,13 +456,13 @@ router.put('/members/:id', (req: AuthRequest, res: Response) => {
       updates.push('show_member_responses = ?');
       values.push(show_member_responses ? 1 : 0);
     }
-    if (tool_ids !== undefined) {
+    if (ownedToolIds !== undefined) {
       updates.push('tool_ids = ?');
-      values.push(JSON.stringify(tool_ids));
+      values.push(JSON.stringify(ownedToolIds));
     }
-    if (mcp_server_ids !== undefined) {
+    if (ownedMcpServerIds !== undefined) {
       updates.push('mcp_server_ids = ?');
-      values.push(JSON.stringify(mcp_server_ids));
+      values.push(JSON.stringify(ownedMcpServerIds));
     }
 
     if (updates.length === 0) {
@@ -450,7 +481,7 @@ router.put('/members/:id', (req: AuthRequest, res: Response) => {
       WHERE id = ? AND user_id = ?
     `).run(...values);
 
-    const updated = db.prepare('SELECT * FROM council_members WHERE id = ?').get(id) as CouncilMember;
+    const updated = db.prepare('SELECT * FROM council_members WHERE id = ? AND user_id = ?').get(id, userId) as CouncilMember;
     res.json({
       ...updated,
       member_models: JSON.parse(updated.member_models as unknown as string),

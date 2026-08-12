@@ -7,6 +7,7 @@ import type {
   CouncilConfig,
 } from '../types';
 import { getAuthHeaders } from './client';
+import type { McpApprovalRequiredData } from './client';
 
 /** Same as main API client: use VITE_API_URL in production so requests hit the backend, not the SPA. */
 const API_BASE = (import.meta.env.VITE_API_URL ?? '').replace(/\/$/, '') + '/api';
@@ -26,6 +27,7 @@ export interface CouncilStreamHandlers {
   onSynthesisChunk?: (content: string) => void;
   onSynthesisReasoning?: (content: string) => void;
   onConversationTitle?: (event: { conversation_id: string; title: string }) => void;
+  onMcpApprovalRequired?: (event: McpApprovalRequiredData) => void;
   onComplete?: (event: {
     council_run_id: string;
     message_id: string;
@@ -103,6 +105,9 @@ export async function streamCouncilChat(
               break;
             case 'conversation_title':
               handlers.onConversationTitle?.(event);
+              break;
+            case 'mcp_approval_required':
+              handlers.onMcpApprovalRequired?.(event);
               break;
             case 'council_complete':
               handlers.onComplete?.(event);

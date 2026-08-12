@@ -230,13 +230,52 @@ export interface McpServerCreatePayload {
   name: string;
   transport: McpTransport;
   config: McpServerConfig;
+  /** One-shot consent for the exact local invocation in `config`. The server
+   * stores a fingerprint, never this blanket boolean. */
+  local_execution_approved?: boolean;
+}
+
+export interface McpServerUpdatePayload {
+  name?: string;
+  transport?: McpTransport;
+  config?: McpServerConfig | null;
+  local_execution_approved?: boolean;
 }
 
 export interface McpServerTestResult {
   ok: boolean;
   tools?: { name: string; description: string; parameters?: Record<string, unknown> }[];
-  capabilities?: { resources?: boolean; prompts?: boolean; tools?: boolean };
+  transport?: McpTransport | string;
+  protocolEra?: string;
+  protocolVersion?: string;
+  serverInfo?: { name?: string; version?: string; [key: string]: unknown };
+  capabilities?: {
+    resources?: boolean | Record<string, unknown>;
+    prompts?: boolean | Record<string, unknown>;
+    tools?: boolean | Record<string, unknown>;
+    [key: string]: unknown;
+  };
+  counts?: {
+    tools?: number;
+    resources?: number;
+    resourceTemplates?: number;
+    prompts?: number;
+  };
   error?: string;
+}
+
+export interface McpApprovalRequiredData {
+  id: string;
+  server_id: string;
+  server_name?: string;
+  exposed_name: string;
+  tool_name: string;
+  arguments: Record<string, unknown>;
+  arguments_sha256: string;
+  possible_cross_tool_data: boolean;
+  annotations?: Record<string, unknown>;
+  execution?: Record<string, unknown>;
+  expires_at: string;
 }
 
 export const mcpServersApi = {
@@ -246,7 +285,7 @@ export const mcpServersApi = {
     method: 'POST',
     body: JSON.stringify(data),
   }),
-  update: (id: string, data: Partial<Pick<McpServer, 'name' | 'transport' | 'config'>>) =>
+  update: (id: string, data: McpServerUpdatePayload) =>
     request<McpServer>(`/mcp-servers/${id}`, {
       method: 'PUT',
       body: JSON.stringify(data),
@@ -257,6 +296,10 @@ export const mcpServersApi = {
   test: (id: string) => request<McpServerTestResult>(`/mcp-servers/${id}/test`, {
     method: 'POST',
   }),
+  resolveApproval: (id: string, approved: boolean) => request<{ resolved: true; approved: boolean }>(
+    `/mcp-servers/approvals/${encodeURIComponent(id)}`,
+    { method: 'POST', body: JSON.stringify({ approved }) },
+  ),
 };
 
 // Skills
@@ -430,6 +473,9 @@ export async function streamChat(
   // Same rule as onToolOutputChunk above: appended last, not inserted earlier.
   /** When set, the request creates a new variant of the target user message's turn (edit/relaunch). */
   editMessageId?: string,
+  /** Appended last to preserve every positional call site. Must explicitly
+   * approve or deny each exact MCP invocation. */
+  onMcpApprovalRequired?: (data: McpApprovalRequiredData) => void,
 ): Promise<void> {
   try {
     const body: Record<string, unknown> = { conversation_id: conversationId, content };
@@ -563,6 +609,16 @@ export async function streamChat(
           // Live output chunk (run_command, local backend only)
           if (parsed.tool_output_chunk && onToolOutputChunk) {
             onToolOutputChunk(parsed.tool_output_chunk as StreamToolOutputChunkData);
+          }
+          if (parsed.mcp_approval_required) {
+            const approval = parsed.mcp_approval_required as McpApprovalRequiredData;
+            if (onMcpApprovalRequired) {
+              onMcpApprovalRequired(approval);
+            } else if (typeof approval.id === 'string') {
+              // A surface without approval UI must never leave a call pending
+              // or implicitly approve it.
+              void mcpServersApi.resolveApproval(approval.id, false).catch(() => {});
+            }
           }
           // Done event with rich metadata
           if (parsed.done) {
@@ -729,6 +785,14 @@ export interface ExportPayload {
 export interface ImportResult {
   success: boolean;
   created: { agents: number; tools: number; mcp_servers: number };
+  requires_configuration?: Array<{
+    id: string;
+    source_id: string;
+    name: string;
+    transport: McpTransport;
+    reason: 'redacted' | 'local_approval_required';
+    redacted_fields: string[];
+  }>;
 }
 
 export const exportApi = {

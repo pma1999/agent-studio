@@ -2,6 +2,8 @@ import { Router, Response } from 'express';
 import { nanoid } from 'nanoid';
 import db from '../db.js';
 import { AuthRequest } from '../middleware/auth.js';
+import { maskMcpConfig, parseStoredMcpConfig } from '../mcp/config.js';
+import { validateOwnedIds } from '../mcp/ownership.js';
 import {
   assertProviderRoutingCompatible,
   normalizeProviderRoutingConfig,
@@ -46,10 +48,10 @@ router.get('/', (req: AuthRequest, res: Response) => {
     const agents = db.prepare('SELECT * FROM agents WHERE user_id = ? ORDER BY created_at DESC').all(userId) as Record<string, unknown>[];
     const agentIds = agents.map((a) => a.id as string);
     const toolLinks = agentIds.length
-      ? (db.prepare('SELECT agent_id, tool_id FROM agent_tools WHERE agent_id IN (?' + ',?'.repeat(agentIds.length - 1) + ')').all(...agentIds) as { agent_id: string; tool_id: string }[])
+      ? (db.prepare('SELECT at.agent_id, at.tool_id FROM agent_tools at JOIN tools t ON t.id = at.tool_id WHERE at.agent_id IN (?' + ',?'.repeat(agentIds.length - 1) + ') AND t.user_id = ?').all(...agentIds, userId) as { agent_id: string; tool_id: string }[])
       : [];
     const mcpLinks = agentIds.length
-      ? (db.prepare('SELECT agent_id, mcp_server_id FROM agent_mcp_servers WHERE agent_id IN (?' + ',?'.repeat(agentIds.length - 1) + ')').all(...agentIds) as { agent_id: string; mcp_server_id: string }[])
+      ? (db.prepare('SELECT am.agent_id, am.mcp_server_id FROM agent_mcp_servers am JOIN mcp_servers ms ON ms.id = am.mcp_server_id WHERE am.agent_id IN (?' + ',?'.repeat(agentIds.length - 1) + ') AND ms.user_id = ?').all(...agentIds, userId) as { agent_id: string; mcp_server_id: string }[])
       : [];
     const skillLinks = agentIds.length
       ? (db.prepare('SELECT agent_id, skill_id FROM agent_skills WHERE agent_id IN (?' + ',?'.repeat(agentIds.length - 1) + ')').all(...agentIds) as { agent_id: string; skill_id: string }[])
@@ -126,7 +128,7 @@ router.get('/:id', (req: AuthRequest, res: Response) => {
     if (!agent) {
       return res.status(404).json({ error: 'Agent not found' });
     }
-    const toolLinks = db.prepare('SELECT tool_id FROM agent_tools WHERE agent_id = ?').all(req.params.id) as { tool_id: string }[];
+    const toolLinks = db.prepare('SELECT at.tool_id FROM agent_tools at JOIN tools t ON t.id = at.tool_id WHERE at.agent_id = ? AND t.user_id = ?').all(req.params.id, userId) as { tool_id: string }[];
     const toolIds = toolLinks.map((l) => l.tool_id);
     const tools = toolIds.length
       ? (db.prepare('SELECT * FROM tools WHERE id IN (?' + ',?'.repeat(toolIds.length - 1) + ')').all(...toolIds) as Record<string, unknown>[])
@@ -136,15 +138,19 @@ router.get('/:id', (req: AuthRequest, res: Response) => {
       parameters_schema: t.parameters_schema ? JSON.parse(t.parameters_schema as string) : {},
       config: t.config ? JSON.parse(t.config as string) : null,
     }));
-    const mcpLinks = db.prepare('SELECT mcp_server_id FROM agent_mcp_servers WHERE agent_id = ?').all(req.params.id) as { mcp_server_id: string }[];
+    const mcpLinks = db.prepare('SELECT am.mcp_server_id FROM agent_mcp_servers am JOIN mcp_servers ms ON ms.id = am.mcp_server_id WHERE am.agent_id = ? AND ms.user_id = ?').all(req.params.id, userId) as { mcp_server_id: string }[];
     const mcpServerIds = mcpLinks.map((l) => l.mcp_server_id);
     let mcpServers: Record<string, unknown>[] = [];
     if (mcpServerIds.length > 0) {
-      const rows = db.prepare('SELECT * FROM mcp_servers WHERE id IN (?' + ',?'.repeat(mcpServerIds.length - 1) + ')').all(...mcpServerIds) as Record<string, unknown>[];
-      mcpServers = rows.map((r) => ({
-        ...r,
-        config: r.config ? (() => { try { return JSON.parse(r.config as string); } catch { return null; } })() : null,
-      }));
+      const rows = db.prepare('SELECT * FROM mcp_servers WHERE id IN (?' + ',?'.repeat(mcpServerIds.length - 1) + ') AND user_id = ?').all(...mcpServerIds, userId) as Record<string, unknown>[];
+      mcpServers = rows.map((row) => {
+        const { user_id: _userId, ...publicRow } = row;
+        const config = parseStoredMcpConfig(typeof row.config === 'string' ? row.config : null);
+        return {
+          ...publicRow,
+          config: config ? maskMcpConfig(config) : null,
+        };
+      });
     }
     const skillLinks = db.prepare('SELECT skill_id FROM agent_skills WHERE agent_id = ?').all(req.params.id) as { skill_id: string }[];
     const skillIds = skillLinks.map((l) => l.skill_id);
@@ -197,7 +203,16 @@ router.post('/', (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: INVALID_SKILL_IDS_ERROR });
     }
 
-    let finalToolIds: string[] = Array.isArray(tool_ids) ? [...tool_ids] : [];
+    const ownedToolIds = validateOwnedIds(tool_ids ?? [], 'tool_ids', userId);
+    if (!ownedToolIds.ok) {
+      return res.status(400).json({ error: ownedToolIds.error });
+    }
+    const ownedMcpServerIds = validateOwnedIds(mcp_server_ids ?? [], 'mcp_server_ids', userId);
+    if (!ownedMcpServerIds.ok) {
+      return res.status(400).json({ error: ownedMcpServerIds.error });
+    }
+
+    let finalToolIds: string[] = [...ownedToolIds.ids];
     const webSearchTool = db.prepare("SELECT id FROM tools WHERE name = 'web_search' AND user_id = ?").get(userId) as { id: string } | undefined;
     if (web_search_enabled && webSearchTool && !finalToolIds.includes(webSearchTool.id)) {
       finalToolIds.push(webSearchTool.id);
@@ -212,53 +227,52 @@ router.post('/', (req: AuthRequest, res: Response) => {
     const structuredOutputVal = structured_output_enabled ? 1 : 0;
     const responseHealingVal = response_healing_enabled ? 1 : 0;
     const schemaVal = typeof structured_output_schema === 'string' && structured_output_schema.trim() ? structured_output_schema.trim() : null;
-    db.prepare(`
+    const createAgent = db.transaction(() => {
+      db.prepare(`
       INSERT INTO agents (id, user_id, name, description, emoji, system_prompt, provider, provider_routing, base_url, model, temperature, max_tokens, web_search_enabled, reasoning_enabled, reasoning_effort, reasoning_max_tokens, tool_choice, parallel_tool_calls, structured_output_enabled, structured_output_schema, response_healing_enabled)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      userId,
-      name,
-      description || '',
-      emoji || '🤖',
-      system_prompt,
-      'openrouter',
-      serializeProviderRoutingConfig(routingInput.config),
-      base_url || defaultBaseUrl,
-      finalModel,
-      temperature ?? 0.6,
-      max_tokens ?? 8192,
-      web_search_enabled ? 1 : 0,
-      reasoning_enabled ? 1 : 0,
-      reasoning_effort || null,
-      reasoning_max_tokens ?? null,
-      toolChoiceVal,
-      parallelVal,
-      structuredOutputVal,
-      schemaVal,
-      responseHealingVal
-    );
+      `).run(
+        id,
+        userId,
+        name,
+        description || '',
+        emoji || '🤖',
+        system_prompt,
+        'openrouter',
+        serializeProviderRoutingConfig(routingInput.config),
+        base_url || defaultBaseUrl,
+        finalModel,
+        temperature ?? 0.6,
+        max_tokens ?? 8192,
+        web_search_enabled ? 1 : 0,
+        reasoning_enabled ? 1 : 0,
+        reasoning_effort || null,
+        reasoning_max_tokens ?? null,
+        toolChoiceVal,
+        parallelVal,
+        structuredOutputVal,
+        schemaVal,
+        responseHealingVal
+      );
 
-    for (const toolId of finalToolIds) {
-      db.prepare('INSERT OR IGNORE INTO agent_tools (agent_id, tool_id) VALUES (?, ?)').run(id, toolId);
-    }
+      for (const toolId of finalToolIds) {
+        db.prepare('INSERT OR IGNORE INTO agent_tools (agent_id, tool_id) VALUES (?, ?)').run(id, toolId);
+      }
 
-    const mcpIds: string[] = Array.isArray(mcp_server_ids) ? mcp_server_ids : [];
-    for (const mcpId of mcpIds) {
-      if (typeof mcpId === 'string' && mcpId) {
+      for (const mcpId of ownedMcpServerIds.ids) {
         db.prepare('INSERT OR IGNORE INTO agent_mcp_servers (agent_id, mcp_server_id) VALUES (?, ?)').run(id, mcpId);
       }
-    }
-    const skillIds: string[] = Array.isArray(skill_ids) ? skill_ids : [];
-    for (const skillId of skillIds) {
-      if (typeof skillId === 'string' && skillId) {
+
+      const skillIds: string[] = Array.isArray(skill_ids) ? skill_ids : [];
+      for (const skillId of skillIds) {
         db.prepare('INSERT OR IGNORE INTO agent_skills (agent_id, skill_id) VALUES (?, ?)').run(id, skillId);
       }
-    }
+    });
+    createAgent();
 
-    const agent = withParsedProviderRouting(db.prepare('SELECT * FROM agents WHERE id = ?').get(id) as Record<string, unknown>);
+    const agent = withParsedProviderRouting(db.prepare('SELECT * FROM agents WHERE id = ? AND user_id = ?').get(id, userId) as Record<string, unknown>);
     const toolLinks = db.prepare('SELECT tool_id FROM agent_tools WHERE agent_id = ?').all(id) as { tool_id: string }[];
-    const mcpLinks = db.prepare('SELECT mcp_server_id FROM agent_mcp_servers WHERE agent_id = ?').all(id) as { mcp_server_id: string }[];
+    const mcpLinks = db.prepare('SELECT am.mcp_server_id FROM agent_mcp_servers am JOIN mcp_servers ms ON ms.id = am.mcp_server_id WHERE am.agent_id = ? AND ms.user_id = ?').all(id, userId) as { mcp_server_id: string }[];
     const skillLinks = db.prepare('SELECT skill_id FROM agent_skills WHERE agent_id = ?').all(id) as { skill_id: string }[];
     (agent as Record<string, unknown>).tool_ids = toolLinks.map((l) => l.tool_id);
     (agent as Record<string, unknown>).mcp_server_ids = mcpLinks.map((l) => l.mcp_server_id);
@@ -286,9 +300,26 @@ router.put('/:id', (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: INVALID_SKILL_IDS_ERROR });
     }
 
+    let ownedToolIds: string[] | undefined;
+    if (tool_ids !== undefined) {
+      const validation = validateOwnedIds(tool_ids, 'tool_ids', userId);
+      if (!validation.ok) {
+        return res.status(400).json({ error: validation.error });
+      }
+      ownedToolIds = validation.ids;
+    }
+    let ownedMcpServerIds: string[] | undefined;
+    if (mcp_server_ids !== undefined) {
+      const validation = validateOwnedIds(mcp_server_ids, 'mcp_server_ids', userId);
+      if (!validation.ok) {
+        return res.status(400).json({ error: validation.error });
+      }
+      ownedMcpServerIds = validation.ids;
+    }
+
     let finalToolIds: string[] | null = null;
-    if (Array.isArray(tool_ids)) {
-      finalToolIds = [...tool_ids];
+    if (ownedToolIds !== undefined) {
+      finalToolIds = [...ownedToolIds];
       const webSearchTool = db.prepare("SELECT id FROM tools WHERE name = 'web_search' AND user_id = ?").get(userId) as { id: string } | undefined;
       if (web_search_enabled && webSearchTool && !finalToolIds.includes(webSearchTool.id)) {
         finalToolIds.push(webSearchTool.id);
@@ -318,7 +349,8 @@ router.put('/:id', (req: AuthRequest, res: Response) => {
     } catch (err) {
       return res.status(400).json({ error: err instanceof Error ? err.message : 'Invalid provider routing' });
     }
-    db.prepare(`
+    const updateAgent = db.transaction(() => {
+      db.prepare(`
       UPDATE agents SET
         name = COALESCE(?, name),
         description = COALESCE(?, description),
@@ -340,57 +372,57 @@ router.put('/:id', (req: AuthRequest, res: Response) => {
         structured_output_schema = COALESCE(?, structured_output_schema),
         response_healing_enabled = COALESCE(?, response_healing_enabled),
         updated_at = datetime('now')
-      WHERE id = ?
-    `).run(
-      name ?? null,
-      description ?? null,
-      emoji ?? null,
-      system_prompt ?? null,
-      'openrouter',
-      serializeProviderRoutingConfig(nextProviderRouting),
-      base_url ?? null,
-      model ?? null,
-      temperature ?? null,
-      max_tokens ?? null,
-      web_search_enabled !== undefined ? (web_search_enabled ? 1 : 0) : null,
-      reasoning_enabled !== undefined ? (reasoning_enabled ? 1 : 0) : null,
-      reasoning_effort !== undefined ? (reasoning_effort || null) : null,
-      reasoning_max_tokens !== undefined ? (reasoning_max_tokens ?? null) : null,
-      toolChoiceVal,
-      parallelVal,
-      structuredOutputVal,
-      schemaVal,
-      responseHealingVal,
-      req.params.id
-    );
+      WHERE id = ? AND user_id = ?
+      `).run(
+        name ?? null,
+        description ?? null,
+        emoji ?? null,
+        system_prompt ?? null,
+        'openrouter',
+        serializeProviderRoutingConfig(nextProviderRouting),
+        base_url ?? null,
+        model ?? null,
+        temperature ?? null,
+        max_tokens ?? null,
+        web_search_enabled !== undefined ? (web_search_enabled ? 1 : 0) : null,
+        reasoning_enabled !== undefined ? (reasoning_enabled ? 1 : 0) : null,
+        reasoning_effort !== undefined ? (reasoning_effort || null) : null,
+        reasoning_max_tokens !== undefined ? (reasoning_max_tokens ?? null) : null,
+        toolChoiceVal,
+        parallelVal,
+        structuredOutputVal,
+        schemaVal,
+        responseHealingVal,
+        req.params.id,
+        userId
+      );
 
-    if (finalToolIds !== null) {
-      db.prepare('DELETE FROM agent_tools WHERE agent_id = ?').run(req.params.id);
-      for (const toolId of finalToolIds) {
-        db.prepare('INSERT OR IGNORE INTO agent_tools (agent_id, tool_id) VALUES (?, ?)').run(req.params.id, toolId);
+      if (finalToolIds !== null) {
+        db.prepare('DELETE FROM agent_tools WHERE agent_id = ?').run(req.params.id);
+        for (const toolId of finalToolIds) {
+          db.prepare('INSERT OR IGNORE INTO agent_tools (agent_id, tool_id) VALUES (?, ?)').run(req.params.id, toolId);
+        }
       }
-    }
 
-    if (Array.isArray(mcp_server_ids)) {
-      db.prepare('DELETE FROM agent_mcp_servers WHERE agent_id = ?').run(req.params.id);
-      for (const mcpId of mcp_server_ids) {
-        if (typeof mcpId === 'string' && mcpId) {
+      if (ownedMcpServerIds !== undefined) {
+        db.prepare('DELETE FROM agent_mcp_servers WHERE agent_id = ?').run(req.params.id);
+        for (const mcpId of ownedMcpServerIds) {
           db.prepare('INSERT OR IGNORE INTO agent_mcp_servers (agent_id, mcp_server_id) VALUES (?, ?)').run(req.params.id, mcpId);
         }
       }
-    }
-    if (Array.isArray(skill_ids)) {
-      db.prepare('DELETE FROM agent_skills WHERE agent_id = ?').run(req.params.id);
-      for (const skillId of skill_ids) {
-        if (typeof skillId === 'string' && skillId) {
+
+      if (Array.isArray(skill_ids)) {
+        db.prepare('DELETE FROM agent_skills WHERE agent_id = ?').run(req.params.id);
+        for (const skillId of skill_ids) {
           db.prepare('INSERT OR IGNORE INTO agent_skills (agent_id, skill_id) VALUES (?, ?)').run(req.params.id, skillId);
         }
       }
-    }
+    });
+    updateAgent();
 
-    const agent = withParsedProviderRouting(db.prepare('SELECT * FROM agents WHERE id = ?').get(req.params.id) as Record<string, unknown>);
-    const toolLinks = db.prepare('SELECT tool_id FROM agent_tools WHERE agent_id = ?').all(req.params.id) as { tool_id: string }[];
-    const mcpLinks = db.prepare('SELECT mcp_server_id FROM agent_mcp_servers WHERE agent_id = ?').all(req.params.id) as { mcp_server_id: string }[];
+    const agent = withParsedProviderRouting(db.prepare('SELECT * FROM agents WHERE id = ? AND user_id = ?').get(req.params.id, userId) as Record<string, unknown>);
+    const toolLinks = db.prepare('SELECT at.tool_id FROM agent_tools at JOIN tools t ON t.id = at.tool_id WHERE at.agent_id = ? AND t.user_id = ?').all(req.params.id, userId) as { tool_id: string }[];
+    const mcpLinks = db.prepare('SELECT am.mcp_server_id FROM agent_mcp_servers am JOIN mcp_servers ms ON ms.id = am.mcp_server_id WHERE am.agent_id = ? AND ms.user_id = ?').all(req.params.id, userId) as { mcp_server_id: string }[];
     const skillLinks = db.prepare('SELECT skill_id FROM agent_skills WHERE agent_id = ?').all(req.params.id) as { skill_id: string }[];
     (agent as Record<string, unknown>).tool_ids = toolLinks.map((l) => l.tool_id);
     (agent as Record<string, unknown>).mcp_server_ids = mcpLinks.map((l) => l.mcp_server_id);

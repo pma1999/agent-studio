@@ -5,6 +5,31 @@
 export interface McpConfigUrl {
   url: string;
   headers?: Record<string, string>;
+  /** Explicit opt-in for loopback/private/link-local destinations. */
+  allowPrivateNetwork?: boolean;
+  /** Explicit opt-in for clear-text HTTP. HTTPS remains the default. */
+  allowInsecureHttp?: boolean;
+  auth?: McpUrlAuth;
+}
+
+export type McpUrlAuth =
+  | {
+      type: 'bearer';
+      token: string;
+    }
+  | {
+      type: 'client_credentials';
+      clientId: string;
+      clientSecret: string;
+      scope?: string;
+      /** Authorization-server issuer used to bind the credential. */
+      expectedIssuer: string;
+    };
+
+export interface McpExecutionApproval {
+  /** SHA-256 fingerprint of command + argv + cwd approved by the user. */
+  fingerprint: string;
+  approvedAt: string;
 }
 
 export interface McpConfigStdio {
@@ -12,6 +37,8 @@ export interface McpConfigStdio {
   args?: string[];
   env?: Record<string, string>;
   cwd?: string;
+  /** Stored proof that the exact executable invocation was confirmed. */
+  executionApproval?: McpExecutionApproval;
 }
 
 export type McpServerConfig = McpConfigUrl | McpConfigStdio;

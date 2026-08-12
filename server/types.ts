@@ -125,6 +125,8 @@ export interface CouncilExecutionOptions {
   pdfEngine?: string;
   tools?: ResolvedTool[];
   mcpClients?: Map<string, unknown>;
+  /** Required before every MCP tool invocation made by a council member. */
+  authorizeMcpCall?: (request: import('./mcp/toolApproval.js').McpToolAuthorizationRequest) => Promise<boolean>;
   onMemberStart: (index: number, modelId: string) => void;
   onMemberComplete: (index: number, result: MemberResult) => void;
   onSynthesisStart: (modelId: string, memberResults: MemberResult[]) => void;

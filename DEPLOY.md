@@ -17,7 +17,8 @@ Este proyecto está preparado para desplegar el **frontend** en **Vercel** y el 
    - `CORS_ORIGIN`: URL del frontend en Vercel (ej. `https://tu-app.vercel.app`). Si no pones nada, CORS permite cualquier origen (solo desarrollo).
    - **`JWT_SECRET`** (recomendado en producción): secreto para firmar sesiones (mín. 32 caracteres). **Si no lo defines, la app corre en "modo local"**: no pide login y todo el mundo entra como usuario local; en producción debes definirlo para que se exija inicio de sesión. Opcionalmente puedes definir **`DISABLE_AUTH=true`** para forzar modo local (sin login) incluso si `JWT_SECRET` está definido.
    - `PORT`: lo asigna Railway; no hace falta definirlo.
-   - Opcionales: `ENCRYPTION_KEY` (cifrar API keys en BD), `INITIAL_ADMIN_PASSWORD` (contraseña del admin inicial).
+   - **`ENCRYPTION_KEY`** (mín. 32 caracteres): cifra API keys y credenciales MCP en la BD. Es obligatoria si vas a crear, editar o importar servidores MCP.
+   - Opcional: `INITIAL_ADMIN_PASSWORD` (contraseña del admin inicial).
 
 ### 1.2 Si ves 502 "Application failed to respond"
 
@@ -137,6 +138,8 @@ Haz push a la rama que tengas conectada (p. ej. `main`). Vercel hará build y de
 | Railway| `JWT_SECRET`     | **Producción:** obligatorio para exigir login. Sin él, la app corre en modo local (sin login). Mín. 32 caracteres. |
 | Railway| `DISABLE_AUTH`   | Opcional. Si es `true` o `1`, desactiva login/registro (modo local) aunque exista `JWT_SECRET`. |
 | Railway| `PORT`           | Lo define Railway; no suele hacer falta configurarlo. |
+| Railway| `ENCRYPTION_KEY` | Cifra secretos; obligatoria para guardar configuraciones MCP. Mín. 32 caracteres. |
+| Railway| `MCP_ALLOW_BACKEND_STDIO` | Mantener sin definir salvo despliegue monousuario de confianza; los procesos MCP locales deben usar normalmente el agente emparejado. |
 
 Opcional en ambos: `.env.example` documenta variables opcionales (p. ej. seed de API keys).
 

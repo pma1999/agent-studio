@@ -8,7 +8,12 @@ import { runHttpTool } from './httpTool.js';
 import { callMcpToolDetailed } from '../mcp/index.js';
 import { runSkillTool } from '../skills/activation.js';
 import type { McpToolCatalogEntry, ResolvedTool, ResolvedToolMcpConfig, ResolvedToolMcpMetaConfig } from './resolve.js';
-import type { McpConnection } from '../mcp/index.js';
+import type {
+  McpConnection,
+  McpRequestControl,
+  McpToolAuthorizationRequest,
+  McpToolCallResult,
+} from '../mcp/index.js';
 
 export type ToolExecutionSource = 'builtin' | 'http' | 'mcp' | 'skill' | 'unknown';
 
@@ -17,6 +22,60 @@ export interface RunToolResult {
   isError: boolean;
   source: ToolExecutionSource;
   metadata?: Record<string, unknown>;
+}
+
+export interface RunToolOptions {
+  mcpControl?: McpRequestControl;
+  /** Required for every MCP tools/call. Absence is intentionally fail-closed. */
+  authorizeMcpCall?: (request: McpToolAuthorizationRequest) => Promise<boolean>;
+  /** Conservative provenance hint: prior tool output may have influenced args. */
+  possibleCrossToolData?: boolean;
+}
+
+const MAX_META_TOOL_OUTPUT_CHARS = (() => {
+  const parsed = Number.parseInt(process.env.MCP_META_TOOL_OUTPUT_MAX_CHARS || '', 10);
+  return Number.isFinite(parsed) && parsed >= 4_096 ? Math.min(parsed, 256_000) : 64_000;
+})();
+
+function jsonResult(value: unknown, source: ToolExecutionSource = 'mcp'): RunToolResult {
+  let output: string;
+  try {
+    output = JSON.stringify(value, null, 2);
+  } catch {
+    return { output: JSON.stringify({ error: 'Result could not be serialized safely' }), isError: true, source };
+  }
+  if (output.length > MAX_META_TOOL_OUTPUT_CHARS) {
+    return {
+      output: JSON.stringify({
+        error: `Result exceeds the safe ${MAX_META_TOOL_OUTPUT_CHARS}-character limit`,
+        actual_characters: output.length,
+      }),
+      isError: true,
+      source,
+    };
+  }
+  return { output, isError: false, source };
+}
+
+function boundedMetadataValue(value: unknown): unknown {
+  try {
+    const serialized = JSON.stringify(value);
+    if (serialized === undefined || serialized.length <= MAX_META_TOOL_OUTPUT_CHARS) return value;
+    return { omitted: true, reason: 'Value exceeded the safe metadata limit', actual_characters: serialized.length };
+  } catch {
+    return { omitted: true, reason: 'Value could not be serialized safely' };
+  }
+}
+
+function mcpResultMetadata(result: McpToolCallResult, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  const metadata: Record<string, unknown> = {
+    content: boundedMetadataValue(result.content),
+    ...extra,
+  };
+  if (Object.prototype.hasOwnProperty.call(result, 'structuredContent')) {
+    metadata.structuredContent = boundedMetadataValue(result.structuredContent);
+  }
+  return metadata;
 }
 
 function inferIsErrorOutput(output: string): boolean {
@@ -39,8 +98,35 @@ function isMetaConfig(config: unknown): config is ResolvedToolMcpMetaConfig {
   return !!config && typeof config === 'object' && 'kind' in config;
 }
 
+async function requireMcpAuthorization(
+  request: Omit<McpToolAuthorizationRequest, 'possibleCrossToolData'>,
+  options: RunToolOptions,
+): Promise<RunToolResult | null> {
+  if (!options.authorizeMcpCall) {
+    return {
+      output: JSON.stringify({ error: 'MCP tool call blocked: explicit human approval is required on this surface' }),
+      isError: true,
+      source: 'mcp',
+    };
+  }
+  try {
+    const approved = await options.authorizeMcpCall({
+      ...request,
+      possibleCrossToolData: options.possibleCrossToolData === true,
+    });
+    if (approved) return null;
+  } catch {
+    // Authorization failures never become execution grants.
+  }
+  return {
+    output: JSON.stringify({ error: 'MCP tool call was not approved by the user' }),
+    isError: true,
+    source: 'mcp',
+  };
+}
+
 function scoreCatalogEntry(entry: McpToolCatalogEntry, query: string): number {
-  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const terms = query.toLowerCase().slice(0, 1_000).split(/\s+/).filter(Boolean).slice(0, 32);
   if (terms.length === 0) return 0;
   const haystack = [entry.name, entry.mcpToolName, entry.title || '', entry.description, entry.serverName]
     .join(' ')
@@ -55,13 +141,16 @@ function scoreCatalogEntry(entry: McpToolCatalogEntry, query: string): number {
 }
 
 function findCatalogEntry(catalog: McpToolCatalogEntry[], name: string): McpToolCatalogEntry | undefined {
-  return catalog.find((entry) => entry.name === name || entry.mcpToolName === name);
+  // Only provider-facing names are accepted. Raw MCP names are not globally
+  // unique across servers and accepting them would make dispatch ambiguous.
+  return catalog.find((entry) => entry.name === name);
 }
 
 async function runMcpMetaTool(
   tool: ResolvedTool,
   args: Record<string, unknown>,
-  mcpClients?: Map<string, McpConnection>
+  mcpClients?: Map<string, McpConnection>,
+  options: RunToolOptions = {}
 ): Promise<RunToolResult> {
   const config = tool.config as ResolvedToolMcpMetaConfig;
   const catalog = tool.mcpCatalog || [];
@@ -83,7 +172,7 @@ async function runMcpMetaTool(
         description: entry.description,
         annotations: entry.annotations,
       }));
-    return { output: JSON.stringify({ matches }, null, 2), isError: false, source: 'mcp' };
+    return jsonResult({ matches });
   }
 
   if (config.kind === 'mcp_details') {
@@ -92,20 +181,18 @@ async function runMcpMetaTool(
     if (!entry) {
       return { output: JSON.stringify({ error: `Unknown MCP tool: ${name}` }), isError: true, source: 'mcp' };
     }
-    return {
-      output: JSON.stringify({
-        name: entry.name,
-        mcp_tool_name: entry.mcpToolName,
-        server_id: entry.serverId,
-        server_name: entry.serverName,
-        title: entry.title,
-        description: entry.description,
-        input_schema: entry.inputSchema,
-        annotations: entry.annotations,
-      }, null, 2),
-      isError: false,
-      source: 'mcp',
-    };
+    return jsonResult({
+      name: entry.name,
+      mcp_tool_name: entry.mcpToolName,
+      server_id: entry.serverId,
+      server_name: entry.serverName,
+      title: entry.title,
+      description: entry.description,
+      input_schema: entry.inputSchema,
+      output_schema: entry.outputSchema,
+      annotations: entry.annotations,
+      execution: entry.execution,
+    });
   }
 
   if (config.kind === 'mcp_call') {
@@ -118,13 +205,34 @@ async function runMcpMetaTool(
     if (!connection) {
       return { output: JSON.stringify({ error: `MCP client not available for server ${entry.serverId}` }), isError: true, source: 'mcp' };
     }
-    const callArgs = args.arguments && typeof args.arguments === 'object' ? args.arguments as Record<string, unknown> : {};
-    const result = await callMcpToolDetailed(connection.client, entry.mcpToolName, callArgs);
+    if (!isRecord(args.arguments)) {
+      return {
+        output: JSON.stringify({ error: 'arguments must be a JSON object matching the inspected MCP tool schema' }),
+        isError: true,
+        source: 'mcp',
+      };
+    }
+    const callArgs = args.arguments;
+    const authorizationError = await requireMcpAuthorization({
+      serverId: entry.serverId,
+      serverName: entry.serverName,
+      exposedName: entry.name,
+      toolName: entry.mcpToolName,
+      arguments: callArgs,
+      annotations: entry.annotations,
+      execution: entry.execution,
+    }, options);
+    if (authorizationError) return authorizationError;
+    const result = await callMcpToolDetailed(connection.client, entry.mcpToolName, callArgs, options.mcpControl);
     return {
       output: result.output,
       isError: result.isError,
       source: 'mcp',
-      metadata: { content: result.content, structuredContent: result.structuredContent },
+      metadata: mcpResultMetadata(result, {
+        annotations: entry.annotations,
+        outputSchema: entry.outputSchema,
+        execution: entry.execution,
+      }),
     };
   }
 
@@ -139,31 +247,30 @@ export async function runTool(
   userId?: string,
   conversationId?: string,
   currentMessages?: Array<{ role: string; content?: unknown }>,
+  options: RunToolOptions = {},
 ): Promise<RunToolResult> {
-  let tool = resolvedTools.find((t) => t.name === toolName);
-
-  if (!tool) {
-    const mcpMatches = resolvedTools.filter(
-      (t): t is ResolvedTool & { type: 'mcp'; config: ResolvedToolMcpConfig } =>
-        t.type === 'mcp' && !isMetaConfig(t.config) && (t.config as ResolvedToolMcpConfig).mcp_tool_name === toolName
-    );
-    if (mcpMatches.length === 1) {
-      tool = mcpMatches[0];
-    } else if (mcpMatches.length > 1) {
-      const fullNames = mcpMatches.map((t) => t.name).join(', ');
-      return { output: JSON.stringify({ error: `Multiple MCP tools named '${toolName}'. Use the full tool name: ${fullNames}` }), isError: true, source: 'mcp' };
-    }
+  const exactMatches = resolvedTools.filter((candidate) => candidate.name === toolName);
+  if (exactMatches.length === 0) {
+    return { output: JSON.stringify({ error: `Unknown or disabled tool: ${toolName}` }), isError: true, source: 'unknown' };
   }
+  if (exactMatches.length > 1) {
+    return { output: JSON.stringify({ error: `Ambiguous tool name: ${toolName}` }), isError: true, source: 'unknown' };
+  }
+  const tool = exactMatches[0];
 
-  if (!tool) return { output: JSON.stringify({ error: `Unknown or disabled tool: ${toolName}` }), isError: true, source: 'unknown' };
-
-  let parsedArgs = args;
+  let parsedArgs: Record<string, unknown>;
   if (typeof args === 'string') {
     try {
-      parsedArgs = JSON.parse(args) as Record<string, unknown>;
+      const parsed = JSON.parse(args) as unknown;
+      if (!isRecord(parsed)) throw new Error('not an object');
+      parsedArgs = parsed;
     } catch {
       return { output: JSON.stringify({ error: 'Invalid tool arguments (expected JSON object)' }), isError: true, source: tool.type };
     }
+  } else if (isRecord(args)) {
+    parsedArgs = args;
+  } else {
+    return { output: JSON.stringify({ error: 'Invalid tool arguments (expected JSON object)' }), isError: true, source: tool.type };
   }
 
   try {
@@ -182,16 +289,35 @@ export async function runTool(
     }
 
     if (tool.type === 'mcp') {
-      if (isMetaConfig(tool.config)) return runMcpMetaTool(tool, parsedArgs, mcpClients);
+      const mcpOptions: RunToolOptions = {
+        ...options,
+        possibleCrossToolData: options.possibleCrossToolData === true
+          || currentMessages?.some((message) => message.role === 'tool') === true,
+      };
+      if (isMetaConfig(tool.config)) return runMcpMetaTool(tool, parsedArgs, mcpClients, mcpOptions);
       const config = tool.config as ResolvedToolMcpConfig;
       const connection = mcpClients?.get(config.mcp_server_id);
       if (!connection) return { output: JSON.stringify({ error: `MCP client not available for server ${config.mcp_server_id}` }), isError: true, source: 'mcp' };
-      const result = await callMcpToolDetailed(connection.client, config.mcp_tool_name, parsedArgs);
+      const authorizationError = await requireMcpAuthorization({
+        serverId: config.mcp_server_id,
+        serverName: config.mcp_server_name,
+        exposedName: tool.name,
+        toolName: config.mcp_tool_name,
+        arguments: parsedArgs,
+        annotations: config.annotations,
+        execution: config.execution,
+      }, mcpOptions);
+      if (authorizationError) return authorizationError;
+      const result = await callMcpToolDetailed(connection.client, config.mcp_tool_name, parsedArgs, mcpOptions.mcpControl);
       return {
         output: result.output,
         isError: result.isError,
         source: 'mcp',
-        metadata: { content: result.content, structuredContent: result.structuredContent, annotations: config.annotations },
+        metadata: mcpResultMetadata(result, {
+          annotations: config.annotations,
+          outputSchema: config.outputSchema,
+          execution: config.execution,
+        }),
       };
     }
 
@@ -207,4 +333,8 @@ export async function runTool(
     const msg = e instanceof Error ? e.message : String(e);
     return { output: JSON.stringify({ error: msg }), isError: true, source: tool.type };
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
 }

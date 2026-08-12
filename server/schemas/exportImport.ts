@@ -52,14 +52,60 @@ const toolExportSchema = z.object({
   config: z.record(z.string(), z.unknown()).nullable().optional(),
 });
 
+const mcpUrlAuthExportSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('bearer'),
+    token: z.string(),
+  }),
+  z.object({
+    type: z.literal('client_credentials'),
+    clientId: z.string(),
+    clientSecret: z.string(),
+    scope: z.string().optional(),
+    expectedIssuer: z.string(),
+  }),
+]);
+
+const mcpUrlConfigExportSchema = z.object({
+  url: z.string(),
+  headers: z.record(z.string(), z.string()).optional(),
+  allowPrivateNetwork: z.boolean().optional(),
+  allowInsecureHttp: z.boolean().optional(),
+  auth: mcpUrlAuthExportSchema.optional(),
+});
+
+const mcpLocalConfigExportSchema = z.object({
+  command: z.string(),
+  args: z.array(z.string()).optional(),
+  env: z.record(z.string(), z.string()).optional(),
+  cwd: z.string().optional(),
+  // Execution approval is deliberately absent: it is machine-bound and must
+  // always be renewed after import on the destination host.
+});
+
+/**
+ * Describes whether an exported MCP configuration can be used as-is on the
+ * destination host. This is deliberately separate from `config`: a masked
+ * sentinel is presentation data, never a credential that import may persist.
+ *
+ * Older v1 exports did not carry this field. They remain accepted as `ready`;
+ * if they contain a secret sentinel, normal MCP validation rejects them rather
+ * than silently turning the sentinel into a credential.
+ */
+const mcpPortabilitySchema = z.object({
+  state: z.enum(['ready', 'redacted', 'local_approval_required']),
+  redacted_fields: z.array(z.string().max(512)).max(1024).optional().default([]),
+}).optional().default({ state: 'ready', redacted_fields: [] });
+
 const mcpServerExportSchema = z.object({
   id: z.string(),
-  name: z.string(),
+  name: z.string().min(1).max(200),
   transport: z.enum(['url', 'stdio', 'relay']),
   config: z.union([
-    z.object({ url: z.string(), headers: z.record(z.string(), z.string()).optional() }),
-    z.object({ command: z.string(), args: z.array(z.string()).optional(), env: z.record(z.string(), z.string()).optional(), cwd: z.string().optional() }),
+    mcpUrlConfigExportSchema,
+    mcpLocalConfigExportSchema,
   ]).nullable().optional(),
+  portability: mcpPortabilitySchema,
 });
 
 export const exportPayloadSchema = z.discriminatedUnion('kind', [

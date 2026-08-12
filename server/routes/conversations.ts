@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { nanoid } from 'nanoid';
 import db from '../db.js';
 import { AuthRequest } from '../middleware/auth.js';
+import { validateOwnedIds } from '../mcp/ownership.js';
 import { getSettingValue } from './settings.js';
 import {
   assertProviderRoutingCompatible,
@@ -27,15 +28,15 @@ function normalizeProviderRoutingBody(value: unknown): { config: ProviderRouting
   return { config };
 }
 
-function attachToolConfig(row: Record<string, unknown>): Record<string, unknown> {
-  return attachToolConfigBatch([row])[0];
+function attachToolConfig(row: Record<string, unknown>, userId: string): Record<string, unknown> {
+  return attachToolConfigBatch([row], userId)[0];
 }
-function attachToolConfigBatch(rows: Record<string, unknown>[]): Record<string, unknown>[] {
+function attachToolConfigBatch(rows: Record<string, unknown>[], userId: string): Record<string, unknown>[] {
   if (rows.length === 0) return rows;
   const ids = rows.map((r) => r.id as string);
   const placeholders = ids.map(() => '?').join(',');
-  const toolLinks = db.prepare(`SELECT conversation_id, tool_id FROM conversation_tools WHERE conversation_id IN (${placeholders})`).all(...ids) as { conversation_id: string; tool_id: string }[];
-  const mcpLinks = db.prepare(`SELECT conversation_id, mcp_server_id FROM conversation_mcp_servers WHERE conversation_id IN (${placeholders})`).all(...ids) as { conversation_id: string; mcp_server_id: string }[];
+  const toolLinks = db.prepare(`SELECT ct.conversation_id, ct.tool_id FROM conversation_tools ct JOIN tools t ON t.id = ct.tool_id WHERE ct.conversation_id IN (${placeholders}) AND t.user_id = ?`).all(...ids, userId) as { conversation_id: string; tool_id: string }[];
+  const mcpLinks = db.prepare(`SELECT cm.conversation_id, cm.mcp_server_id FROM conversation_mcp_servers cm JOIN mcp_servers ms ON ms.id = cm.mcp_server_id WHERE cm.conversation_id IN (${placeholders}) AND ms.user_id = ?`).all(...ids, userId) as { conversation_id: string; mcp_server_id: string }[];
   const toolMap = new Map<string, string[]>();
   const mcpMap = new Map<string, string[]>();
   for (const l of toolLinks) { if (!toolMap.has(l.conversation_id)) toolMap.set(l.conversation_id, []); toolMap.get(l.conversation_id)!.push(l.tool_id); }
@@ -91,7 +92,7 @@ router.get('/', (req: AuthRequest, res: Response) => {
       `).all(userId);
     }
 
-    res.json(attachSkillConfigBatch(attachToolConfigBatch(conversations as Record<string, unknown>[])).map(withParsedProviderRouting));
+    res.json(attachSkillConfigBatch(attachToolConfigBatch(conversations as Record<string, unknown>[], userId)).map(withParsedProviderRouting));
   } catch (err) {
     console.error('Error listing conversations:', err);
     res.status(500).json({ error: 'Failed to list conversations' });
@@ -132,7 +133,7 @@ router.post('/', (req: AuthRequest, res: Response) => {
       WHERE c.id = ?
     `).get(id);
 
-    res.status(201).json(withParsedProviderRouting(attachSkillConfig(attachToolConfig(conversation as Record<string, unknown>))));
+    res.status(201).json(withParsedProviderRouting(attachSkillConfig(attachToolConfig(conversation as Record<string, unknown>, userId))));
   } catch (err) {
     console.error('Error creating conversation:', err);
     res.status(500).json({ error: 'Failed to create conversation' });
@@ -151,7 +152,7 @@ router.put('/:id', (req: AuthRequest, res: Response) => {
 
     const conversation = db.prepare('SELECT * FROM conversations WHERE id = ? AND user_id = ?').get(req.params.id, userId);
     if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
-    res.json(withParsedProviderRouting(attachSkillConfig(attachToolConfig(conversation as Record<string, unknown>))));
+    res.json(withParsedProviderRouting(attachSkillConfig(attachToolConfig(conversation as Record<string, unknown>, userId))));
   } catch (err) {
     console.error('Error updating conversation:', err);
     res.status(500).json({ error: 'Failed to update conversation' });
@@ -185,7 +186,7 @@ router.put('/:id/model', (req: AuthRequest, res: Response) => {
     `).get(req.params.id, userId);
 
     if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
-    res.json(withParsedProviderRouting(attachSkillConfig(attachToolConfig(conversation as Record<string, unknown>))));
+    res.json(withParsedProviderRouting(attachSkillConfig(attachToolConfig(conversation as Record<string, unknown>, userId))));
   } catch (err) {
     console.error('Error updating conversation model:', err);
     res.status(500).json({ error: 'Failed to update conversation model' });
@@ -234,7 +235,7 @@ router.put('/:id/provider-routing', (req: AuthRequest, res: Response) => {
     `).get(req.params.id, userId);
 
     if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
-    res.json(withParsedProviderRouting(attachSkillConfig(attachToolConfig(conversation as Record<string, unknown>))));
+    res.json(withParsedProviderRouting(attachSkillConfig(attachToolConfig(conversation as Record<string, unknown>, userId))));
   } catch (err) {
     console.error('Error updating conversation provider routing:', err);
     res.status(500).json({ error: 'Failed to update conversation provider routing' });
@@ -248,18 +249,20 @@ router.put('/:id/tool-config', (req: AuthRequest, res: Response) => {
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
     const { tool_ids, mcp_server_ids } = req.body;
 
-    if (!Array.isArray(tool_ids) || !tool_ids.every((id: unknown) => typeof id === 'string')) {
-      return res.status(400).json({ error: 'tool_ids must be an array of strings' });
+    const ownedToolIds = validateOwnedIds(tool_ids, 'tool_ids', userId);
+    if (!ownedToolIds.ok) {
+      return res.status(400).json({ error: ownedToolIds.error });
     }
-    if (!Array.isArray(mcp_server_ids) || !mcp_server_ids.every((id: unknown) => typeof id === 'string')) {
-      return res.status(400).json({ error: 'mcp_server_ids must be an array of strings' });
+    const ownedMcpServerIds = validateOwnedIds(mcp_server_ids, 'mcp_server_ids', userId);
+    if (!ownedMcpServerIds.ok) {
+      return res.status(400).json({ error: ownedMcpServerIds.error });
     }
 
     const existing = db.prepare('SELECT * FROM conversations WHERE id = ? AND user_id = ?').get(req.params.id, userId);
     if (!existing) return res.status(404).json({ error: 'Conversation not found' });
 
-    const dedupedToolIds = [...new Set(tool_ids as string[])];
-    const dedupedMcpServerIds = [...new Set(mcp_server_ids as string[])];
+    const dedupedToolIds = ownedToolIds.ids;
+    const dedupedMcpServerIds = ownedMcpServerIds.ids;
 
     const run = db.transaction(() => {
       db.prepare(`UPDATE conversations SET tools_overridden = 1, updated_at = datetime('now') WHERE id = ? AND user_id = ?`).run(req.params.id, userId);
@@ -282,7 +285,7 @@ router.put('/:id/tool-config', (req: AuthRequest, res: Response) => {
     `).get(req.params.id, userId);
 
     if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
-    res.json(withParsedProviderRouting(attachSkillConfig(attachToolConfig(conversation as Record<string, unknown>))));
+    res.json(withParsedProviderRouting(attachSkillConfig(attachToolConfig(conversation as Record<string, unknown>, userId))));
   } catch (err) {
     console.error('Error updating conversation tool config:', err);
     res.status(500).json({ error: 'Failed to update conversation tool config' });
@@ -313,7 +316,7 @@ router.delete('/:id/tool-config', (req: AuthRequest, res: Response) => {
     `).get(req.params.id, userId);
 
     if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
-    res.json(withParsedProviderRouting(attachSkillConfig(attachToolConfig(conversation as Record<string, unknown>))));
+    res.json(withParsedProviderRouting(attachSkillConfig(attachToolConfig(conversation as Record<string, unknown>, userId))));
   } catch (err) {
     console.error('Error clearing conversation tool config:', err);
     res.status(500).json({ error: 'Failed to clear conversation tool config' });
@@ -352,7 +355,7 @@ router.put('/:id/skill-config', (req: AuthRequest, res: Response) => {
     `).get(req.params.id, userId);
 
     if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
-    res.json(withParsedProviderRouting(attachSkillConfig(attachToolConfig(conversation as Record<string, unknown>))));
+    res.json(withParsedProviderRouting(attachSkillConfig(attachToolConfig(conversation as Record<string, unknown>, userId))));
   } catch (err) {
     console.error('Error updating conversation skill config:', err);
     res.status(500).json({ error: 'Failed to update conversation skill config' });
@@ -382,7 +385,7 @@ router.delete('/:id/skill-config', (req: AuthRequest, res: Response) => {
     `).get(req.params.id, userId);
 
     if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
-    res.json(withParsedProviderRouting(attachSkillConfig(attachToolConfig(conversation as Record<string, unknown>))));
+    res.json(withParsedProviderRouting(attachSkillConfig(attachToolConfig(conversation as Record<string, unknown>, userId))));
   } catch (err) {
     console.error('Error clearing conversation skill config:', err);
     res.status(500).json({ error: 'Failed to clear conversation skill config' });
