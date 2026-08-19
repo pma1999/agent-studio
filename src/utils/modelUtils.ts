@@ -111,8 +111,13 @@ export function getProviderMeta(provider: string): ProviderMeta {
 export function formatPrice(priceStr: string): string {
   const price = parseFloat(priceStr);
   if (isNaN(price) || price === 0) return 'Gratis';
-  if (price < 0.000001) return '<$0.001/M';
-  return `$${(price * 1000000).toFixed(2)}/M`;
+  const perMillion = price * 1000000;
+  if (perMillion >= 1) return `$${perMillion.toFixed(2)}/M`;
+  if (perMillion >= 0.1) return `$${perMillion.toFixed(3)}/M`;
+  if (perMillion >= 0.01) return `$${perMillion.toFixed(4)}/M`;
+  const fixed6 = perMillion.toFixed(6);
+  const trimmed = fixed6.replace(/\.?0+$/, '');
+  return `$${trimmed}/M`;
 }
 
 export function formatUptime(pct: number | null): string {
