@@ -110,9 +110,14 @@ export function getProviderMeta(provider: string): ProviderMeta {
 
 export function formatPrice(priceStr: string): string {
   const price = parseFloat(priceStr);
-  if (isNaN(price) || price === 0) return 'Free';
+  if (isNaN(price) || price === 0) return 'Gratis';
   if (price < 0.000001) return '<$0.001/M';
   return `$${(price * 1000000).toFixed(2)}/M`;
+}
+
+export function formatUptime(pct: number | null): string {
+  if (pct === null || pct === undefined || !Number.isFinite(pct)) return '—';
+  return `${pct.toFixed(2)}%`;
 }
 
 export function formatContext(length: number): string {

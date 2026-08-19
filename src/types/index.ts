@@ -350,10 +350,24 @@ export interface OpenRouterEndpoint {
   provider_name: string;
   context_length: number;
   max_completion_tokens: number | null;
-  pricing: { prompt: string; completion: string };
+  pricing: {
+    prompt: string;
+    completion: string;
+    input_cache_read?: string;
+    image?: string;
+    request?: string;
+    discount?: number;
+  };
   quantization: string | null;
   supported_parameters: string[];
   status: number | null;
+  uptime_last_5m: number | null;
+  uptime_last_30m: number | null;
+  uptime_last_1d: number | null;
+  throughput_last_30m: { p50: number; p75: number; p90: number; p99: number } | null;
+  latency_last_30m: { p50: number; p75: number; p90: number; p99: number } | null;
+  supports_implicit_caching?: boolean;
+  max_prompt_tokens?: number | null;
 }
 
 // ===== Model Council Types =====

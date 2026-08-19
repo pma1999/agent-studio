@@ -320,7 +320,7 @@ export function CouncilEditor() {
             </div>
             {form.member_models.length > 0 && (
               <button
-                onClick={() => setForm({ ...form, member_models: [] })}
+                onClick={() => setForm({ ...form, member_models: [], member_provider_routing: {} })}
                 style={{
                   fontSize: '0.75rem',
                   color: 'var(--text-muted)',

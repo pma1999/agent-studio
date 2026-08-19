@@ -4,7 +4,8 @@ import { createPortal } from 'react-dom';
 import { Check, ChevronDown, Loader2, Server, Shuffle, X } from 'lucide-react';
 import type { OpenRouterEndpoint, ProviderRoutingConfig } from '../types';
 import { useOpenRouterEndpoints } from '../hooks/useOpenRouterEndpoints';
-import { formatContext, formatPrice } from '../utils/modelUtils';
+import { formatContext, formatPrice, formatUptime } from '../utils/modelUtils';
+import { cheapestEndpoint } from '../utils/providerRanking';
 import { useIsMobile } from '../utils/breakpoints';
 import { isDeepSeekDirectModel } from '../utils/providers';
 
@@ -21,8 +22,8 @@ interface ProviderRoutingSelectorProps {
 }
 
 function routingLabel(config: ProviderRoutingConfig | null | undefined): string {
-  if (!config) return 'Default';
-  if (config.mode === 'auto') return 'Auto routing';
+  if (!config) return 'Por defecto';
+  if (config.mode === 'auto') return 'Enrutamiento automático';
   return config.provider_slug;
 }
 
@@ -59,6 +60,18 @@ export function ProviderRoutingSelector({
     [endpoints, selectedSlug]
   );
 
+  const cheapest = useMemo(() => cheapestEndpoint(endpoints), [endpoints]);
+  const showCheapestCta = !isDeepSeek && !isAutoModel && !loading && !error && endpoints.length > 0 && !!cheapest;
+
+  const handleCheapest = () => {
+    if (!cheapest) return;
+    onChange({
+      mode: 'provider',
+      provider_slug: cheapest.tag,
+      allow_fallbacks: value?.mode === 'provider' ? value.allow_fallbacks : true,
+    });
+  };
+
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
       if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
@@ -81,7 +94,7 @@ export function ProviderRoutingSelector({
 
   const effectiveDisabled = disabled || isAutoModel;
   const displayLabel = isAutoModel
-    ? 'Auto routing'
+    ? 'Enrutamiento automático'
     : value?.mode === 'provider'
       ? endpointLabel(selectedEndpoint || {
         tag: value.provider_slug,
@@ -93,9 +106,14 @@ export function ProviderRoutingSelector({
         quantization: null,
         supported_parameters: [],
         status: null,
+        uptime_last_5m: null,
+        uptime_last_30m: null,
+        uptime_last_1d: null,
+        throughput_last_30m: null,
+        latency_last_30m: null,
       })
       : !allowDefault && value === null
-        ? 'Auto routing'
+        ? 'Enrutamiento automático'
         : routingLabel(value);
   const autoSelected = value?.mode === 'auto' || (!allowDefault && value === null);
 
@@ -176,7 +194,7 @@ export function ProviderRoutingSelector({
           }}
         >
           <Server size={14} style={{ opacity: 0.6, flexShrink: 0 }} />
-          <span>Direct DeepSeek — provider routing not applicable</span>
+          <span>Proveedor no disponible para DeepSeek directo</span>
         </div>
       </div>
     );
@@ -205,7 +223,7 @@ export function ProviderRoutingSelector({
         onClick={() => setIsOpen((prev) => !prev)}
         aria-expanded={isOpen}
         aria-haspopup="listbox"
-        aria-label="Select OpenRouter provider routing"
+        aria-label="Seleccionar enrutamiento de proveedor OpenRouter"
         whileHover={effectiveDisabled ? {} : { backgroundColor: 'var(--bg-surface)' }}
         whileTap={effectiveDisabled ? {} : { scale: 0.98 }}
         style={{
@@ -226,7 +244,7 @@ export function ProviderRoutingSelector({
           transition: 'border-color var(--transition-fast), background var(--transition-fast)',
           opacity: effectiveDisabled ? 0.65 : 1,
         }}
-        title={isAutoModel ? 'Provider endpoint selection requires a concrete model' : undefined}
+        title={isAutoModel ? 'La selección de proveedor requiere un modelo concreto' : undefined}
       >
         <Shuffle size={compact ? 12 : 14} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
         <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -266,7 +284,7 @@ export function ProviderRoutingSelector({
           {isOpen && !effectiveDisabled && (
             <motion.div
               role="listbox"
-              aria-label="OpenRouter provider endpoints"
+              aria-label="Endpoints de proveedores OpenRouter"
               initial={isMobile ? { y: '100%' } : { opacity: 0, y: placement === 'above' ? 8 : -8, scale: 0.98 }}
               animate={isMobile ? { y: 0 } : { opacity: 1, y: 0, scale: 1 }}
               exit={isMobile ? { y: '100%' } : { opacity: 0, y: placement === 'above' ? 8 : -8, scale: 0.98 }}
@@ -283,13 +301,13 @@ export function ProviderRoutingSelector({
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <Server size={15} style={{ color: 'var(--accent)' }} />
                 <span style={{ fontSize: '0.875rem', fontWeight: 600, color: 'var(--text-primary)' }}>
-                  Provider routing
+                  Enrutamiento de proveedor
                 </span>
               </div>
               <button
                 type="button"
                 onClick={() => setIsOpen(false)}
-                aria-label="Close"
+                aria-label="Cerrar"
                 style={{
                   padding: 7,
                   border: 'none',
@@ -315,8 +333,8 @@ export function ProviderRoutingSelector({
                 >
                   <Shuffle size={15} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontWeight: value === null ? 600 : 500 }}>Use default</div>
-                    <div style={subTextStyle}>Inherited: {routingLabel(inheritedRouting)}</div>
+                    <div style={{ fontWeight: value === null ? 600 : 500 }}>Usar por defecto</div>
+                    <div style={subTextStyle}>Heredado: {routingLabel(inheritedRouting)}</div>
                   </div>
                   {value === null && <Check size={15} style={{ color: 'var(--accent)' }} />}
                 </button>
@@ -331,11 +349,57 @@ export function ProviderRoutingSelector({
               >
                 <Shuffle size={15} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontWeight: autoSelected ? 600 : 500 }}>Auto routing</div>
-                  <div style={subTextStyle}>Let OpenRouter choose the endpoint</div>
+                  <div style={{ fontWeight: autoSelected ? 600 : 500 }}>Enrutamiento automático</div>
+                  <div style={subTextStyle}>Dejar que OpenRouter elija</div>
                 </div>
                 {autoSelected && <Check size={15} style={{ color: 'var(--accent)' }} />}
               </button>
+
+              {showCheapestCta && cheapest && (
+                <div style={{ padding: '10px 12px', borderTop: '1px solid var(--border)', borderBottom: '1px solid var(--border)', background: 'var(--bg-surface)' }}>
+                  <button
+                    type="button"
+                    onClick={handleCheapest}
+                    aria-label="Seleccionar el proveedor más barato"
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 10,
+                      width: '100%',
+                      padding: '10px 12px',
+                      border: '1px solid var(--accent)',
+                      borderRadius: 'var(--radius-md)',
+                      background: 'var(--accent-muted)',
+                      color: 'var(--text-primary)',
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                    }}
+                  >
+                    <div style={{
+                      width: 28,
+                      height: 28,
+                      borderRadius: 'var(--radius-sm)',
+                      background: 'var(--accent)',
+                      color: '#fff',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      flexShrink: 0,
+                      fontSize: '0.75rem',
+                      fontWeight: 700,
+                    }}>$</div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, fontSize: '0.875rem' }}>El más barato</div>
+                      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        Selecciona el proveedor con menor costo (prompt + completion)
+                      </div>
+                    </div>
+                    <span style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--accent)', whiteSpace: 'nowrap' }}>
+                      {endpointLabel(cheapest)}
+                    </span>
+                  </button>
+                </div>
+              )}
 
               <div style={{
                 padding: '8px 14px',
@@ -352,42 +416,115 @@ export function ProviderRoutingSelector({
               {loading ? (
                 <div style={{ padding: 28, textAlign: 'center', color: 'var(--text-muted)' }}>
                   <Loader2 size={20} style={{ animation: 'spin 1s linear infinite', margin: '0 auto 10px' }} />
-                  <div style={{ fontSize: '0.8125rem' }}>Loading endpoints...</div>
+                  <div style={{ fontSize: '0.8125rem' }}>Cargando endpoints…</div>
                 </div>
               ) : error ? (
                 <div style={{ padding: '14px 16px', color: 'var(--error)', fontSize: '0.8125rem' }}>
-                  {error}
+                  {error.includes('OpenRouter API key not configured') ? (
+                    <span>OpenRouter API key no configurada. Configúrala en Ajustes → OpenRouter.</span>
+                  ) : (
+                    <span>{error}</span>
+                  )}
                 </div>
               ) : endpoints.length === 0 ? (
                 <div style={{ padding: '14px 16px', color: 'var(--text-muted)', fontSize: '0.8125rem' }}>
-                  No endpoints reported for this model.
+                  No hay endpoints disponibles para este modelo.
                 </div>
               ) : endpoints.map((endpoint) => {
                 const selected = value?.mode === 'provider' && value.provider_slug === endpoint.tag;
+                const isCheapestWinner = cheapest?.tag === endpoint.tag;
+                const isDegraded = endpoint.status !== null && endpoint.status !== 0;
+                const promptPrice = formatPrice(endpoint.pricing.prompt);
+                const completionPrice = formatPrice(endpoint.pricing.completion);
+                const cacheNote = endpoint.pricing.input_cache_read ? ` · caché ${formatPrice(endpoint.pricing.input_cache_read)}` : '';
+                const uptime5m = formatUptime(endpoint.uptime_last_5m);
+                const uptime30m = formatUptime(endpoint.uptime_last_30m);
+                const rowStyle: React.CSSProperties = {
+                  ...optionStyle(!!selected),
+                  ...(isCheapestWinner ? { borderLeft: '3px solid var(--accent)', background: selected ? 'var(--accent-muted)' : 'var(--bg-surface)' } : {}),
+                  alignItems: 'flex-start',
+                  gap: 10,
+                };
                 return (
                   <button
                     key={endpoint.tag}
                     type="button"
                     role="option"
-                    aria-selected={selected}
+                    aria-selected={!!selected}
                     onClick={() => selectEndpoint(endpoint)}
-                    style={optionStyle(selected)}
+                    style={rowStyle}
                   >
-                    <Server size={15} style={{ color: selected ? 'var(--accent)' : 'var(--text-muted)', flexShrink: 0 }} />
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{
-                        fontWeight: selected ? 600 : 500,
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                      }}>
-                        {endpointLabel(endpoint)}
+                    <Server size={15} style={{ color: selected ? 'var(--accent)' : 'var(--text-muted)', flexShrink: 0, marginTop: 2 }} />
+                    <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                        <span style={{
+                          fontWeight: selected ? 600 : 500,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                          fontSize: '0.875rem',
+                        }}>
+                          {endpoint.provider_name}
+                        </span>
+                        <span style={{ fontSize: '0.6875rem', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {endpoint.tag}
+                        </span>
+                        {isDegraded && (
+                          <span
+                            title="Proveedor degradado"
+                            aria-label="Proveedor degradado"
+                            style={{
+                              width: 8,
+                              height: 8,
+                              borderRadius: '50%',
+                              background: '#f59e0b',
+                              display: 'inline-block',
+                              flexShrink: 0,
+                            }}
+                          />
+                        )}
+                        {isCheapestWinner && (
+                          <span style={{
+                            fontSize: '0.625rem',
+                            fontWeight: 700,
+                            letterSpacing: '0.04em',
+                            textTransform: 'uppercase',
+                            color: 'var(--accent)',
+                            background: 'var(--accent-muted)',
+                            border: '1px solid var(--accent)',
+                            borderRadius: 999,
+                            padding: '1px 6px',
+                            flexShrink: 0,
+                          }}>
+                            Más barato
+                          </span>
+                        )}
                       </div>
-                      <div style={subTextStyle}>
-                        {endpoint.tag} · {formatContext(endpoint.context_length)} ctx · {formatPrice(endpoint.pricing.prompt)}
+                      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center' }}>
+                        <span>prompt {promptPrice}</span>
+                        <span>·</span>
+                        <span>completion {completionPrice}</span>
+                        {cacheNote && <span>{cacheNote}</span>}
+                        <span>·</span>
+                        <span>{formatContext(endpoint.context_length)} ctx</span>
+                        {endpoint.quantization && (
+                          <>
+                            <span>·</span>
+                            <span>{endpoint.quantization}</span>
+                          </>
+                        )}
+                      </div>
+                      <div style={{ fontSize: '0.6875rem', color: 'var(--text-muted)', display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+                        <span title={endpoint.uptime_last_5m === null ? 'No reportado por el proveedor en los últimos 30m' : undefined}>
+                          Uptime 5m {uptime5m}
+                        </span>
+                        <span>·</span>
+                        <span title={endpoint.uptime_last_30m === null ? 'No reportado por el proveedor en los últimos 30m' : undefined}>
+                          Uptime 30m {uptime30m}
+                        </span>
                       </div>
                     </div>
-                    {selected && <Check size={15} style={{ color: 'var(--accent)' }} />}
+                    {selected && <Check size={15} style={{ color: 'var(--accent)', flexShrink: 0, marginTop: 4 }} />}
                   </button>
                 );
               })}
@@ -408,7 +545,7 @@ export function ProviderRoutingSelector({
                   color: 'var(--text-primary)',
                   fontSize: '0.8125rem',
                 }}>
-                  <span>Allow fallbacks</span>
+                  <span>Permitir alternativas</span>
                   <span style={{
                     width: 36,
                     height: 20,
