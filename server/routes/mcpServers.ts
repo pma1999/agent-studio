@@ -18,6 +18,7 @@ import {
   teardownRelaySession,
   type McpConnection,
 } from '../mcp/index.js';
+import { listPendingApprovalsFor } from '../mcp/toolApproval.js';
 import { isAgentConnected } from '../agentRelay/registry.js';
 import { slugFromServerName } from '../tools/index.js';
 import type { McpServerConfig, McpTransport } from '../mcp/types.js';
@@ -62,6 +63,26 @@ router.post('/approvals/:approvalId', (req: AuthRequest, res: Response) => {
   const result = resolveMcpToolApproval(req.params.approvalId, userId, req.body.approved);
   if (result === 'not_found') return res.status(404).json({ error: 'Approval request not found or expired' });
   return res.json({ resolved: true, approved: result === 'approved' });
+});
+
+// GET /api/mcp-servers/pending-approvals?conversation_id= — owner-scoped read-only
+// snapshot of the pending MCP tool approvals for one conversation (plan.md S7).
+// Same payload shape as the live `{mcp_approval_required}` SSE event. Registered
+// BEFORE the GET /:id handler so "pending-approvals" is never parsed as a server id.
+router.get('/pending-approvals', (req: AuthRequest, res: Response) => {
+  setPrivateNoStore(res);
+  const userId = req.userId;
+  if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+  const conversationId = req.query.conversation_id;
+  if (typeof conversationId !== 'string' || !conversationId.trim()) {
+    return res.status(400).json({ error: 'conversation_id is required' });
+  }
+  // Tenancy check mirrors messages.ts: unknown AND foreign ids uniformly 404.
+  const conversation = db.prepare('SELECT id FROM conversations WHERE id = ? AND user_id = ?').get(conversationId, userId);
+  if (!conversation) {
+    return res.status(404).json({ error: 'Conversation not found' });
+  }
+  return res.json({ approvals: listPendingApprovalsFor(userId, conversationId) });
 });
 
 function normalizeTransport(value: unknown, fallback?: McpTransport): McpTransport {

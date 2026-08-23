@@ -188,6 +188,9 @@ export interface Message {
   processed_by_agent_name?: string | null;
   council_run_id?: string | null;
   is_council_synthesis?: boolean;
+  /** Draft-row lifecycle status (server-side turn survival). Only ever set on
+   *  draft assistant rows; NULL/absent on every other row, incl. all legacy rows. */
+  generation_status?: 'streaming' | 'complete' | 'error' | 'stopped' | null;
   created_at: string;
 }
 
@@ -278,6 +281,20 @@ export type StreamingActivityEvent =
   | StreamingReasoningEvent
   | StreamingContentEvent
   | StreamingToolEvent;
+
+/**
+ * Per-conversation live-streaming client state. Keyed by conversationId in the
+ * store's `streamsByConversation` so parallel/mid-turn conversation switches
+ * never orphan text (each entry is fully independent).
+ */
+export interface ConversationStreamState {
+  content: string;
+  reasoning: string;
+  /** Ordered live activity timeline (text/thinking/tool) for this stream. */
+  activityEvents: StreamingActivityEvent[];
+  startTime: number | null;
+  abortController: AbortController | null;
+}
 
 export interface AgentFormData {
   name: string;

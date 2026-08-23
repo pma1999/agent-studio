@@ -38,6 +38,9 @@ interface PendingApproval {
   timer: NodeJS.Timeout;
   signal?: AbortSignal;
   abortListener?: () => void;
+  /** Exact payload emitted live; lets the read-only lister return the same shape
+   *  to the same tenant without recomputing or exposing anything new. */
+  event?: McpApprovalEvent;
 }
 
 const pendingApprovals = new Map<string, PendingApproval>();
@@ -112,34 +115,52 @@ export async function requestMcpToolApproval(input: {
     const timer = setTimeout(() => settle(id, false), APPROVAL_TIMEOUT_MS);
     timer.unref?.();
     const abortListener = () => settle(id, false);
+    const event: McpApprovalEvent = {
+      id,
+      server_id: input.request.serverId,
+      ...(input.request.serverName ? { server_name: input.request.serverName.slice(0, 200) } : {}),
+      exposed_name: input.request.exposedName,
+      tool_name: input.request.toolName,
+      arguments: input.request.arguments,
+      arguments_sha256: digest,
+      possible_cross_tool_data: input.request.possibleCrossToolData,
+      ...(boundedHint(input.request.annotations) ? { annotations: boundedHint(input.request.annotations) } : {}),
+      ...(boundedHint(input.request.execution) ? { execution: boundedHint(input.request.execution) } : {}),
+      expires_at: expiresAt,
+    };
     const pending: PendingApproval = {
       userId: input.userId,
       conversationId: input.conversationId,
       resolve,
       timer,
+      event,
       ...(input.signal ? { signal: input.signal, abortListener } : {}),
     };
     pendingApprovals.set(id, pending);
     input.signal?.addEventListener('abort', abortListener, { once: true });
 
     try {
-      input.emit({
-        id,
-        server_id: input.request.serverId,
-        ...(input.request.serverName ? { server_name: input.request.serverName.slice(0, 200) } : {}),
-        exposed_name: input.request.exposedName,
-        tool_name: input.request.toolName,
-        arguments: input.request.arguments,
-        arguments_sha256: digest,
-        possible_cross_tool_data: input.request.possibleCrossToolData,
-        ...(boundedHint(input.request.annotations) ? { annotations: boundedHint(input.request.annotations) } : {}),
-        ...(boundedHint(input.request.execution) ? { execution: boundedHint(input.request.execution) } : {}),
-        expires_at: expiresAt,
-      });
+      input.emit(event);
     } catch {
       settle(id, false);
     }
   });
+}
+
+/**
+ * Read-only snapshot of the pending approvals for one owner+conversation, in the
+ * exact payload shape of the live `{mcp_approval_required}` SSE event. Iterates a
+ * copy of the pending map and never mutates it — resolution stays one-shot via
+ * resolveMcpToolApproval. Exposes nothing beyond what the live emit already
+ * showed to the same tenant.
+ */
+export function listPendingApprovalsFor(userId: string, conversationId: string): McpApprovalEvent[] {
+  const events: McpApprovalEvent[] = [];
+  for (const [id, pending] of [...pendingApprovals]) {
+    if (pending.userId !== userId || pending.conversationId !== conversationId) continue;
+    if (pending.event) events.push({ ...pending.event, id });
+  }
+  return events;
 }
 
 /** Test-only observability without exposing pending payloads. */

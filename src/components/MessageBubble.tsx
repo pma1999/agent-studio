@@ -556,6 +556,9 @@ interface MessageBubbleProps {
   agentEmoji?: string;
   toolExecutions?: ToolExecution[];
   toolActivityLive?: boolean;
+  /** Shows the pulsing "generating…" affordance (GC13) for rows rendered live
+   *  from poll mode (server-reported streaming draft, no local stream). */
+  showGeneratingIndicator?: boolean;
   /** Model used for this message when streaming (before message.model is set). */
   streamingModel?: string;
   streamingProviderRouting?: ProviderRoutingConfig | null;
@@ -804,6 +807,7 @@ export function MessageBubble({
   agentEmoji,
   toolExecutions,
   toolActivityLive,
+  showGeneratingIndicator,
   streamingModel,
   streamingProviderRouting,
   isEditing,
@@ -1178,6 +1182,33 @@ export function MessageBubble({
                   </div>
                 )
               )
+            )}
+
+            {showGeneratingIndicator && (
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                color: 'var(--text-muted)',
+                fontSize: '0.75rem',
+              }}>
+                <span style={{ display: 'flex', gap: '4px' }} aria-hidden="true">
+                  {[0, 1, 2].map((i) => (
+                    <motion.span
+                      key={i}
+                      animate={{ opacity: [0.3, 1, 0.3] }}
+                      transition={{ duration: 1.2, repeat: Infinity, delay: i * 0.2 }}
+                      style={{
+                        width: '5px',
+                        height: '5px',
+                        borderRadius: '50%',
+                        background: 'var(--accent)',
+                      }}
+                    />
+                  ))}
+                </span>
+                <span>generating…</span>
+              </div>
             )}
 
             {/* Web search citation links */}

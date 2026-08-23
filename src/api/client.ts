@@ -196,6 +196,9 @@ export const conversationsApi = {
 export interface MessagesListResponse {
   messages: Message[];
   active_leaf_id: string | null;
+  /** Additive, optional (plan.md S6): id of the live generation turn, present/null
+   *  when idle — clients poll for reopen reconciliation while it is set. */
+  active_turn_id?: string | null;
 }
 
 export const messagesApi = {
@@ -302,6 +305,11 @@ export const mcpServersApi = {
   resolveApproval: (id: string, approved: boolean) => request<{ resolved: true; approved: boolean }>(
     `/mcp-servers/approvals/${encodeURIComponent(id)}`,
     { method: 'POST', body: JSON.stringify({ approved }) },
+  ),
+  /** Owner-scoped snapshot of the pending MCP tool approvals for one conversation
+   *  (plan.md S7): same payload shape as the live `{mcp_approval_required}` SSE event. */
+  listPendingApprovals: (conversationId: string) => request<{ approvals: McpApprovalRequiredData[] }>(
+    `/mcp-servers/pending-approvals?conversation_id=${encodeURIComponent(conversationId)}`,
   ),
 };
 
@@ -644,6 +652,19 @@ export async function streamChat(
     }
     onError(err instanceof Error ? err.message : 'Connection failed');
   }
+}
+
+/**
+ * Stop the active generation turn in a conversation (plan.md S5; frozen REST
+ * contract in Cross-task interfaces §2). Appended after `streamChat` — never
+ * inserted between its positional parameters. Throws on non-OK (e.g. 404 when
+ * no live turn exists for this conversation).
+ */
+export async function stopTurn(conversationId: string): Promise<void> {
+  await request<{ stopped: boolean }>('/chat/stop', {
+    method: 'POST',
+    body: JSON.stringify({ conversation_id: conversationId }),
+  });
 }
 
 // Models

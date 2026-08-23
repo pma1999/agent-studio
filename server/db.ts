@@ -962,6 +962,23 @@ export function migrate() {
     CREATE INDEX IF NOT EXISTS idx_conversation_shares_token ON conversation_shares(token_hash);
     CREATE INDEX IF NOT EXISTS idx_conversation_shares_conversation ON conversation_shares(conversation_id);
   `);
+
+  // --- Streaming mid-turn survival: turn-lifecycle columns + boot self-heal ---
+  // Additive columns guarded by PRAGMA table_info (same pattern as above).
+  // Kept at the END of migrate() so no earlier table rebuild can drop them
+  // and the boot sweep below always runs after every other migration.
+  const convColsForTurnTracking = db.prepare("PRAGMA table_info(conversations)").all() as { name: string }[];
+  if (!convColsForTurnTracking.some((c) => c.name === 'active_turn_id')) {
+    db.exec("ALTER TABLE conversations ADD COLUMN active_turn_id TEXT DEFAULT NULL");
+  }
+  const msgColsForTurnTracking = db.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
+  if (!msgColsForTurnTracking.some((c) => c.name === 'generation_status')) {
+    db.exec("ALTER TABLE messages ADD COLUMN generation_status TEXT DEFAULT NULL");
+  }
+  // Boot self-heal: a fresh process owns zero live turns, so any leftover
+  // 'streaming' draft or claimed turn left by a dead process is stale.
+  db.prepare("UPDATE messages SET generation_status = 'error' WHERE generation_status = 'streaming'").run();
+  db.prepare('UPDATE conversations SET active_turn_id = NULL WHERE active_turn_id IS NOT NULL').run();
 }
 
 function migrateCouncilTables() {

@@ -34,9 +34,12 @@ router.get('/:id/messages', (req: AuthRequest, res: Response) => {
 
     // Deliberate contract change: the flat array becomes { messages, active_leaf_id }
     // so the client can render the thread tree (editing / variants / branches).
+    // active_turn_id (plan.md S6) is additive and optional for poll-based reopen
+    // reconciliation; null whenever no turn is live.
     res.json({
       messages: parsed,
       active_leaf_id: (conversation as { active_leaf_id?: string | null }).active_leaf_id ?? null,
+      active_turn_id: (conversation as { active_turn_id?: string | null }).active_turn_id ?? null,
     });
   } catch (err) {
     console.error('Error listing messages:', err);

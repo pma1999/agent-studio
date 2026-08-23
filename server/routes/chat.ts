@@ -59,6 +59,13 @@ import {
   isAutoConversationTitlesEnabled,
 } from '../conversationTitles.js';
 import { buildThreadIds } from '../messageTree.js';
+import {
+  registerTurn,
+  markTurnDisconnected,
+  findTurnByConversation,
+  abortTurn,
+  clearTurn,
+} from '../chatTurnRegistry.js';
 
 const router = Router();
 
@@ -220,28 +227,73 @@ function validateAttachments(attachments: unknown): { valid: ChatAttachmentInput
   return { valid };
 }
 
+// POST /api/chat/stop - Explicit Stop protocol (plan S4 / policy d / GC6).
+// Aborts the registered live turn for a conversation; mere disconnects never
+// do this. Owner-scoped via the registry's userId match.
+router.post('/stop', (req: AuthRequest, res: Response): void => {
+  const userId = req.userId;
+  if (!userId) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+  const conversationId = (req.body as { conversation_id?: string }).conversation_id;
+  // Uniform 404 for unknown AND foreign conversations — no existence oracle
+  // across users (GC10). Keying by conversation is safe because the atomic
+  // claim guarantees at most one active turn per conversation.
+  const turn = conversationId ? findTurnByConversation(conversationId) : undefined;
+  if (!turn || turn.userId !== userId) {
+    res.status(404).json({ error: 'Turn not found' });
+    return;
+  }
+  // Fires onAbort('stop') synchronously in the streaming request's context
+  // (recording the reason + aborting its controller); that request then
+  // finalizes its draft with generation_status='stopped' and releases the claim.
+  abortTurn(turn.turnId, 'stop');
+  res.status(200).json({ stopped: true });
+});
+
 // POST /api/chat - Send message and stream response
 router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
   let clientDisconnected = false;
-  let upstreamReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   let abortController: AbortController | null = null;
   let mcpClients: Map<string, McpConnection> = new Map();
+  // Turn identity + lifecycle (plan S1/S5): the user message id doubles as turnId.
+  let userMsgId: string | null = null;
+  let turnConversationId: string | null = null;
+  // Why this turn aborted. The registry invokes onAbort synchronously BEFORE
+  // the controller abort surfaces, so every AbortError exit path can map to
+  // the right terminal status: 'stop'/'orphan-timeout' → 'stopped',
+  // 'shutdown' → 'error'; a bare 120s fetch timeout stays 'error'.
+  let abortReason: 'stop' | 'orphan-timeout' | 'shutdown' | null = null;
+  const terminalStatusForCurrentAbort = (): 'stopped' | 'error' =>
+    abortReason === 'stop' || abortReason === 'orphan-timeout' ? 'stopped' : 'error';
+  // Hooks into the per-request draft machinery (the helpers themselves live
+  // deeper in the handler where their closure context exists). Null until
+  // streaming setup completes — which also means no draft can exist yet — so
+  // optional calls are provably no-ops.
+  let forceFlushOpenDraft: (() => void) | null = null;
+  let finalizeOpenDraftHook:
+    | ((status: 'complete' | 'error' | 'stopped', opts?: { toolCallsJson?: string | null; anns?: unknown[] }) => void)
+    | null = null;
 
-  // Stream cancellation: detect when the client disconnects
+  // Disconnect detection — disconnect ≠ cancel (plan S3 / GC4).
   // IMPORTANT: Use res.on('close'), NOT req.on('close').
   // req.on('close') fires when the request body stream is consumed (immediately for POST),
   // but res.on('close') fires when the client actually disconnects the response connection.
+  // A closed tab NEVER aborts upstream generation or cancels the reader. It only
+  // flags the disconnect (SSE writes get skipped), starts the registry's orphan
+  // grace timer, and force-flushes any open draft row so partial output is
+  // durable. Cancellation happens ONLY via POST /api/chat/stop, orphan timeout,
+  // or shutdown aborts.
   res.on('close', () => {
     // Only treat as disconnect if we haven't finished writing the response
     if (!res.writableFinished) {
-      console.log(`[chat] Client disconnected (res.close before writableFinished). abortController=${!!abortController}, upstreamReader=${!!upstreamReader}`);
+      console.log(`[chat] Client disconnected (res.close before writableFinished); generation continues server-side`);
       clientDisconnected = true;
-      if (abortController) {
-        abortController.abort();
+      if (userMsgId) {
+        markTurnDisconnected(userMsgId);
       }
-      if (upstreamReader) {
-        upstreamReader.cancel().catch(() => {});
-      }
+      forceFlushOpenDraft?.();
     }
   });
 
@@ -259,15 +311,20 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       return;
     }
 
+    // MCP approvals survive disconnection (plan S7 / GC9): the disconnect-based
+    // deny is gone. The pending approval stays resolvable within its existing
+    // fail-closed bounds — APPROVAL_TIMEOUT_MS expiry, tenant+conversation
+    // binding, one-shot resolution, and abort-signal denial (Stop /
+    // orphan-timeout / shutdown) are unchanged. The emit closure skips the SSE
+    // write silently instead of throwing when nobody is listening.
     const authorizeMcpCall = async (request: McpToolAuthorizationRequest): Promise<boolean> => {
-      if (clientDisconnected || res.writableEnded) return false;
       return requestMcpToolApproval({
         userId,
         conversationId: conversation_id,
         request,
         ...(abortController?.signal ? { signal: abortController.signal } : {}),
         emit: (approval) => {
-          if (clientDisconnected || res.writableEnded) throw new Error('Chat stream is closed');
+          if (res.writableEnded) return;
           res.write(`data: ${JSON.stringify({ mcp_approval_required: approval })}\n\n`);
         },
       });
@@ -293,6 +350,37 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       res.status(404).json({ error: 'Conversation not found' });
       return;
     }
+
+    // ---- Turn open: atomic per-conversation claim (plan S5 / GC7). ----
+    // better-sqlite3 is synchronous, so two interleaved POSTs cannot both win
+    // this conditional UPDATE — the check-then-set race is closed in SQL.
+    // active_turn_id is the durable "generating here" signal that survives
+    // disconnects and drives reopen polling.
+    userMsgId = nanoid();
+    turnConversationId = conversation_id;
+    const claim = db
+      .prepare('UPDATE conversations SET active_turn_id = ? WHERE id = ? AND user_id = ? AND active_turn_id IS NULL')
+      .run(userMsgId, conversation_id, userId);
+    if (claim.changes === 0) {
+      res.status(409).json({ error: 'A response is already being generated in this conversation' });
+      return;
+    }
+
+    // Register the live turn so Stop / orphan-timeout / shutdown can reach it.
+    // This controller IS the route's abortController for the whole request
+    // (branch-local re-creations removed); the registry invokes onAbort
+    // synchronously first, then aborts this controller, tripping the existing
+    // upstream-cancel paths.
+    abortController = new AbortController();
+    registerTurn({
+      turnId: userMsgId,
+      userId,
+      conversationId: conversation_id,
+      controller: abortController,
+      onAbort: (reason) => {
+        abortReason = reason;
+      },
+    });
 
     // Get agent for this request
     // Priority: 1) invoke_agent_id (@agent mention), 2) conversation's agent_id, 3) general chat settings
@@ -380,7 +468,6 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     //  - edit/retry (edit_message_id): new variant of the target's turn
     //    (parent = target's parent, turn_id = target's turn_id, variant_seq = MAX+1).
     //    Identical content = retry: a new variant is still created.
-    const userMsgId = nanoid();
     const attachmentsMeta = attachments.length > 0 ? JSON.stringify(attachments.map((a) => ({ filename: a.filename }))) : null;
 
     // Chain tail of this turn: every assistant/tool message inserted below is
@@ -785,6 +872,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     };
 
     const sendDoneEvent = (anns: unknown[]) => {
+      if (clientDisconnected || res.writableEnded) return;
       const doneData: Record<string, unknown> = {
         done: true,
         tokens: totalTokens,
@@ -799,6 +887,118 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       res.write('data: [DONE]\n\n');
     };
 
+    // ---------------------------------------------------------------------
+    // Draft-row-per-segment persistence (plan S2 / GC3 / GC8).
+    //
+    // One assistant draft row per while(true) iteration ("segment"): lazily
+    // INSERTed on the first content/reasoning delta with
+    // generation_status='streaming', updated in place at most once per second
+    // while text changes, and finalized with a terminal generation_status by
+    // EVERY exit path (GC5). openDraftId is reset at the top of each
+    // iteration; an upstream failure before any delta persists nothing
+    // assistant-side — exactly today's failure semantics.
+    // ---------------------------------------------------------------------
+    let fullContent = '';
+    let fullReasoning = '';
+    let openDraftId: string | null = null;
+    let draftLastFlushAt = 0;
+    let draftFlushedContent = '';
+    let draftFlushedReasoning = '';
+    const DRAFT_FLUSH_INTERVAL_MS = 1000;
+
+    /** Idempotently materialize the segment's draft row; returns its id. */
+    const ensureDraftRow = (): string => {
+      if (openDraftId) return openDraftId;
+      const draftId = nanoid();
+      db.prepare(`
+        INSERT INTO messages (id, conversation_id, role, content, provider_routing, tokens_used, prompt_tokens, completion_tokens, cost, annotations, reasoning_content, reasoning_tokens, cached_tokens, tool_calls, model, processed_by_agent_id, parent_id, turn_id, variant_seq, generation_status)
+        VALUES (?, ?, 'assistant', '', ?, ?, ?, ?, ?, NULL, NULL, ?, ?, NULL, ?, ?, ?, ?, ?, 'streaming')
+      `).run(
+        draftId,
+        conversation_id,
+        effectiveProviderRoutingJson,
+        totalTokens,
+        promptTokens,
+        completionTokens,
+        cost,
+        reasoningTokens,
+        cachedTokens,
+        provider.id === 'deepseek' ? effectiveModel : (actualModelFromResponse ?? effectiveModel),
+        processedByAgentId,
+        chainTailId,
+        turnId,
+        variantSeq
+      );
+      openDraftId = draftId;
+      chainTailId = draftId;
+      updateActiveLeaf(draftId);
+      return draftId;
+    };
+
+    /**
+     * Throttled in-place flush of accumulated text into the open draft.
+     * Writes only when content or reasoning changed AND ≥1000 ms have passed
+     * since the previous write (GC8); force=true bypasses only the interval
+     * (segment end, disconnect detection, every exit path). Plain synchronous
+     * UPDATE — no timers that could outlive the request.
+     */
+    const flushDraft = (force = false): void => {
+      if (!openDraftId) return;
+      if (fullContent === draftFlushedContent && fullReasoning === draftFlushedReasoning) return;
+      if (!force && Date.now() - draftLastFlushAt < DRAFT_FLUSH_INTERVAL_MS) return;
+      db.prepare('UPDATE messages SET content = ?, reasoning_content = ? WHERE id = ?')
+        .run(fullContent || '', fullReasoning || null, openDraftId);
+      draftLastFlushAt = Date.now();
+      draftFlushedContent = fullContent;
+      draftFlushedReasoning = fullReasoning;
+    };
+
+    /**
+     * Terminal write for the current segment: authoritative content/reasoning
+     * (+ current token counters and model — matching what today's milestone
+     * INSERT persisted), optional tool_calls/annotations, and the terminal
+     * generation_status. With no open draft this is a deliberate no-op unless
+     * a tool-calls JSON warrants a row, which recreates today's empty-content
+     * assistant-with-tool_calls INSERT shape. A row is never inserted twice
+     * for the same segment (GC3).
+     */
+    const finalizeDraft = (
+      status: 'complete' | 'error' | 'stopped',
+      opts?: { toolCallsJson?: string | null; anns?: unknown[] },
+    ): void => {
+      const toolCallsJson = opts?.toolCallsJson ?? null;
+      if (!openDraftId && !toolCallsJson) return;
+      const draftId = openDraftId ?? ensureDraftRow();
+      const sets = ['content = ?', 'reasoning_content = ?', 'model = ?', 'tokens_used = ?', 'prompt_tokens = ?', 'completion_tokens = ?', 'cost = ?', 'reasoning_tokens = ?', 'cached_tokens = ?', 'generation_status = ?'];
+      const vals: Array<string | number | null> = [
+        fullContent || '',
+        fullReasoning || null,
+        provider.id === 'deepseek' ? effectiveModel : (actualModelFromResponse ?? effectiveModel),
+        totalTokens,
+        promptTokens,
+        completionTokens,
+        cost,
+        reasoningTokens,
+        cachedTokens,
+        status,
+      ];
+      if (toolCallsJson !== null) {
+        sets.push('tool_calls = ?');
+        vals.push(toolCallsJson);
+      }
+      if (opts?.anns !== undefined) {
+        sets.push('annotations = ?');
+        vals.push(opts.anns.length > 0 ? JSON.stringify(opts.anns) : null);
+      }
+      vals.push(draftId);
+      db.prepare(`UPDATE messages SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+    };
+
+    // Route-level hooks (declarations at the top of the handler): the close
+    // handler force-flushes on disconnect; the outer catch finalizes 'error'.
+    forceFlushOpenDraft = () => flushDraft(true);
+    finalizeOpenDraftHook = finalizeDraft;
+
     // -----------------------------------------------------------------------
     // ChatGPT (Codex app-server) branch
     //
@@ -808,7 +1008,10 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     // consumes; tool calls run through the app's own tool executors.
     // -----------------------------------------------------------------------
     if (provider.id === 'codex') {
-      abortController = new AbortController();
+      // abortController was created and registered at turn open — the registry
+      // holds THE controller for this request, so Stop/orphan-timeout/shutdown
+      // reach the in-flight runCodexTurn signal directly. Disconnect no longer
+      // aborts anything; the emit wrapper below keeps persisting deltas.
 
       const codexRow = db.prepare('SELECT codex_thread_id FROM conversations WHERE id = ?').get(conversation_id) as
         | { codex_thread_id: string | null }
@@ -837,7 +1040,19 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         signal: abortController.signal,
         authorizeMcpCall,
         emit: (evt) => {
-          if (clientDisconnected || res.writableEnded) return;
+          // Accumulate streamed deltas into the segment draft so partial output
+          // is durable even with nobody connected (plan S3 codex branch).
+          if (typeof evt.content === 'string' && evt.content) {
+            fullContent += evt.content;
+            ensureDraftRow();
+            flushDraft();
+          }
+          if (typeof evt.reasoning === 'string' && evt.reasoning) {
+            fullReasoning += evt.reasoning;
+            ensureDraftRow();
+            flushDraft();
+          }
+          if (res.writableEnded) return;
           res.write(`data: ${JSON.stringify(evt)}\n\n`);
         },
         persistToolResult: (callId, _name, result) => {
@@ -862,7 +1077,13 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
             function: { name: tc.name, arguments: tc.arguments },
           })))
         : null;
-      const codexAssistantMsgId = saveAssistantMessage(codexResult.content, codexResult.reasoning, toolCallsJson, []);
+      // Authoritative overwrite of the streamed draft: whatever the emit
+      // wrapper accumulated, codexResult.content/reasoning wins (mirrors the
+      // previous post-save updateAssistantMessage), with tool_calls JSON as
+      // today. If no delta ever arrived, finalize materializes the row.
+      fullContent = codexResult.content;
+      fullReasoning = codexResult.reasoning;
+      finalizeDraft('complete', { toolCallsJson, anns: [] });
 
       // …then the tool result rows in execution order.
       for (const row of pendingToolRows) {
@@ -875,7 +1096,9 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         updateActiveLeaf(toolMsgId);
       }
 
-      // Merge web-search citations from tool outputs, mirroring the generic path.
+      // Merge web-search citations from tool outputs into the already-finalized
+      // draft (same two-step persist as before: assistant first, then tools,
+      // then annotations).
       const finalAnnots: unknown[] = [];
       for (const row of pendingToolRows) {
         try {
@@ -890,8 +1113,8 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         }
       }
 
-      if (codexResult.content || codexResult.reasoning) {
-        updateAssistantMessage(codexAssistantMsgId, codexResult.content, codexResult.reasoning, finalAnnots);
+      if (openDraftId && (codexResult.content || codexResult.reasoning)) {
+        updateAssistantMessage(openDraftId, codexResult.content, codexResult.reasoning, finalAnnots);
       }
       sendDoneEvent(finalAnnots);
       res.end();
@@ -901,8 +1124,13 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     // Non-streaming path (Response Healing): single request, then forward full response as SSE
     if (requestBody.stream === false) {
       requestBody.messages = messages;
+      // No draft machinery here (plan S3): a whole-response JSON has no
+      // partials to persist; survival means the fetch completes despite
+      // disconnect and the existing saveAssistantMessage lands the full text.
       while (true) {
-        abortController = new AbortController();
+        // Reuses the turn-open abortController (registry-owned). The 120s
+        // timeout is always cleared on every path below before looping, so a
+        // stale timer can never fire into the next attempt.
         const fetchTimeout = setTimeout(() => {
           if (abortController) abortController.abort();
         }, 120_000);
@@ -912,14 +1140,19 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
             method: 'POST',
             headers,
             body: JSON.stringify(requestBody),
-            signal: abortController.signal,
+            signal: abortController!.signal,
           });
           clearTimeout(fetchTimeout);
         } catch (fetchErr: unknown) {
           clearTimeout(fetchTimeout);
           const err = fetchErr as Error;
           if (err.name === 'AbortError') {
-            if (!clientDisconnected) {
+            // A genuine 120s timeout or a registry abort (Stop/orphan/shutdown)
+            // — a client disconnect itself never aborts this fetch anymore.
+            // Nothing accumulated here and no draft exists, so finalize is a
+            // deliberate no-op; the reason mapping keeps status semantics uniform.
+            finalizeDraft(terminalStatusForCurrentAbort());
+            if (!clientDisconnected && !res.writableEnded) {
               res.write(`data: ${JSON.stringify({ error: 'Request timed out or was cancelled' })}\n\n`);
               res.write('data: [DONE]\n\n');
               res.end();
@@ -938,14 +1171,17 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
             errorMsg = errorText || errorMsg;
           }
           if (shouldRetryMaxEffort(errorMsg)) {
-            if (clientDisconnected) return;
+            // Retry is upstream-driven: connection state must not cancel it (GC4).
             console.warn('[chat] Model rejected reasoning effort "max", retrying with "xhigh":', errorMsg);
             degradeMaxEffort();
             continue;
           }
-          res.write(`data: ${JSON.stringify({ error: errorMsg })}\n\n`);
-          res.write('data: [DONE]\n\n');
-          res.end();
+          finalizeDraft('error'); // no-op safeguard: healing never opens a draft
+          if (!clientDisconnected && !res.writableEnded) {
+            res.write(`data: ${JSON.stringify({ error: errorMsg })}\n\n`);
+            res.write('data: [DONE]\n\n');
+            res.end();
+          }
           return;
         }
 
@@ -953,14 +1189,17 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       try {
         data = (await apiRes.json()) as typeof data;
       } catch {
-        res.write(`data: ${JSON.stringify({ error: 'Invalid JSON from API' })}\n\n`);
-        res.write('data: [DONE]\n\n');
-        res.end();
+        finalizeDraft('error'); // no-op safeguard: healing never opens a draft
+        if (!clientDisconnected && !res.writableEnded) {
+          res.write(`data: ${JSON.stringify({ error: 'Invalid JSON from API' })}\n\n`);
+          res.write('data: [DONE]\n\n');
+          res.end();
+        }
         return;
       }
-      const fullContent = data.choices?.[0]?.message?.content ?? '';
+      fullContent = data.choices?.[0]?.message?.content ?? '';
       const msg = data.choices?.[0]?.message as { reasoning_content?: string; reasoning?: string } | undefined;
-      const fullReasoning = (msg?.reasoning_content ?? msg?.reasoning ?? '').trim();
+      fullReasoning = (msg?.reasoning_content ?? msg?.reasoning ?? '').trim();
       const usage = data.usage;
       const u = usage as Record<string, unknown> | undefined;
       if (u) {
@@ -982,10 +1221,10 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         actualModelFromResponse = dataWithModel.model;
       }
       if (fullReasoning) {
-        res.write(`data: ${JSON.stringify({ reasoning: fullReasoning })}\n\n`);
+        if (!clientDisconnected && !res.writableEnded) res.write(`data: ${JSON.stringify({ reasoning: fullReasoning })}\n\n`);
       }
       if (fullContent) {
-        res.write(`data: ${JSON.stringify({ content: fullContent })}\n\n`);
+        if (!clientDisconnected && !res.writableEnded) res.write(`data: ${JSON.stringify({ content: fullContent })}\n\n`);
       }
       saveAssistantMessage(fullContent, fullReasoning, null, []);
       sendDoneEvent([]);
@@ -994,7 +1233,6 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       }
     }
 
-    abortController = new AbortController();
     let iteration = 0;
     let lastFinishReason: string | null = null;
     let toolCallCount = 0;
@@ -1003,6 +1241,13 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     while (true) {
       actualModelFromResponse = null;
       streamedAnnotations = null;
+      // New segment → new draft row (GC3: one row per streamed segment).
+      openDraftId = null;
+      draftLastFlushAt = 0;
+      draftFlushedContent = '';
+      draftFlushedReasoning = '';
+      fullContent = '';
+      fullReasoning = '';
       requestBody.messages = messages;
       if (openRouterTools.length > 0) {
         requestBody.tools = openRouterTools;
@@ -1029,7 +1274,10 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         clearTimeout(fetchTimeout);
         const err = fetchErr as Error;
         if (err.name === 'AbortError') {
-          if (!clientDisconnected) {
+          // 120s timeout (abortReason still null → 'error') or a registry
+          // abort: Stop/orphan-timeout finalize as 'stopped' (GC5).
+          finalizeDraft(terminalStatusForCurrentAbort());
+          if (!clientDisconnected && !res.writableEnded) {
             res.write(`data: ${JSON.stringify({ error: 'Request timed out or was cancelled' })}\n\n`);
             res.write('data: [DONE]\n\n');
             res.end();
@@ -1049,39 +1297,51 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
           errorMsg = errorText || errorMsg;
         }
         if (shouldRetryMaxEffort(errorMsg)) {
-          if (clientDisconnected) return;
+          // Retry is upstream-driven: connection state must not cancel it (GC4).
           console.warn('[chat] Model rejected reasoning effort "max", retrying with "xhigh":', errorMsg);
           degradeMaxEffort();
           continue;
         }
-        res.write(`data: ${JSON.stringify({ error: errorMsg })}\n\n`);
-        res.write('data: [DONE]\n\n');
-        res.end();
+        finalizeDraft('error');
+        if (!clientDisconnected && !res.writableEnded) {
+          res.write(`data: ${JSON.stringify({ error: errorMsg })}\n\n`);
+          res.write('data: [DONE]\n\n');
+          res.end();
+        }
         return;
       }
 
       if (!apiResponse.body) {
-        res.write(`data: ${JSON.stringify({ error: 'No response body from API' })}\n\n`);
-        res.write('data: [DONE]\n\n');
-        res.end();
+        finalizeDraft('error');
+        if (!clientDisconnected && !res.writableEnded) {
+          res.write(`data: ${JSON.stringify({ error: 'No response body from API' })}\n\n`);
+          res.write('data: [DONE]\n\n');
+          res.end();
+        }
         return;
       }
 
-      let fullContent = '';
-      let fullReasoning = '';
+      // fullContent/fullReasoning live next to the draft helpers (they feed
+      // ensureDraftRow/flushDraft) and are reset per iteration above.
       let streamHadRealError = false;
+      // Set when the upstream read throws AbortError mid-body-read. The 120s
+      // fetch timeout only covers connect and is always cleared by then, so
+      // this is exclusively a registry abort (Stop / orphan-timeout /
+      // shutdown) — the final close must label the persisted partial with the
+      // mapped terminal status, not 'complete' (finding F1).
+      let readLoopAborted = false;
       const toolCallsByIndex: Record<number, { id?: string; type?: string; function?: { name?: string; arguments?: string } }> = {};
       lastFinishReason = null;
 
       const reader = apiResponse.body.getReader();
-      upstreamReader = reader;
       const decoder = new TextDecoder();
       let buffer = '';
       let chunkCount = 0;
 
       try {
+        // Survival (plan S3): no clientDisconnected checks here — the upstream
+        // stream is read to completion regardless of connection state.
         while (true) {
-          if (clientDisconnected) break;
           const { done, value } = await reader.read();
           if (done) break;
 
@@ -1091,7 +1351,6 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
           buffer = lines.pop() || '';
 
           for (const line of lines) {
-            if (clientDisconnected) break;
             const trimmed = line.trim();
             if (!trimmed || trimmed.startsWith(': ') || !trimmed.startsWith('data: ')) continue;
             const data = trimmed.slice(6);
@@ -1100,7 +1359,9 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
             try {
               const parsed = JSON.parse(data);
               if (parsed.error) {
-                res.write(`data: ${JSON.stringify({ error: parsed.error.message || 'Stream error' })}\n\n`);
+                if (!clientDisconnected && !res.writableEnded) {
+                  res.write(`data: ${JSON.stringify({ error: parsed.error.message || 'Stream error' })}\n\n`);
+                }
                 continue;
               }
               if (parsed.model && typeof parsed.model === 'string' && parsed.model.trim()) {
@@ -1112,11 +1373,15 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
               const reasoningChunk = delta?.reasoning || delta?.reasoning_content;
               if (reasoningChunk) {
                 fullReasoning += reasoningChunk;
-                res.write(`data: ${JSON.stringify({ reasoning: reasoningChunk })}\n\n`);
+                ensureDraftRow();
+                flushDraft();
+                if (!clientDisconnected && !res.writableEnded) res.write(`data: ${JSON.stringify({ reasoning: reasoningChunk })}\n\n`);
               }
               if (delta?.content) {
                 fullContent += delta.content;
-                res.write(`data: ${JSON.stringify({ content: delta.content })}\n\n`);
+                ensureDraftRow();
+                flushDraft();
+                if (!clientDisconnected && !res.writableEnded) res.write(`data: ${JSON.stringify({ content: delta.content })}\n\n`);
               }
 
               if (delta?.tool_calls) {
@@ -1161,11 +1426,20 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
           }
         }
       } catch (streamErr: unknown) {
-        if ((streamErr as Error).name !== 'AbortError') {
+        if ((streamErr as Error).name === 'AbortError') {
+          // Registry abort (Stop / orphan-timeout / shutdown) landing during
+          // the body read: onAbort already recorded the reason before the
+          // controller aborted, and the 120s timeout cannot be the source
+          // here (it only covers connect). Remember it so the final close
+          // finalizes with the mapped terminal status instead of 'complete'.
+          readLoopAborted = true;
+        } else {
           console.error('[chat] Stream error:', streamErr);
-          // Distinct from a deliberate client disconnect or the 120s abort timeout
-          // (both already handled elsewhere) — this is a genuine stream-read failure.
-          if (!clientDisconnected) streamHadRealError = true;
+          // Distinct from the 120s abort timeout / registry aborts (both
+          // handled via AbortError elsewhere) — a genuine stream-read failure.
+          // Client connection state is irrelevant now that disconnects don't
+          // abandon the stream: mark it so the turn finalizes as an error.
+          streamHadRealError = true;
         }
       }
 
@@ -1203,6 +1477,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       // Genuine stream-read failure that left nothing usable to persist or report as
       // success: surface it as an error instead of silently truncating the turn.
       if (streamHadRealError && !fullContent && toolCallsArray.length === 0) {
+        finalizeDraft('error');
         if (!clientDisconnected && !res.writableEnded) {
           res.write(`data: ${JSON.stringify({ error: 'Stream connection error - please retry' })}\n\n`);
           res.write('data: [DONE]\n\n');
@@ -1211,7 +1486,6 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         return;
       }
 
-      let cappedToolCallMessageId: string | null = null;
       if (toolCallsArray.length > 0) {
         messages.push({
           role: 'assistant',
@@ -1220,7 +1494,12 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
           ...(fullReasoning.trim() ? { [assistantReasoningField(provider.id)]: fullReasoning } : {}),
         });
 
-        const assistantMsgId = saveAssistantMessage(fullContent, fullReasoning, JSON.stringify(toolCallsArray), []);
+        // Milestone persist via the segment draft (plan S2): the row already
+        // exists when text streamed this iteration; create-then-finalize
+        // reproduces today's empty-content assistant-with-tool_calls INSERT
+        // when no text streamed. Row count and tree shape are unchanged.
+        ensureDraftRow();
+        finalizeDraft('complete', { toolCallsJson: JSON.stringify(toolCallsArray) });
 
         for (const tc of toolCallsArray) {
           const id = tc.id;
@@ -1235,7 +1514,9 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
             args = {};
           }
 
-          res.write(`data: ${JSON.stringify({ tool_call: { id, name, arguments: argsStr, source } })}\n\n`);
+          if (!clientDisconnected && !res.writableEnded) {
+            res.write(`data: ${JSON.stringify({ tool_call: { id, name, arguments: argsStr, source } })}\n\n`);
+          }
 
           const startedAt = Date.now();
           const keepaliveTimer = setInterval(() => {
@@ -1291,7 +1572,9 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
           const durationMs = Date.now() - startedAt;
           toolCallCount++;
           toolTimeMs += durationMs;
-          res.write(`data: ${JSON.stringify(buildToolResultEvent(id, name, result, durationMs))}\n\n`);
+          if (!clientDisconnected && !res.writableEnded) {
+            res.write(`data: ${JSON.stringify(buildToolResultEvent(id, name, result, durationMs))}\n\n`);
+          }
 
           messages.push({ role: 'tool', tool_call_id: id, content: result.output });
 
@@ -1306,10 +1589,13 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
 
         iteration++;
         if (isToolBudgetExceeded(toolCallCount, toolTimeMs)) {
-          cappedToolCallMessageId = assistantMsgId;
+          // Budget cap: append the notice to the capped segment's draft and
+          // fall through — the final close below finalizes it 'complete'.
           const budgetMessage = '\n\n_Tool-call budget for this turn was reached; stopping here._';
           fullContent += budgetMessage;
-          res.write(`data: ${JSON.stringify({ content: budgetMessage })}\n\n`);
+          if (!clientDisconnected && !res.writableEnded) {
+            res.write(`data: ${JSON.stringify({ content: budgetMessage })}\n\n`);
+          }
         } else {
           continue;
         }
@@ -1335,10 +1621,14 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
           }
         }
       }
-      if (cappedToolCallMessageId) {
-        updateAssistantMessage(cappedToolCallMessageId, fullContent, fullReasoning, finalAnnots);
-      } else if (fullContent || fullReasoning) {
-        saveAssistantMessage(fullContent, fullReasoning, null, finalAnnots);
+      // Final close (plan S2): the segment's draft — created by any streamed
+      // delta, or by the milestone finalize when tools ran — gets its terminal
+      // write with final annotations. No draft and no text ⇒ persist nothing,
+      // exactly like today. A Stop/orphan/shutdown abort during the body read
+      // labels the partial 'stopped'/'error' by reason instead of 'complete'
+      // (policy d / finding F1); normal completion stays 'complete'.
+      if (openDraftId || fullContent || fullReasoning) {
+        finalizeDraft(readLoopAborted ? terminalStatusForCurrentAbort() : 'complete', { anns: finalAnnots });
       }
       sendDoneEvent(finalAnnots);
       res.end();
@@ -1346,15 +1636,19 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     }
 
   } catch (err: unknown) {
-    // AbortError is expected when client disconnects
     const errName = err instanceof Error ? err.name : '';
     if (errName === 'AbortError') {
+      // Registry abort (Stop/orphan-timeout/shutdown — onAbort already recorded
+      // the reason) or a genuine timeout surfacing here: finalize by reason.
+      finalizeOpenDraftHook?.(terminalStatusForCurrentAbort());
       return;
     }
     console.error('Chat error:', err);
+    // GC5: an unexpected exception mid-turn still terminates its draft.
+    finalizeOpenDraftHook?.('error');
     if (!res.headersSent) {
       res.status(500).json({ error: 'Internal server error' });
-    } else if (!clientDisconnected) {
+    } else if (!clientDisconnected && !res.writableEnded) {
       res.write(`data: ${JSON.stringify({ error: 'Internal server error' })}\n\n`);
       res.write('data: [DONE]\n\n');
       res.end();
@@ -1362,6 +1656,17 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
   } finally {
     // Unregister this SSE connection from the shutdown tracker.
     untrackStream(res);
+
+    // GC5: forget the turn and release the conversation's claim on every exit
+    // path. clearTurn also cancels any pending orphan timer; the release only
+    // matches our own turnId, so it stays idempotent even when this request
+    // lost the 409 race or never claimed at all.
+    if (userMsgId && turnConversationId) {
+      clearTurn(userMsgId);
+      db.prepare('UPDATE conversations SET active_turn_id = NULL WHERE id = ? AND active_turn_id = ?')
+        .run(turnConversationId, userMsgId);
+    }
+
     // Close MCP connections so stdio processes and HTTP sessions are released
     const closeResults = await Promise.allSettled(
       [...new Set(mcpClients.values())].map((connection) => connection.close())

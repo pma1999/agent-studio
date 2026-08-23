@@ -10,6 +10,7 @@ import type {
   ToolExecution,
   ToolSource,
   StreamingActivityEvent,
+  ConversationStreamState,
   GeneralChatSettings,
   ReasoningEffort,
   CouncilMember,
@@ -19,7 +20,7 @@ import type {
   ConversationSkillConfigOverride,
 } from '../types';
 import type { AuthUser } from '../api/client';
-import { agentsApi, conversationsApi, messagesApi, settingsApi, creditsApi, usageApi, authApi } from '../api/client';
+import { agentsApi, conversationsApi, messagesApi, settingsApi, creditsApi, usageApi, authApi, type MessagesListResponse } from '../api/client';
 
 interface AppState {
   // Auth / session
@@ -52,32 +53,33 @@ interface AppState {
   // Messages
   messages: Message[];
   messagesLoading: boolean;
-  loadMessages: (conversationId: string, options?: { silent?: boolean }) => Promise<void>;
+  /** Resolves with the fetched payload (so callers can read additive fields the
+   *  store does not retain, e.g. active_turn_id) or undefined when the fetch
+   *  failed or was dropped by the stale-conversation guard. */
+  loadMessages: (conversationId: string, options?: { silent?: boolean }) => Promise<MessagesListResponse | undefined>;
   addMessage: (message: Message) => void;
   updateLastAssistantMessage: (content: string) => void;
   /** Id of the visible thread's leaf message for the active conversation (null when no tree data). */
   activeLeafId: string | null;
   setActiveLeaf: (messageId: string | null) => void;
 
-  // Chat state
-  isStreaming: boolean;
-  setIsStreaming: (v: boolean) => void;
-  streamingContent: string;
-  setStreamingContent: (content: string) => void;
-  appendStreamingContent: (chunk: string) => void;
+  // Chat state — per-conversation live streams (see ConversationStreamState).
+  // A conversation is "streaming" iff streamsByConversation[conversationId] exists;
+  // entries are created by beginStream and deleted by endStream.
+  streamsByConversation: Record<string, ConversationStreamState>;
+  beginStream: (conversationId: string) => void;
+  endStream: (conversationId: string) => void;
+  appendStreamContent: (conversationId: string, chunk: string) => void;
+  appendStreamReasoning: (conversationId: string, chunk: string) => void;
+  setStreamAbortController: (conversationId: string, controller: AbortController | null) => void;
 
-  // Stream cancellation
-  abortController: AbortController | null;
-  setAbortController: (controller: AbortController | null) => void;
-
-  // Streaming performance (for token speed display)
-  streamStartTime: number | null;
-  setStreamStartTime: (t: number | null) => void;
-
-  // Reasoning / Thinking
-  reasoningContent: string;
-  setReasoningContent: (content: string) => void;
-  appendReasoningContent: (chunk: string) => void;
+  // Ordered live activity timeline events, keyed per conversation.
+  appendStreamContentEvent: (conversationId: string, chunk: string) => void;
+  appendStreamReasoningEvent: (conversationId: string, chunk: string) => void;
+  upsertStreamToolCall: (conversationId: string, data: { id: string; name: string; arguments: string; source?: ToolSource }) => void;
+  completeStreamToolCall: (conversationId: string, data: { id: string; name: string; ok: boolean; result?: string; duration_ms?: number; source?: ToolSource; metadata?: Record<string, unknown> }) => void;
+  appendStreamToolOutputChunk: (conversationId: string, data: { id: string; stream: 'stdout' | 'stderr'; text: string; seq: number }) => void;
+  resetStreamActivity: (conversationId: string) => void;
 
   // Per-message reasoning override (null = use agent defaults)
   reasoningOverride: ReasoningConfig | null;
@@ -102,13 +104,7 @@ interface AppState {
   getConversationSkillConfigOverride: (conversationId: string) => ConversationSkillConfigOverride | undefined;
 
   // Ordered live activity timeline (text/thinking/tool) for current streaming message
-  streamingActivityEvents: StreamingActivityEvent[];
-  appendStreamingContentEvent: (chunk: string) => void;
-  appendStreamingReasoningEvent: (chunk: string) => void;
-  upsertStreamingToolCall: (data: { id: string; name: string; arguments: string; source?: ToolSource }) => void;
-  completeStreamingToolCall: (data: { id: string; name: string; ok: boolean; result?: string; duration_ms?: number; source?: ToolSource; metadata?: Record<string, unknown> }) => void;
-  appendStreamingToolOutputChunk: (data: { id: string; stream: 'stdout' | 'stderr'; text: string; seq: number }) => void;
-  resetStreamingActivityEvents: () => void;
+  // (now per conversation — see streamsByConversation above)
 
   // Settings
   openRouterApiKey: string;
@@ -276,16 +272,49 @@ export const useStore = create<AppState>((set, get) => ({
   // Messages
   messages: [],
   messagesLoading: false,
-  loadMessages: async (conversationId: string, options?: { silent?: boolean }) => {
+  loadMessages: async (conversationId: string, options?: { silent?: boolean }): Promise<MessagesListResponse | undefined> => {
     if (!options?.silent) {
       set({ messagesLoading: true });
     }
     try {
-      const { messages, active_leaf_id } = await messagesApi.list(conversationId);
-      set({ messages, activeLeafId: active_leaf_id ?? null, messagesLoading: false });
+      const payload = await messagesApi.list(conversationId);
+      const { messages, active_leaf_id } = payload;
+      // Stale-fetch guard: with parallel per-conversation streams allowed, a
+      // background completion can finish while another conversation is being
+      // viewed; applying its fetch here would clobber the visible thread.
+      if (get().activeConversationId !== conversationId) {
+        set({ messagesLoading: false });
+        return undefined;
+      }
+      let finalMessages = messages;
+      let finalLeafId: string | null = active_leaf_id ?? null;
+      // A stream is live for this conversation: keep a temp assistant placeholder
+      // at the thread tail so in-flight text stays attached across conversation
+      // switches (the server has no draft row to show until T3 lands).
+      if (get().streamsByConversation[conversationId]) {
+        const lastFetched = messages[messages.length - 1];
+        const serverDraftLive = lastFetched?.role === 'assistant' && lastFetched.generation_status === 'streaming';
+        const hasLivePlaceholder = messages.some((m) => m.role === 'assistant' && m.id.startsWith('temp-'));
+        if (!serverDraftLive && !hasLivePlaceholder) {
+          const leafId = finalLeafId ?? lastFetched?.id ?? null;
+          const livePlaceholder: Message = {
+            id: `temp-live-${conversationId}`,
+            conversation_id: conversationId,
+            role: 'assistant',
+            content: '',
+            parent_id: leafId,
+            created_at: new Date().toISOString(),
+          };
+          finalMessages = [...messages, livePlaceholder];
+          finalLeafId = livePlaceholder.id;
+        }
+      }
+      set({ messages: finalMessages, activeLeafId: finalLeafId, messagesLoading: false });
+      return payload;
     } catch (err) {
       console.error('Failed to load messages:', err);
       set({ messagesLoading: false });
+      return undefined;
     }
   },
   addMessage: (message) => set((state) => ({
@@ -322,28 +351,56 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
-  // Chat state
-  isStreaming: false,
-  setIsStreaming: (v) => set({ isStreaming: v }),
-  streamingContent: '',
-  setStreamingContent: (content) => set({ streamingContent: content }),
-  appendStreamingContent: (chunk) => set((state) => ({
-    streamingContent: state.streamingContent + chunk,
+  // Chat state — per-conversation live streams
+  streamsByConversation: {},
+  beginStream: (conversationId) => set((state) => ({
+    streamsByConversation: {
+      ...state.streamsByConversation,
+      [conversationId]: {
+        content: '',
+        reasoning: '',
+        activityEvents: [],
+        startTime: Date.now(),
+        abortController: null,
+      },
+    },
   })),
-
-  // Stream cancellation
-  abortController: null,
-  setAbortController: (controller) => set({ abortController: controller }),
-
-  streamStartTime: null,
-  setStreamStartTime: (t) => set({ streamStartTime: t }),
-
-  // Reasoning / Thinking
-  reasoningContent: '',
-  setReasoningContent: (content) => set({ reasoningContent: content }),
-  appendReasoningContent: (chunk) => set((state) => ({
-    reasoningContent: state.reasoningContent + chunk,
-  })),
+  endStream: (conversationId) => set((state) => {
+    if (!(conversationId in state.streamsByConversation)) return {};
+    const next = { ...state.streamsByConversation };
+    delete next[conversationId];
+    return { streamsByConversation: next };
+  }),
+  appendStreamContent: (conversationId, chunk) => set((state) => {
+    const entry = state.streamsByConversation[conversationId];
+    if (!entry || !chunk) return {};
+    return {
+      streamsByConversation: {
+        ...state.streamsByConversation,
+        [conversationId]: { ...entry, content: entry.content + chunk },
+      },
+    };
+  }),
+  appendStreamReasoning: (conversationId, chunk) => set((state) => {
+    const entry = state.streamsByConversation[conversationId];
+    if (!entry || !chunk) return {};
+    return {
+      streamsByConversation: {
+        ...state.streamsByConversation,
+        [conversationId]: { ...entry, reasoning: entry.reasoning + chunk },
+      },
+    };
+  }),
+  setStreamAbortController: (conversationId, controller) => set((state) => {
+    const entry = state.streamsByConversation[conversationId];
+    if (!entry) return {};
+    return {
+      streamsByConversation: {
+        ...state.streamsByConversation,
+        [conversationId]: { ...entry, abortController: controller },
+      },
+    };
+  }),
 
   // Per-message reasoning override
   reasoningOverride: null,
@@ -399,11 +456,11 @@ export const useStore = create<AppState>((set, get) => ({
     return get().conversationSkillConfigOverrides[conversationId];
   },
 
-  // Ordered streaming activity timeline (append by arrival order)
-  streamingActivityEvents: [],
-  appendStreamingContentEvent: (chunk) => set((state) => {
-    if (!chunk) return {};
-    const events = state.streamingActivityEvents;
+  // Ordered streaming activity timeline (append by arrival order), per conversation
+  appendStreamContentEvent: (conversationId, chunk) => set((state) => {
+    const entry = state.streamsByConversation[conversationId];
+    if (!entry || !chunk) return {};
+    const events = entry.activityEvents;
     const last = events[events.length - 1];
     if (last && last.type === 'content') {
       const next = [...events];
@@ -411,22 +468,34 @@ export const useStore = create<AppState>((set, get) => ({
         ...last,
         content: last.content + chunk,
       };
-      return { streamingActivityEvents: next };
+      return {
+        streamsByConversation: {
+          ...state.streamsByConversation,
+          [conversationId]: { ...entry, activityEvents: next },
+        },
+      };
     }
     return {
-      streamingActivityEvents: [
-        ...events,
-        {
-          id: `content-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-          type: 'content',
-          content: chunk,
+      streamsByConversation: {
+        ...state.streamsByConversation,
+        [conversationId]: {
+          ...entry,
+          activityEvents: [
+            ...events,
+            {
+              id: `content-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+              type: 'content',
+              content: chunk,
+            },
+          ],
         },
-      ],
+      },
     };
   }),
-  appendStreamingReasoningEvent: (chunk) => set((state) => {
-    if (!chunk) return {};
-    const events = state.streamingActivityEvents;
+  appendStreamReasoningEvent: (conversationId, chunk) => set((state) => {
+    const entry = state.streamsByConversation[conversationId];
+    if (!entry || !chunk) return {};
+    const events = entry.activityEvents;
     const last = events[events.length - 1];
     if (last && last.type === 'reasoning') {
       const next = [...events];
@@ -434,114 +503,139 @@ export const useStore = create<AppState>((set, get) => ({
         ...last,
         content: last.content + chunk,
       };
-      return { streamingActivityEvents: next };
+      return {
+        streamsByConversation: {
+          ...state.streamsByConversation,
+          [conversationId]: { ...entry, activityEvents: next },
+        },
+      };
     }
     return {
-      streamingActivityEvents: [
-        ...events,
-        {
-          id: `reasoning-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-          type: 'reasoning',
-          content: chunk,
+      streamsByConversation: {
+        ...state.streamsByConversation,
+        [conversationId]: {
+          ...entry,
+          activityEvents: [
+            ...events,
+            {
+              id: `reasoning-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+              type: 'reasoning',
+              content: chunk,
+            },
+          ],
         },
-      ],
-    };
-  }),
-  upsertStreamingToolCall: (data) => set((state) => {
-    const idx = state.streamingActivityEvents.findIndex(
-      (ev) => ev.type === 'tool' && ev.tool.id === data.id
-    );
-    if (idx === -1) {
-      return {
-        streamingActivityEvents: [
-          ...state.streamingActivityEvents,
-          {
-            id: `tool-${data.id}`,
-            type: 'tool',
-            tool: {
-              id: data.id,
-              name: data.name,
-              arguments: data.arguments || '{}',
-              status: 'running',
-              source: data.source || 'unknown',
-            },
-          },
-        ],
-      };
-    }
-
-    const next = [...state.streamingActivityEvents];
-    const prev = next[idx];
-    if (prev.type !== 'tool') return {};
-    next[idx] = {
-      ...prev,
-      tool: {
-        ...prev.tool,
-        name: data.name || prev.tool.name,
-        arguments: data.arguments || prev.tool.arguments,
-        status: 'running',
-        source: data.source || prev.tool.source,
       },
     };
-    return { streamingActivityEvents: next };
   }),
-  completeStreamingToolCall: (data) => set((state) => {
-    const idx = state.streamingActivityEvents.findIndex(
+  upsertStreamToolCall: (conversationId, data) => set((state) => {
+    const entry = state.streamsByConversation[conversationId];
+    if (!entry) return {};
+    const idx = entry.activityEvents.findIndex(
       (ev) => ev.type === 'tool' && ev.tool.id === data.id
     );
+    let nextEvents: StreamingActivityEvent[];
     if (idx === -1) {
-      return {
-        streamingActivityEvents: [
-          ...state.streamingActivityEvents,
-          {
-            id: `tool-${data.id}`,
-            type: 'tool',
-            tool: {
-              id: data.id,
-              name: data.name,
-              arguments: '{}',
-              status: data.ok ? 'done' : 'error',
-              ok: data.ok,
-              result: data.result,
-              duration_ms: data.duration_ms,
-              source: data.source || 'unknown',
-              metadata: data.metadata,
-            },
+      nextEvents = [
+        ...entry.activityEvents,
+        {
+          id: `tool-${data.id}`,
+          type: 'tool',
+          tool: {
+            id: data.id,
+            name: data.name,
+            arguments: data.arguments || '{}',
+            status: 'running',
+            source: data.source || 'unknown',
           },
-        ],
+        },
+      ];
+    } else {
+      const prev = entry.activityEvents[idx];
+      if (prev.type !== 'tool') return {};
+      nextEvents = [...entry.activityEvents];
+      nextEvents[idx] = {
+        ...prev,
+        tool: {
+          ...prev.tool,
+          name: data.name || prev.tool.name,
+          arguments: data.arguments || prev.tool.arguments,
+          status: 'running',
+          source: data.source || prev.tool.source,
+        },
       };
     }
-
-    const next = [...state.streamingActivityEvents];
-    const prev = next[idx];
-    if (prev.type !== 'tool') return {};
-    next[idx] = {
-      ...prev,
-      tool: {
-        ...prev.tool,
-        name: data.name || prev.tool.name,
-        status: data.ok ? 'done' : 'error',
-        ok: data.ok,
-        result: data.result,
-        duration_ms: data.duration_ms,
-        source: data.source || prev.tool.source,
-        metadata: data.metadata,
+    return {
+      streamsByConversation: {
+        ...state.streamsByConversation,
+        [conversationId]: { ...entry, activityEvents: nextEvents },
       },
     };
-    return { streamingActivityEvents: next };
   }),
-  appendStreamingToolOutputChunk: (data) => set((state) => {
-    const idx = state.streamingActivityEvents.findIndex(
+  completeStreamToolCall: (conversationId, data) => set((state) => {
+    const entry = state.streamsByConversation[conversationId];
+    if (!entry) return {};
+    const idx = entry.activityEvents.findIndex(
+      (ev) => ev.type === 'tool' && ev.tool.id === data.id
+    );
+    let nextEvents: StreamingActivityEvent[];
+    if (idx === -1) {
+      nextEvents = [
+        ...entry.activityEvents,
+        {
+          id: `tool-${data.id}`,
+          type: 'tool',
+          tool: {
+            id: data.id,
+            name: data.name,
+            arguments: '{}',
+            status: data.ok ? 'done' : 'error',
+            ok: data.ok,
+            result: data.result,
+            duration_ms: data.duration_ms,
+            source: data.source || 'unknown',
+            metadata: data.metadata,
+          },
+        },
+      ];
+    } else {
+      const prev = entry.activityEvents[idx];
+      if (prev.type !== 'tool') return {};
+      nextEvents = [...entry.activityEvents];
+      nextEvents[idx] = {
+        ...prev,
+        tool: {
+          ...prev.tool,
+          name: data.name || prev.tool.name,
+          status: data.ok ? 'done' : 'error',
+          ok: data.ok,
+          result: data.result,
+          duration_ms: data.duration_ms,
+          source: data.source || prev.tool.source,
+          metadata: data.metadata,
+        },
+      };
+    }
+    return {
+      streamsByConversation: {
+        ...state.streamsByConversation,
+        [conversationId]: { ...entry, activityEvents: nextEvents },
+      },
+    };
+  }),
+  appendStreamToolOutputChunk: (conversationId, data) => set((state) => {
+    const entry = state.streamsByConversation[conversationId];
+    if (!entry) return {};
+    const idx = entry.activityEvents.findIndex(
       (ev) => ev.type === 'tool' && ev.tool.id === data.id
     );
     // A chunk arriving before its tool_call event would be a backend-ordering bug outside
     // this store's control (chat.ts always emits tool_call before dispatching); no-op rather
     // than fabricate a placeholder execution with an unknown name/arguments.
     if (idx === -1) return {};
-    const next = [...state.streamingActivityEvents];
-    const prev = next[idx];
+    const prev = entry.activityEvents[idx];
     if (prev.type !== 'tool') return {};
-    next[idx] = {
+    const nextEvents = [...entry.activityEvents];
+    nextEvents[idx] = {
       ...prev,
       tool: {
         ...prev.tool,
@@ -551,9 +645,23 @@ export const useStore = create<AppState>((set, get) => ({
         ],
       },
     };
-    return { streamingActivityEvents: next };
+    return {
+      streamsByConversation: {
+        ...state.streamsByConversation,
+        [conversationId]: { ...entry, activityEvents: nextEvents },
+      },
+    };
   }),
-  resetStreamingActivityEvents: () => set({ streamingActivityEvents: [] }),
+  resetStreamActivity: (conversationId) => set((state) => {
+    const entry = state.streamsByConversation[conversationId];
+    if (!entry) return {};
+    return {
+      streamsByConversation: {
+        ...state.streamsByConversation,
+        [conversationId]: { ...entry, activityEvents: [] },
+      },
+    };
+  }),
 
   // Settings
   openRouterApiKey: '',

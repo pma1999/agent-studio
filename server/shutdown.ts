@@ -1,6 +1,7 @@
 import type { Server } from 'http';
 import type { Response } from 'express';
 import type Database from 'better-sqlite3';
+import { abortAllTurns } from './chatTurnRegistry.js';
 
 /**
  * Graceful shutdown manager.
@@ -79,6 +80,12 @@ export function setupGracefulShutdown(server: Server, db: Database.Database): vo
   // Reduce keep-alive so idle connections close faster during shutdown.
   server.keepAliveTimeout = 5_000;
   server.headersTimeout = 6_000; // must be > keepAliveTimeout
+
+  // Abort every live chat turn while the database is still open: each turn's
+  // onAbort finalizes its draft synchronously (better-sqlite3), so no
+  // 'streaming' row survives a graceful restart. Runs as step 1 of the
+  // sequence below, long before closeAndExit() closes the DB.
+  registerShutdownHook(abortAllTurns);
 
   const shutdown = (signal: string) => {
     if (shuttingDown) return;       // prevent double-entry

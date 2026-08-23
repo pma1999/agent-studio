@@ -24,11 +24,16 @@ assert.deepEqual(
   { toolCallCount: 1, toolTimeMs: 1233 },
 );
 
-// A capped tool batch updates the already-persisted assistant tool-call row,
-// preserving one logical assistant message while retaining final annotations.
+// A capped tool batch appends the budget notice to the current segment's
+// draft accumulators and falls through to the final close, which finalizes the
+// SAME row 'complete' with final annotations (plan S2/GC3: one row per
+// segment; the cappedToolCallMessageId re-update mechanism was removed when
+// persistence moved onto the draft helpers).
 const chatSource = readFileSync(resolve(process.cwd(), 'server/routes/chat.ts'), 'utf8');
-assert.match(chatSource, /const updateAssistantMessage = \(assistantMsgId: string, content: string, reasoning: string, anns: unknown\[\]\)/);
-assert.match(chatSource, /cappedToolCallMessageId = assistantMsgId;/);
-assert.match(chatSource, /if \(cappedToolCallMessageId\) \{\s*updateAssistantMessage\(cappedToolCallMessageId, fullContent, fullReasoning, finalAnnots\);/s);
+assert.match(chatSource, /if \(isToolBudgetExceeded\(toolCallCount, toolTimeMs\)\) \{/);
+assert.match(chatSource, /const budgetMessage = '\\n\\n_Tool-call budget for this turn was reached; stopping here\._';/);
+assert.match(chatSource, /fullContent \+= budgetMessage;/);
+assert.match(chatSource, /if \(openDraftId \|\| fullContent \|\| fullReasoning\) \{\s*finalizeDraft\(readLoopAborted \? terminalStatusForCurrentAbort\(\) : 'complete', \{ anns: finalAnnots \}\);/s);
+assert.doesNotMatch(chatSource, /cappedToolCallMessageId/, 'the old capped-row id mechanism must stay deleted');
 
 console.log('tool-call budget guardrail: OK');

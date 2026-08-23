@@ -6,6 +6,7 @@ import { CouncilStreamingView } from './CouncilStreamingView';
 import { useStore } from '../stores/store';
 import { useIsMobile, usePrefersReducedMotion } from '../utils/breakpoints';
 import { useChat } from '../hooks/useChat';
+import { useTurnReconciliation } from '../hooks/useTurnReconciliation';
 import { getCurrentVariant, getTurnVariants, findVariantLeaf } from '../utils/threads';
 import { findVariantAssistantModel } from '../utils/variantUtils';
 import { useAutoScroll } from '../hooks/useAutoScroll';
@@ -64,6 +65,9 @@ const EFFORT_OPTIONS: { value: ReasoningEffort; label: string; short: string }[]
 
 const BUILTIN_TOOL_NAMES = new Set(['web_search', 'get_current_time', 'web_fetch', 'run_command', 'read_file', 'write_file', 'edit_file', 'delete_file', 'list_directory']);
 
+/** Stable empty activity-events list so idle renders keep referential identity. */
+const EMPTY_STREAMING_EVENTS: StreamingActivityEvent[] = [];
+
 function inferToolSource(name: string): ToolSource {
   if (name.startsWith('mcp_')) return 'mcp';
   if (BUILTIN_TOOL_NAMES.has(name)) return 'builtin';
@@ -91,9 +95,7 @@ export function ChatView() {
   const {
     messages,
     messagesLoading,
-    isStreaming,
-    streamingContent,
-    reasoningContent,
+    streamsByConversation,
     activeConversationId,
     authRequired,
     addMessage,
@@ -103,8 +105,6 @@ export function ChatView() {
     setCurrentView,
     reasoningOverride,
     setReasoningOverride,
-    streamStartTime,
-    streamingActivityEvents,
     conversationModelOverrides,
     setConversationModelOverride,
     conversationProviderRoutingOverrides,
@@ -123,6 +123,14 @@ export function ChatView() {
     activeLeafId,
     setActiveLeaf,
   } = useStore();
+  // Streaming state of THE ACTIVE conversation only: switching to another
+  // conversation frees its composer even while this one keeps generating.
+  const activeStream = activeConversationId ? streamsByConversation[activeConversationId] : undefined;
+  const isStreaming = !!activeStream;
+  const streamingContent = activeStream?.content ?? '';
+  const reasoningContent = activeStream?.reasoning ?? '';
+  const streamStartTime = activeStream?.startTime ?? null;
+  const streamingActivityEvents = activeStream?.activityEvents ?? EMPTY_STREAMING_EVENTS;
   const streamingActivitySignature = useMemo(() => (
     streamingActivityEvents
       .map((ev) => (
@@ -135,6 +143,22 @@ export function ChatView() {
       .join('|')
   ), [streamingActivityEvents]);
   const { sendMessage, cancelStream, startNewChat, startGeneralChat, relaunchFromMessage, retryLastAssistant, getActiveThread } = useChat();
+  // Reopen reconciliation (RC4): tracks a server-side turn for this conversation
+  // when there is no local stream entry (e.g. tab refreshed mid-generation).
+  const { reconciling } = useTurnReconciliation(activeConversationId);
+  // The server-reported streaming draft (GC13): while reconciling, the latest
+  // assistant row of the thread with generation_status === 'streaming' renders
+  // with the live presentation and suppressed message actions.
+  const polledStreamingMessage = useMemo(() => {
+    if (!reconciling) return null;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.role === 'assistant') {
+        return m.generation_status === 'streaming' ? m : null;
+      }
+    }
+    return null;
+  }, [reconciling, messages]);
   const [inputValue, setInputValue] = useState('');
   const [showReasoningPopover, setShowReasoningPopover] = useState(false);
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
@@ -163,7 +187,7 @@ export function ChatView() {
     () =>
       isStreaming
         ? `${streamingContent.length}:${reasoningContent.length}:${streamingActivitySignature}`
-        : `${messages.length}:${activeLeafId ?? 'none'}:${messages[messages.length - 1]?.id ?? ''}`,
+        : `${messages.length}:${activeLeafId ?? 'none'}:${messages[messages.length - 1]?.id ?? ''}:${polledStreamingMessage?.content.length ?? 'idle'}`,
     [
       isStreaming,
       streamingContent.length,
@@ -172,6 +196,7 @@ export function ChatView() {
       messages.length,
       activeLeafId,
       messages[messages.length - 1]?.id,
+      polledStreamingMessage?.content.length,
     ]
   );
   const { containerRef, scrollToBottom, showScrollButton, handleScroll } = useAutoScroll(scrollDependency);
@@ -718,7 +743,9 @@ export function ChatView() {
   // Build the visible thread (root → active leaf), including streaming placeholders
   const displayMessages = activeThread.filter((m) => m.role !== 'tool');
   const lastMsg = displayMessages[displayMessages.length - 1];
-  const isLastMsgStreamingPlaceholder = lastMsg && lastMsg.role === 'assistant' && lastMsg.id.startsWith('temp-');
+  // Error bubbles are temp- prefixed but carry their FINAL content — they must
+  // render through the normal content path, not as an empty streaming placeholder.
+  const isLastMsgStreamingPlaceholder = lastMsg && lastMsg.role === 'assistant' && lastMsg.id.startsWith('temp-') && !lastMsg.id.startsWith('temp-error-');
 
   return (
     <div
@@ -903,6 +930,10 @@ export function ChatView() {
               )}
               {displayMessages.map((msg, i) => {
               const isStreamingMsg = isLastMsgStreamingPlaceholder && i === displayMessages.length - 1;
+              // Server-reported streaming draft while reconciling (poll mode):
+              // rendered with the live presentation, actions suppressed (GC13).
+              const isPolledStreamingMsg = !!polledStreamingMessage && msg.id === polledStreamingMessage.id;
+              const isLiveMsg = isStreamingMsg || isPolledStreamingMsg;
               const timelineCalls = !isStreamingMsg
                 ? toolExecutionsByMessageId.get(msg.id)
                 : undefined;
@@ -934,10 +965,11 @@ export function ChatView() {
                 <MessageBubble
                   key={msg.id}
                   message={msg}
-                  isStreaming={isStreamingMsg}
-                  streamingContent={isStreamingMsg ? streamingContent : undefined}
-                  streamingReasoning={isStreamingMsg ? reasoningContent : undefined}
+                  isStreaming={isLiveMsg}
+                  streamingContent={isStreamingMsg ? streamingContent : isPolledStreamingMsg ? (msg.content || '') : undefined}
+                  streamingReasoning={isStreamingMsg ? reasoningContent : isPolledStreamingMsg ? (msg.reasoning_content || '') : undefined}
                   streamingActivityEvents={activityEvents}
+                  showGeneratingIndicator={isPolledStreamingMsg}
                   agentEmoji={agent?.emoji}
                   toolExecutions={timelineCalls}
                   toolActivityLive={isStreamingMsg && !!activityEvents?.some((ev) => ev.type === 'tool')}
@@ -1508,8 +1540,10 @@ export function ChatView() {
                 maxRows={10}
               />
             </div>
-            {/* Send / Stop button */}
-            {isStreaming ? (
+            {/* Send / Stop button — Stop is offered both for a locally attached
+                stream and while reconciling a server-side turn (the rewritten
+                cancelStream cancels upstream via POST /api/chat/stop either way). */}
+            {isStreaming || reconciling ? (
               <button
                 type="button"
                 className="chat-send-btn chat-stop-btn"

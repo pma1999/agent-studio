@@ -1,6 +1,6 @@
 import { useCallback } from 'react';
 import { useStore } from '../stores/store';
-import { streamChat } from '../api/client';
+import { streamChat, stopTurn } from '../api/client';
 import { conversationsApi, mcpServersApi, type McpApprovalRequiredData } from '../api/client';
 import { streamCouncilChat } from '../api/councilClient';
 import { buildThread, getTurnVariants } from '../utils/threads';
@@ -20,31 +20,69 @@ export interface SendMessageOptions {
   editMessageId?: string;
 }
 
+/**
+ * The exact MCP approval dialog used by the live streaming path (regular sends).
+ * Extracted so the reopen-poll reconciliation flow can surface recovered
+ * approvals through the SAME window.confirm + resolveApproval semantics.
+ */
+export function confirmMcpApproval(approval: McpApprovalRequiredData): boolean {
+  let argumentsText = '{}';
+  try {
+    argumentsText = JSON.stringify(approval.arguments, null, 2);
+  } catch {
+    // The server already rejects values that cannot be reviewed fully.
+  }
+  const flowWarning = approval.possible_cross_tool_data
+    ? '\n\nWarning: these arguments may contain data returned by another tool or server.'
+    : '';
+  return window.confirm(
+    `Allow this exact MCP tool call?\n\n`
+    + `Server: ${approval.server_name || approval.server_id}\n`
+    + `Tool: ${approval.tool_name}\n`
+    + `Arguments (SHA-256 ${approval.arguments_sha256.slice(0, 12)}…):\n${argumentsText}`
+    + flowWarning
+    + '\n\nServer annotations are untrusted hints and were not used to approve this action.',
+  );
+}
+
+/** stopTurn capped at ~3s so a hanging backend never freezes the Stop click. */
+const STOP_TURN_TIMEOUT_MS = 3_000;
+
+function stopTurnWithTimeout(conversationId: string, timeoutMs: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('stop request timed out')), timeoutMs);
+    stopTurn(conversationId)
+      .then(() => {
+        clearTimeout(timer);
+        resolve();
+      })
+      .catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
+}
+
 export function useChat() {
   const {
     activeConversationId,
-    isStreaming,
-    setIsStreaming,
-    streamingContent,
-    setStreamingContent,
-    appendStreamingContent,
-    appendStreamingContentEvent,
-    setAbortController,
-    setStreamStartTime,
-    reasoningContent,
-    setReasoningContent,
-    appendReasoningContent,
-    appendStreamingReasoningEvent,
+    streamsByConversation,
+    beginStream,
+    endStream,
+    appendStreamContent,
+    appendStreamContentEvent,
+    setStreamAbortController,
     reasoningOverride,
     addMessage,
     loadMessages,
     loadConversations,
     updateConversationTitle,
     selectedAgentId,
-    upsertStreamingToolCall,
-    completeStreamingToolCall,
-    appendStreamingToolOutputChunk,
-    resetStreamingActivityEvents,
+    appendStreamReasoning,
+    appendStreamReasoningEvent,
+    upsertStreamToolCall,
+    completeStreamToolCall,
+    appendStreamToolOutputChunk,
     // Council state
     councilEnabled,
     setCouncilIsExecuting,
@@ -64,10 +102,13 @@ export function useChat() {
     }
 
     return sendRegularMessage(content, options);
-  }, [councilEnabled, activeConversationId, isStreaming, addMessage, setIsStreaming, setStreamingContent, appendStreamingContent, appendStreamingContentEvent, setAbortController, setStreamStartTime, setReasoningContent, appendReasoningContent, appendStreamingReasoningEvent, reasoningOverride, upsertStreamingToolCall, completeStreamingToolCall, resetStreamingActivityEvents, loadMessages, loadConversations, updateConversationTitle, selectedAgentId]);
+  }, [councilEnabled, activeConversationId, streamsByConversation, beginStream, endStream, appendStreamContent, appendStreamContentEvent, setStreamAbortController, reasoningOverride, appendStreamReasoning, appendStreamReasoningEvent, upsertStreamToolCall, completeStreamToolCall, appendStreamToolOutputChunk, addMessage, loadMessages, loadConversations, updateConversationTitle, selectedAgentId]);
 
   const sendCouncilMessage = useCallback(async (content: string, options?: SendMessageOptions) => {
-    if (!activeConversationId || isStreaming || !content.trim()) return;
+    const conversationId = activeConversationId;
+    // Send guard is per conversation: a stream running in ANOTHER conversation
+    // must not block this one (the server 409 claim remains the same-conversation guard).
+    if (!conversationId || streamsByConversation[conversationId] || !content.trim()) return;
 
     const attachments = options?.attachments;
     const pdf_engine = options?.pdf_engine;
@@ -83,7 +124,7 @@ export function useChat() {
     // Add user message to local state immediately
     const userMsg: Message = {
       id: `temp-user-${Date.now()}`,
-      conversation_id: activeConversationId,
+      conversation_id: conversationId,
       role: 'user',
       content: content.trim(),
       created_at: new Date().toISOString(),
@@ -94,29 +135,28 @@ export function useChat() {
     // Add placeholder assistant message for synthesis
     const assistantMsg: Message = {
       id: `temp-council-${Date.now()}`,
-      conversation_id: activeConversationId,
+      conversation_id: conversationId,
       role: 'assistant',
       content: '',
       created_at: new Date().toISOString(),
     };
     addMessage(assistantMsg);
 
-    // Create AbortController for cancellation
+    // Register the per-conversation stream (busy state + abort controller +
+    // activity events live on the entry; council CONTENT fields stay separate).
     const controller = new AbortController();
-    setAbortController(controller);
+    beginStream(conversationId);
+    setStreamAbortController(conversationId, controller);
 
     setCouncilIsExecuting(true);
     setCouncilStreamingContent('');
     setCouncilMemberProgress(new Map());
     setCouncilSynthesisPhase(false);
-    setIsStreaming(true);
-    setStreamStartTime(Date.now());
-    resetStreamingActivityEvents();
 
     try {
       await streamCouncilChat(
         {
-          conversation_id: activeConversationId,
+          conversation_id: conversationId,
           content: content.trim(),
           ...(councilMemberId
             ? { council_member_id: councilMemberId }
@@ -153,7 +193,7 @@ export function useChat() {
           onSynthesisChunk: (chunk) => {
             setCouncilStreamingContent((prev) => prev + chunk);
             appendCouncilStreamingContent(chunk);
-            appendStreamingContentEvent(chunk);
+            appendStreamContentEvent(conversationId, chunk);
           },
           onConversationTitle: (event) => {
             updateConversationTitle(event.conversation_id, event.title);
@@ -175,26 +215,22 @@ export function useChat() {
             void mcpServersApi.resolveApproval(approval.id, approved).catch(() => {});
           },
           onComplete: async () => {
+            endStream(conversationId);
             setCouncilIsExecuting(false);
-            setIsStreaming(false);
-            setStreamStartTime(null);
             setCouncilStreamingContent('');
             setCouncilMemberProgress(new Map());
             setCouncilSynthesisPhase(false);
-            setAbortController(null);
-            await loadMessages(activeConversationId, { silent: true });
+            await loadMessages(conversationId, { silent: true });
             await loadConversations(selectedAgentId || undefined);
           },
           onError: async (error) => {
+            endStream(conversationId);
             setCouncilIsExecuting(false);
-            setIsStreaming(false);
-            setStreamStartTime(null);
             setCouncilStreamingContent('');
             setCouncilMemberProgress(new Map());
             setCouncilSynthesisPhase(false);
-            setAbortController(null);
             console.error('Council error:', error);
-            await loadMessages(activeConversationId, { silent: true });
+            await loadMessages(conversationId, { silent: true });
             await loadConversations(selectedAgentId || undefined);
           },
         },
@@ -202,16 +238,17 @@ export function useChat() {
       );
     } catch (err) {
       console.error('Council message error:', err);
+      endStream(conversationId);
       setCouncilIsExecuting(false);
-      setIsStreaming(false);
-      setStreamStartTime(null);
-      setAbortController(null);
-      await loadMessages(activeConversationId, { silent: true });
+      await loadMessages(conversationId, { silent: true });
     }
-  }, [activeConversationId, isStreaming, addMessage, setIsStreaming, setStreamStartTime, setCouncilIsExecuting, setCouncilMemberProgress, setCouncilSynthesisPhase, setCouncilStreamingContent, appendCouncilStreamingContent, appendStreamingContentEvent, setAbortController, resetStreamingActivityEvents, loadMessages, loadConversations, updateConversationTitle, selectedAgentId]);
+  }, [activeConversationId, streamsByConversation, beginStream, endStream, setStreamAbortController, addMessage, setCouncilIsExecuting, setCouncilMemberProgress, setCouncilSynthesisPhase, setCouncilStreamingContent, appendCouncilStreamingContent, appendStreamContentEvent, loadMessages, loadConversations, updateConversationTitle, selectedAgentId]);
 
   const sendRegularMessage = useCallback(async (content: string, options?: SendMessageOptions) => {
-    if (!activeConversationId || isStreaming || !content.trim()) return;
+    const conversationId = activeConversationId;
+    // Send guard is per conversation: a stream in ANOTHER conversation must not
+    // block this send (the server's turn claim remains the same-conversation guard).
+    if (!conversationId || streamsByConversation[conversationId] || !content.trim()) return;
 
     const attachments = options?.attachments;
     const pdf_engine = options?.pdf_engine;
@@ -241,7 +278,7 @@ export function useChat() {
       const maxSeq = variants.reduce((max, message) => Math.max(max, message.variant_seq ?? 1), 0);
       userMsg = {
         id: `temp-edit-${Date.now()}`,
-        conversation_id: activeConversationId,
+        conversation_id: conversationId,
         role: 'user',
         content: trimmed,
         parent_id: target.parent_id ?? null,
@@ -252,7 +289,7 @@ export function useChat() {
       };
       assistantMsg = {
         id: `temp-assistant-${Date.now()}`,
-        conversation_id: activeConversationId,
+        conversation_id: conversationId,
         role: 'assistant',
         content: '',
         parent_id: userMsg.id,
@@ -274,7 +311,7 @@ export function useChat() {
       const store = useStore.getState();
       userMsg = {
         id: `temp-user-${Date.now()}`,
-        conversation_id: activeConversationId,
+        conversation_id: conversationId,
         role: 'user',
         content: trimmed,
         parent_id: store.activeLeafId,
@@ -284,7 +321,7 @@ export function useChat() {
       // Add placeholder assistant message
       assistantMsg = {
         id: `temp-assistant-${Date.now()}`,
-        conversation_id: activeConversationId,
+        conversation_id: conversationId,
         role: 'assistant',
         content: '',
         parent_id: userMsg.id,
@@ -295,48 +332,34 @@ export function useChat() {
       store.setActiveLeaf(assistantMsg.id);
     }
 
-    // Create AbortController for cancellation
+    // Register the per-conversation stream entry (fresh content/reasoning/
+    // activityEvents + startTime), then hang the abort controller on it.
     const controller = new AbortController();
-    setAbortController(controller);
-
-    setIsStreaming(true);
-    setStreamStartTime(Date.now());
-    setStreamingContent('');
-    setReasoningContent('');
-    resetStreamingActivityEvents();
+    beginStream(conversationId);
+    setStreamAbortController(conversationId, controller);
 
     await streamChat(
-      activeConversationId,
+      conversationId,
       trimmed,
       (chunk) => {
-        appendStreamingContent(chunk);
-        appendStreamingContentEvent(chunk);
+        appendStreamContent(conversationId, chunk);
+        appendStreamContentEvent(conversationId, chunk);
       },
       async () => {
-        setIsStreaming(false);
-        setStreamStartTime(null);
-        setStreamingContent('');
-        setReasoningContent('');
-        resetStreamingActivityEvents();
-        setAbortController(null);
-        await loadMessages(activeConversationId, { silent: true });
+        endStream(conversationId);
+        await loadMessages(conversationId, { silent: true });
         await loadConversations(selectedAgentId || undefined);
       },
       async (error) => {
-        setIsStreaming(false);
-        setStreamStartTime(null);
-        setStreamingContent('');
-        setReasoningContent('');
-        resetStreamingActivityEvents();
-        setAbortController(null);
-        await loadMessages(activeConversationId, { silent: true });
+        endStream(conversationId);
+        await loadMessages(conversationId, { silent: true });
         // Join the error message to the visible chain (the server may or may
         // not have persisted the new variant) and make it the active leaf so
         // it renders; `temp-` prefix keeps setActiveLeaf from PUTting it.
         const leaf = useStore.getState().activeLeafId;
         const errorMsg: Message = {
           id: `temp-error-${Date.now()}`,
-          conversation_id: activeConversationId,
+          conversation_id: conversationId,
           role: 'assistant',
           content: `**Error:** ${error}`,
           parent_id: leaf,
@@ -346,46 +369,30 @@ export function useChat() {
         useStore.getState().setActiveLeaf(errorMsg.id);
       },
       (chunk) => {
-        appendReasoningContent(chunk);
-        appendStreamingReasoningEvent(chunk);
+        appendStreamReasoning(conversationId, chunk);
+        appendStreamReasoningEvent(conversationId, chunk);
       },
       controller.signal,
       reasoningOverride,
-      (data) => upsertStreamingToolCall(data),
-      (data) => completeStreamingToolCall(data),
+      (data) => upsertStreamToolCall(conversationId, data),
+      (data) => completeStreamToolCall(conversationId, data),
       attachments,
       pdf_engine,
       model,
       providerRouting,
       invokeAgentId,
       (data) => updateConversationTitle(data.conversation_id, data.title),
-      (data) => appendStreamingToolOutputChunk(data),
+      (data) => appendStreamToolOutputChunk(conversationId, data),
       invokeSkillNames,
       editMessageId,
       (approval: McpApprovalRequiredData) => {
-        let argumentsText = '{}';
-        try {
-          argumentsText = JSON.stringify(approval.arguments, null, 2);
-        } catch {
-          // The server already rejects values that cannot be reviewed fully.
-        }
-        const flowWarning = approval.possible_cross_tool_data
-          ? '\n\nWarning: these arguments may contain data returned by another tool or server.'
-          : '';
-        const approved = window.confirm(
-          `Allow this exact MCP tool call?\n\n`
-          + `Server: ${approval.server_name || approval.server_id}\n`
-          + `Tool: ${approval.tool_name}\n`
-          + `Arguments (SHA-256 ${approval.arguments_sha256.slice(0, 12)}…):\n${argumentsText}`
-          + flowWarning
-          + '\n\nServer annotations are untrusted hints and were not used to approve this action.',
-        );
+        const approved = confirmMcpApproval(approval);
         void mcpServersApi.resolveApproval(approval.id, approved).catch(() => {
           // The backend remains fail-closed and will expire the pending call.
         });
       },
     );
-  }, [activeConversationId, isStreaming, addMessage, setIsStreaming, setStreamingContent, appendStreamingContent, appendStreamingContentEvent, setAbortController, setStreamStartTime, setReasoningContent, appendReasoningContent, appendStreamingReasoningEvent, reasoningOverride, upsertStreamingToolCall, completeStreamingToolCall, appendStreamingToolOutputChunk, resetStreamingActivityEvents, loadMessages, loadConversations, updateConversationTitle, selectedAgentId]);
+  }, [activeConversationId, streamsByConversation, addMessage, beginStream, endStream, setStreamAbortController, appendStreamContent, appendStreamContentEvent, reasoningOverride, appendStreamReasoning, appendStreamReasoningEvent, upsertStreamToolCall, completeStreamToolCall, appendStreamToolOutputChunk, loadMessages, loadConversations, updateConversationTitle, selectedAgentId]);
 
   /**
    * Re-launches the turn that produced `messageId` (a user message): streams a new
@@ -395,7 +402,8 @@ export function useChat() {
     messageId: string,
     opts: { content: string; model?: string | null; providerRouting?: ProviderRoutingConfig | null },
   ): Promise<void> => {
-    if (useStore.getState().isStreaming) return;
+    const state = useStore.getState();
+    if (!state.activeConversationId || state.streamsByConversation[state.activeConversationId]) return;
     await sendMessage(opts.content, {
       editMessageId: messageId,
       model: opts.model ?? undefined,
@@ -425,22 +433,31 @@ export function useChat() {
   }, []);
 
   const cancelStream = useCallback(() => {
-    const controller = useStore.getState().abortController;
-    if (controller) {
-      controller.abort();
-    }
-    setIsStreaming(false);
-    setStreamStartTime(null);
-    setStreamingContent('');
-    setReasoningContent('');
-    resetStreamingActivityEvents();
-    setAbortController(null);
-    // Reload messages to get whatever was saved server-side
-    if (activeConversationId) {
-      loadMessages(activeConversationId, { silent: true });
-      loadConversations(selectedAgentId || undefined);
-    }
-  }, [activeConversationId, setIsStreaming, setStreamStartTime, setStreamingContent, setReasoningContent, resetStreamingActivityEvents, setAbortController, loadMessages, loadConversations, selectedAgentId]);
+    const state = useStore.getState();
+    const conversationId = state.activeConversationId;
+    if (!conversationId) return;
+    // Rewired for the explicit Stop protocol (plan.md S4): 1) ask the server to
+    // cancel the upstream generation (best-effort — anything after logging is
+    // swallowed, capped ~3s so the click never hangs; a missing turn, e.g.
+    // after switch-away, just 404s and proceeds), 2) abort THIS conversation's
+    // local fetch and drop ONLY its stream entry, 3) silently reload messages +
+    // conversations so whatever was persisted (draft finalized as 'stopped')
+    // replaces the optimistic view. Works identically with or without an
+    // attached local fetch — including from a reopened tab in poll mode.
+    void (async () => {
+      try {
+        await stopTurnWithTimeout(conversationId, STOP_TURN_TIMEOUT_MS);
+      } catch (err) {
+        console.error('stopTurn failed (continuing with local teardown):', err);
+      }
+      // Re-read state: terminal stream callbacks may have run while we awaited.
+      const fresh = useStore.getState();
+      fresh.streamsByConversation[conversationId]?.abortController?.abort();
+      fresh.endStream(conversationId);
+      await fresh.loadMessages(conversationId, { silent: true });
+      await fresh.loadConversations(fresh.selectedAgentId || undefined);
+    })();
+  }, []);
 
   const startNewChat = useCallback(async (agentId: string) => {
     try {
@@ -475,8 +492,5 @@ export function useChat() {
     cancelStream,
     startNewChat,
     startGeneralChat,
-    isStreaming,
-    streamingContent,
-    reasoningContent,
   };
 }
