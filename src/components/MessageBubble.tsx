@@ -11,6 +11,7 @@ import { formatModelId, getModelAuthor, getAuthorColor, formatAuthor } from '../
 import { useIsMobile } from '../utils/breakpoints';
 import { getCouncilRun } from '../api/councilClient';
 import { formatVariantTime } from '../utils/variantUtils';
+import { isSafeHttpUrl } from '../utils/url';
 import type { Message, Annotation, ToolExecution, StreamingActivityEvent, CouncilRunDetail, ProviderRoutingConfig } from '../types';
 
 /** Compact pill showing which model generated the message; provider color and full id in tooltip. */
@@ -738,9 +739,12 @@ function StreamingContentBlock({ content }: { content: string }) {
   );
 }
 
-// Citation links from web search (only annotations with url)
+// Citation links from web search (only annotations whose url passes the shared
+// http(s)-only href allowlist; unsafe entries are skipped entirely — FMT8-02)
 function CitationLinks({ annotations }: { annotations: Annotation[] }) {
-  const withUrl = annotations.filter((a): a is Annotation & { url: string } => !!a.url);
+  const withUrl = annotations.filter(
+    (a): a is Annotation & { url: string } => !!a.url && isSafeHttpUrl(a.url),
+  );
   const unique = dedupeAnnotations(withUrl);
   if (unique.length === 0) return null;
 

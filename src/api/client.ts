@@ -23,6 +23,9 @@ import type {
   ProviderRoutingConfig,
   Skill,
 } from '../types';
+// Type-only import of the frozen snapshot wire contract (plan.md D6); erased at build time,
+// so vite never bundles from shared/. Nothing here exists yet anywhere else — single source.
+import type { ShareSnapshot, SharedMessage } from '../../shared/shareTypes';
 
 /** In production (Vercel), set VITE_API_URL to your Railway API URL (e.g. https://your-app.railway.app). No trailing slash. */
 const API_BASE = (import.meta.env.VITE_API_URL ?? '').replace(/\/$/, '') + '/api';
@@ -865,6 +868,31 @@ export const councilsApi = {
     successful_members: number;
   }>>(`/council/runs?conversation_id=${conversationId}`),
   getRun: (id: string) => request<CouncilRunDetail>(`/council/runs/${id}`),
+};
+
+// Shares (per-conversation read-only sharing; frozen REST contract in GC3)
+/** Snapshot payload types — single source of truth shared with the server (plan.md D6). */
+export type { ShareSnapshot, SharedMessage };
+
+/**
+ * GET /conversations/:id/share — owner-scoped status. Never includes the raw token (GC3/GC6).
+ */
+export type ShareStatusResponse =
+  | { status: 'none' }
+  | { status: 'active'; share: { id: string; created_at: string } };
+
+/** POST /conversations/:id/share — raw token returned exactly once (GC6); rotates any previous share. */
+export interface CreateShareResponse {
+  id: string;
+  token: string;
+  created_at: string;
+}
+
+export const sharesApi = {
+  getStatus: (conversationId: string) => request<ShareStatusResponse>(`/conversations/${conversationId}/share`),
+  create: (conversationId: string) => request<CreateShareResponse>(`/conversations/${conversationId}/share`, { method: 'POST' }),
+  revoke: (conversationId: string) => request<{ success: boolean }>(`/conversations/${conversationId}/share`, { method: 'DELETE' }),
+  resolvePublic: (token: string) => request<ShareSnapshot>(`/shares/${encodeURIComponent(token)}`),
 };
 
 /** Trigger download of JSON as a file (e.g. export data). */

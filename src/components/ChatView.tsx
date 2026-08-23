@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Send, ArrowDown, StopCircle, MessageSquare, Bot, Brain, FileUp, Link, X, Users, SlidersHorizontal, Wrench, Layers, Laptop, History, Cpu } from 'lucide-react';
+import { Send, ArrowDown, StopCircle, MessageSquare, Bot, Brain, FileUp, Link, X, Users, SlidersHorizontal, Wrench, Layers, Laptop, History, Cpu, Share2 } from 'lucide-react';
 import { CouncilToggle } from './CouncilToggle';
 import { CouncilStreamingView } from './CouncilStreamingView';
 import { useStore } from '../stores/store';
@@ -11,7 +11,9 @@ import { findVariantAssistantModel } from '../utils/variantUtils';
 import { useAutoScroll } from '../hooks/useAutoScroll';
 import { MessageBubble } from './MessageBubble';
 import { EmptyState } from './EmptyState';
+import { ShareDialog } from './ShareDialog';
 import { Button } from './ui/Button';
+import { IconButton } from './ui/IconButton';
 import { ModelSelectorCore } from './ModelSelectorCore';
 import { ProviderRoutingSelector } from './ProviderRoutingSelector';
 import { ConversationToolsSelector } from './ConversationToolsSelector';
@@ -93,6 +95,7 @@ export function ChatView() {
     streamingContent,
     reasoningContent,
     activeConversationId,
+    authRequired,
     addMessage,
     conversations,
     agents,
@@ -358,6 +361,7 @@ export function ChatView() {
   const isMobile = useIsMobile();
   const setComposerFocused = useStore((s) => s.setComposerFocused);
   const [optionsOpen, setOptionsOpen] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
   // Clear the composing flag if the chat unmounts while focused.
   useEffect(() => () => setComposerFocused(false), [setComposerFocused]);
   const composerOptionsActive =
@@ -784,8 +788,21 @@ export function ChatView() {
           </div>
         </div>
         <ConversationTokenSummary messages={messages} />
+        <IconButton
+          label="Share conversation"
+          title={!authRequired ? 'Sharing requires accounts (hosted deployments)' : undefined}
+          disabled={!authRequired}
+          onClick={() => setShareOpen(true)}
+        >
+          <Share2 size={16} />
+        </IconButton>
       </header>
       )}
+      <ShareDialog
+        isOpen={shareOpen}
+        conversationId={activeConversationId}
+        onClose={() => setShareOpen(false)}
+      />
 
       {/* Messages + FAB wrapper (position relative so FAB is positioned above input) */}
       <div className="chat-view-messages-wrapper" style={{ flex: 1, minHeight: 0, position: 'relative', display: 'flex', flexDirection: 'column' }}>

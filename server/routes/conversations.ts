@@ -2,6 +2,11 @@ import { Router, Response } from 'express';
 import { nanoid } from 'nanoid';
 import db from '../db.js';
 import { AuthRequest } from '../middleware/auth.js';
+import {
+  createShare,
+  getShareStatus,
+  revokeShare,
+} from '../shares/service.js';
 import { validateOwnedIds } from '../mcp/ownership.js';
 import { getSettingValue } from './settings.js';
 import {
@@ -437,6 +442,66 @@ router.delete('/:id', (req: AuthRequest, res: Response) => {
   } catch (err) {
     console.error('Error deleting conversation:', err);
     res.status(500).json({ error: 'Failed to delete conversation' });
+  }
+});
+
+// POST /api/conversations/:id/share - Create (or rotate) a read-only share link
+router.post('/:id/share', (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.userId;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    const result = createShare(req.params.id, userId);
+    switch (result.kind) {
+      case 'created':
+        // Raw token is returned exactly once (GC6); only its hash is stored.
+        return res.status(201).json({ id: result.shareId, token: result.token, created_at: result.createdAt });
+      case 'conversation-not-found':
+        return res.status(404).json({ error: 'Conversation not found' });
+      case 'sharing-disabled-local-mode':
+        return res.status(403).json({ error: 'Sharing is disabled in local mode. Sharing requires an account-based deployment.' });
+    }
+  } catch (err) {
+    console.error('Error creating conversation share:', err);
+    res.status(500).json({ error: 'Failed to create conversation share' });
+  }
+});
+
+// GET /api/conversations/:id/share - Share status for the owner (never the raw token)
+router.get('/:id/share', (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.userId;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    const result = getShareStatus(req.params.id, userId);
+    switch (result.kind) {
+      case 'active':
+        return res.json({ status: 'active', share: { id: result.shareId, created_at: result.createdAt } });
+      case 'none':
+        return res.json({ status: 'none' });
+      case 'conversation-not-found':
+        return res.status(404).json({ error: 'Conversation not found' });
+    }
+  } catch (err) {
+    console.error('Error getting conversation share status:', err);
+    res.status(500).json({ error: 'Failed to get conversation share status' });
+  }
+});
+
+// DELETE /api/conversations/:id/share - Revoke the active share link (idempotent)
+router.delete('/:id/share', (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.userId;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    const result = revokeShare(req.params.id, userId);
+    switch (result.kind) {
+      case 'revoked':
+      case 'none-active': // nothing to revoke is still a success for the caller
+        return res.json({ success: true });
+      case 'conversation-not-found':
+        return res.status(404).json({ error: 'Conversation not found' });
+    }
+  } catch (err) {
+    console.error('Error revoking conversation share:', err);
+    res.status(500).json({ error: 'Failed to revoke conversation share' });
   }
 });
 

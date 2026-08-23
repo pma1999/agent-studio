@@ -19,6 +19,7 @@ import toolsRouter from './routes/tools.js';
 import mcpServersRouter from './routes/mcpServers.js';
 import skillsRouter from './routes/skills.js';
 import { exportRouter, importRouter } from './routes/exportImport.js';
+import sharesRouter from './routes/shares.js';
 import chatCouncilRouter from './routes/chatCouncil.js';
 import councilMembersRouter from './routes/councilMembers.js';
 import { mountWsProbe } from './routes/agentProbe.js';
@@ -99,6 +100,9 @@ app.use(cookieParser());
 
 // Public routes (no auth)
 app.use('/api/auth', authRouter);
+// Share resolution is intentionally public (token-as-credential, plan D3/D5);
+// it inherits apiLimiter above. Do NOT move into the authed section.
+app.use('/api/shares', sharesRouter);
 
 // Protected API routes (auth required when JWT_SECRET set; else default user)
 app.use('/api/agents', authMiddleware, agentsRouter);

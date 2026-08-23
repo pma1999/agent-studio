@@ -947,6 +947,21 @@ export function migrate() {
     backfillMessageTree();
     console.log('[Agent Studio] Migrated messages to message-tree (parent_id/turn_id/variant_seq)');
   }
+
+  // --- Conversation shares: frozen-snapshot share links ---
+  // Idempotent block: IF NOT EXISTS everywhere, safe to run on every boot.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS conversation_shares (
+      id TEXT PRIMARY KEY,                       -- nanoid(), minted in service layer
+      conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+      owner_user_id TEXT NOT NULL,
+      token_hash TEXT NOT NULL UNIQUE,           -- sha256(rawToken) hex; raw token never stored
+      snapshot_json TEXT NOT NULL,               -- frozen ShareSnapshot payload
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_conversation_shares_token ON conversation_shares(token_hash);
+    CREATE INDEX IF NOT EXISTS idx_conversation_shares_conversation ON conversation_shares(conversation_id);
+  `);
 }
 
 function migrateCouncilTables() {

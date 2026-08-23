@@ -78,4 +78,9 @@ export function optionalAuth(req: AuthRequest, res: Response, next: NextFunction
   next();
 }
 
+/** True when the deployment runs without accounts (DISABLE_AUTH or no JWT_SECRET). */
+export function isLocalAuthMode(): boolean {
+  return DISABLE_AUTH || !JWT_SECRET;
+}
+
 export { COOKIE_NAME };

@@ -1,8 +1,10 @@
-import { Menu, Plus } from 'lucide-react';
+import { useState } from 'react';
+import { Menu, Plus, Share2 } from 'lucide-react';
 import { useStore } from '../../stores/store';
 import { useChat } from '../../hooks/useChat';
 import { useIsMobile } from '../../utils/breakpoints';
 import { IconButton } from '../ui/IconButton';
+import { ShareDialog } from '../ShareDialog';
 import { navItems } from '../navItems';
 
 /**
@@ -18,7 +20,9 @@ export function MobileTopBar() {
   const sidebarMobileOpen = useStore((s) => s.sidebarMobileOpen);
   const conversations = useStore((s) => s.conversations);
   const activeConversationId = useStore((s) => s.activeConversationId);
+  const authRequired = useStore((s) => s.authRequired);
   const { startGeneralChat } = useChat();
+  const [shareOpen, setShareOpen] = useState(false);
 
   if (!isMobile) return null;
 
@@ -40,9 +44,32 @@ export function MobileTopBar() {
       </IconButton>
       <h1 className="mobile-topbar-title">{title}</h1>
       {currentView === 'chat' && (
-        <IconButton label="New chat" size="lg" onClick={() => startGeneralChat()}>
-          <Plus size={22} />
-        </IconButton>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+          <IconButton
+            label="Share conversation"
+            title={
+              !authRequired
+                ? 'Sharing requires accounts (hosted deployments)'
+                : !activeConversationId
+                  ? 'Open a conversation to share it'
+                  : undefined
+            }
+            disabled={!authRequired || !activeConversationId}
+            onClick={() => setShareOpen(true)}
+          >
+            <Share2 size={22} />
+          </IconButton>
+          <IconButton label="New chat" size="lg" onClick={() => startGeneralChat()}>
+            <Plus size={22} />
+          </IconButton>
+          {activeConversationId && (
+            <ShareDialog
+              isOpen={shareOpen}
+              conversationId={activeConversationId}
+              onClose={() => setShareOpen(false)}
+            />
+          )}
+        </div>
       )}
     </header>
   );

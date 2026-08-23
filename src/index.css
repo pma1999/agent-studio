@@ -3381,3 +3381,234 @@ button:focus-visible .conv-delete-btn {
   transition: background var(--motion-fast), border-color var(--motion-fast);
 }
 .message-citation-link:hover { background: var(--accent-soft); }
+
+/* ============================================
+   Public share page (/s/<token>) — chrome-free,
+   read-only transcript (.shared-* namespace)
+   ============================================ */
+
+.shared-page {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-base);
+  color: var(--text-primary);
+}
+
+.shared-topbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  height: 48px;
+  padding: 0 var(--content-padding-x);
+  flex-shrink: 0;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.shared-topbar-mark {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--accent);
+  box-shadow: var(--shadow-glow);
+}
+
+.shared-topbar-name {
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+  letter-spacing: 0.02em;
+  color: var(--text-secondary);
+}
+
+.shared-scroll {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.shared-container {
+  max-width: var(--chat-content-max-width);
+  margin: 0 auto;
+  padding: var(--space-lg) var(--content-padding-x) var(--space-2xl);
+}
+
+.shared-header {
+  padding-bottom: var(--space-md);
+  margin-bottom: var(--space-lg);
+  border-bottom: 1px solid var(--border);
+}
+
+.shared-title {
+  margin: 0 0 var(--space-sm);
+  font-family: var(--font-display);
+  font-size: var(--heading-2-size);
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--text-primary);
+  overflow-wrap: break-word;
+}
+
+.shared-agent-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-accent);
+  background: var(--accent-ghost);
+  border: 1px solid var(--border-accent);
+  border-radius: var(--radius-pill);
+}
+
+.shared-agent-emoji { line-height: 1; }
+
+.shared-meta {
+  margin: var(--space-sm) 0 0;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+/* Transcript — server array order is authoritative; no client sorting. */
+.shared-messages {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--chat-bubble-gap) + 6px);
+}
+
+.shared-message { min-width: 0; }
+
+.shared-message-user {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.shared-bubble-user {
+  max-width: 85%;
+  padding: 10px 14px;
+  background: var(--accent-ghost);
+  border: 1px solid var(--border-accent);
+  border-right: 2px solid var(--accent); /* right-accented user bubble */
+  border-radius: var(--radius-md);
+}
+
+.shared-user-text {
+  font-size: 0.938rem;
+  line-height: 1.7;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.shared-model-caption {
+  margin-bottom: 4px;
+  font-size: 0.6875rem;
+  font-family: var(--font-mono);
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+/* Attachment filename chips (Paperclip + name) */
+.shared-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.shared-message-user .shared-attachments { justify-content: flex-end; }
+
+.shared-attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 3px 9px;
+  font-size: 0.6875rem;
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shared-attachment-chip svg {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+/* Web citations ("Sources") — mirrors MessageBubble's CitationLinks panel;
+   chips reuse the global .message-citation-link class. */
+.shared-sources {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 8px 12px;
+  background: var(--accent-ghost);
+  border: 1px solid var(--border-accent);
+  border-radius: var(--radius-sm);
+}
+
+.shared-sources-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.shared-sources-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* Document/file annotations — mirrors MessageBubble's "Document(s) used:" row */
+.shared-docs-used {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+/* Centered loading / unavailable states */
+.shared-center {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-xl);
+}
+
+.shared-loading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  font-size: 0.875rem;
+  color: var(--text-muted);
+}
+
+.shared-loading svg { animation: shared-spin 1s linear infinite; }
+
+@keyframes shared-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (max-width: 767px) {
+  .shared-bubble-user { max-width: 100%; }
+  .shared-container { padding-bottom: var(--space-xl); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shared-loading svg { animation: none; }
+}
