@@ -15,9 +15,10 @@ import { createSendFileExecutor, type SendFileExecutor } from './sendFileExecuto
 import { createReceiveFileExecutor, type ReceiveFileExecutor } from './receiveFileExecutor.js';
 import { createMcpExecutor, type McpExecutor } from './mcpExecutor.js';
 import { createHttpProxyExecutor, type HttpProxyExecutor } from './httpProxyExecutor.js';
+import { createLlamaServerExecutor, type LlamaServerExecutor } from './llamaServerExecutor.js';
 import { createShellDetector } from './shellDetection.js';
 
-const AGENT_VERSION = '1.1.0';
+const AGENT_VERSION = '1.2.0';
 const DEFAULT_BACKEND_URL = 'http://localhost:3001';
 const INITIAL_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 30_000;
@@ -174,6 +175,7 @@ function dispatch(
   receiveFileExecutor: ReceiveFileExecutor,
   mcpExecutor: McpExecutor,
   httpProxyExecutor: HttpProxyExecutor,
+  llamaServerExecutor: LlamaServerExecutor,
   onHelloAck: (agentId: string) => void
 ): void {
   switch (message.type) {
@@ -224,6 +226,21 @@ function dispatch(
       break;
     case 'http_proxy_cancel':
       httpProxyExecutor.handleHttpProxyCancel(message.requestId);
+      break;
+    case 'llamacpp_scan_request':
+      llamaServerExecutor.handleLlamacppScan(message);
+      break;
+    case 'llamacpp_spawn':
+      llamaServerExecutor.handleLlamacppSpawn(message);
+      break;
+    case 'llamacpp_stop':
+      llamaServerExecutor.handleLlamacppStop(message);
+      break;
+    case 'llamacpp_status_request':
+      llamaServerExecutor.handleLlamacppStatus(message);
+      break;
+    case 'llamacpp_logs_request':
+      llamaServerExecutor.handleLlamacppLogs(message);
       break;
   }
 }
@@ -281,6 +298,9 @@ async function main(): Promise<void> {
   const httpProxyExecutor = createHttpProxyExecutor({
     send: (message) => transportHandle?.send(message),
   });
+  const llamaServerExecutor = createLlamaServerExecutor({
+    send: (message) => transportHandle?.send(message),
+  });
 
   let backoffMs = INITIAL_BACKOFF_MS;
   console.log(`[local-agent] connecting to ${config.backendUrl} ...`);
@@ -293,6 +313,7 @@ async function main(): Promise<void> {
         deviceName: os.hostname(),
         platform: process.platform,
         shell,
+        capabilities: ['llamacpp'],
         onMessage: (message) => {
           dispatch(
             message,
@@ -302,6 +323,7 @@ async function main(): Promise<void> {
             receiveFileExecutor,
             mcpExecutor,
             httpProxyExecutor,
+            llamaServerExecutor,
             () => {
               backoffMs = INITIAL_BACKOFF_MS;
             }
@@ -313,11 +335,13 @@ async function main(): Promise<void> {
           // ARC-04: the backend has already given up on every pending
           // request tied to this now-dead connection (rejected on its own
           // side in registry.ts); don't let the matching child processes
-          // (commands AND MCP servers) or in-flight proxied HTTP requests
-          // keep running locally with nothing left to report back to.
+          // (commands, MCP servers AND the tracked llama-server) or
+          // in-flight proxied HTTP requests keep running locally with
+          // nothing left to report back to.
           executor.handleDisconnect();
           mcpExecutor.handleDisconnect();
           httpProxyExecutor.handleDisconnect();
+          llamaServerExecutor.handleDisconnect();
           resolve();
         },
       });

@@ -18,7 +18,7 @@ import WebSocket from 'ws';
 import type { DetectedShell } from './shellDetection.js';
 
 export type AgentToBackendMessage =
-  | { type: 'hello'; agentVersion: string; deviceName: string; platform?: string; shell?: DetectedShell }
+  | { type: 'hello'; agentVersion: string; deviceName: string; platform?: string; shell?: DetectedShell; capabilities?: string[] }
   | { type: 'heartbeat' }
   | { type: 'command_awaiting_confirmation'; requestId: string }
   | {
@@ -125,6 +125,47 @@ export type AgentToBackendMessage =
       contentType?: string;
       totalBytes?: number;
       error?: string;
+    }
+  // Hand-mirrored from `server/agentRelay/protocol.ts` (global-constraints.md
+  // §2) — all literals spelled `llamacpp_*`.
+  | {
+      type: 'llamacpp_scan_response';
+      requestId: string;
+      ok: boolean;
+      error?: string;
+      entries?: Array<{ path: string; name: string; sizeBytes?: number }>;
+      truncated?: boolean;
+    }
+  | { type: 'llamacpp_spawn_response'; requestId: string; ok: boolean; pid?: number; error?: string }
+  | { type: 'llamacpp_stop_response'; requestId: string; ok: boolean; forced?: boolean; error?: string }
+  | {
+      type: 'llamacpp_status_response';
+      requestId: string;
+      running: boolean;
+      pid?: number | null;
+      exePath?: string | null;
+      args?: string[] | null;
+      host?: string;
+      port?: number | null;
+      startedAt?: number | null;
+      lastExitCode?: number | null;
+      lastExitAt?: number | null;
+    }
+  | {
+      type: 'llamacpp_logs_response';
+      requestId: string;
+      ok: boolean;
+      text?: string;
+      truncated?: boolean;
+      error?: string;
+    }
+  // Unsolicited push (no requestId).
+  | {
+      type: 'llamacpp_exited';
+      pid: number;
+      exitCode: number | null;
+      terminatedByAgent?: boolean;
+      stderrTail?: string;
     };
 
 export type BackendToAgentMessage =
@@ -173,7 +214,21 @@ export type BackendToAgentMessage =
       body: string | null;
       timeoutMs: number;
     }
-  | { type: 'http_proxy_cancel'; requestId: string };
+  | { type: 'http_proxy_cancel'; requestId: string }
+  // Hand-mirrored from `server/agentRelay/protocol.ts` (global-constraints.md
+  // §2) — all literals spelled `llamacpp_*`.
+  | { type: 'llamacpp_scan_request'; requestId: string; dir: string } // dir: absolute path
+  | {
+      type: 'llamacpp_spawn';
+      requestId: string;
+      exePath: string; // absolute
+      host: '127.0.0.1' | 'localhost' | '::1';
+      port: number; // int 1024..65535
+      args: string[]; // full argv AFTER exe, incl. --host/--port/--model
+    }
+  | { type: 'llamacpp_stop'; requestId: string; pid: number; graceMs: number } // graceMs int ≥ 0
+  | { type: 'llamacpp_status_request'; requestId: string }
+  | { type: 'llamacpp_logs_request'; requestId: string; maxBytes: number }; // int 1..65536
 
 export type CommandRequestMessage = Extract<BackendToAgentMessage, { type: 'command_request' }>;
 export type ReadFileRequestMessage = Extract<BackendToAgentMessage, { type: 'read_file_request' }>;
@@ -188,6 +243,11 @@ export type MCPStopRequestMessage = Extract<BackendToAgentMessage, { type: 'mcp_
 export type MCPMessageMessage = Extract<BackendToAgentMessage, { type: 'mcp_message' }>;
 export type HttpProxyRequestMessage = Extract<BackendToAgentMessage, { type: 'http_proxy_request' }>;
 export type HttpProxyCancelMessage = Extract<BackendToAgentMessage, { type: 'http_proxy_cancel' }>;
+export type LlamacppScanRequestMessage = Extract<BackendToAgentMessage, { type: 'llamacpp_scan_request' }>;
+export type LlamacppSpawnMessage = Extract<BackendToAgentMessage, { type: 'llamacpp_spawn' }>;
+export type LlamacppStopMessage = Extract<BackendToAgentMessage, { type: 'llamacpp_stop' }>;
+export type LlamacppStatusRequestMessage = Extract<BackendToAgentMessage, { type: 'llamacpp_status_request' }>;
+export type LlamacppLogsRequestMessage = Extract<BackendToAgentMessage, { type: 'llamacpp_logs_request' }>;
 
 /** Matches the 20s heartbeat / 60s backend-timeout pair fixed in `global-constraints.md`. */
 export const HEARTBEAT_INTERVAL_MS = 20_000;
@@ -412,6 +472,66 @@ export function parseBackendMessage(raw: string): BackendToAgentMessage | null {
       return typeof message.requestId === 'string'
         ? { type: 'http_proxy_cancel', requestId: message.requestId }
         : null;
+    case 'llamacpp_scan_request':
+      if (typeof message.requestId === 'string' && typeof message.dir === 'string') {
+        return { type: 'llamacpp_scan_request', requestId: message.requestId, dir: message.dir };
+      }
+      return null;
+    case 'llamacpp_spawn': {
+      if (
+        typeof message.requestId === 'string' &&
+        typeof message.exePath === 'string' &&
+        (message.host === '127.0.0.1' || message.host === 'localhost' || message.host === '::1') &&
+        typeof message.port === 'number' &&
+        Number.isSafeInteger(message.port) &&
+        message.port >= 1024 &&
+        message.port <= 65535 &&
+        Array.isArray(message.args) &&
+        message.args.every((a) => typeof a === 'string')
+      ) {
+        return {
+          type: 'llamacpp_spawn',
+          requestId: message.requestId,
+          exePath: message.exePath,
+          host: message.host,
+          port: message.port,
+          args: [...message.args],
+        };
+      }
+      return null;
+    }
+    case 'llamacpp_stop':
+      if (
+        typeof message.requestId === 'string' &&
+        typeof message.pid === 'number' &&
+        Number.isFinite(message.pid) &&
+        typeof message.graceMs === 'number' &&
+        Number.isSafeInteger(message.graceMs) &&
+        message.graceMs >= 0
+      ) {
+        return {
+          type: 'llamacpp_stop',
+          requestId: message.requestId,
+          pid: message.pid,
+          graceMs: message.graceMs,
+        };
+      }
+      return null;
+    case 'llamacpp_status_request':
+      return typeof message.requestId === 'string'
+        ? { type: 'llamacpp_status_request', requestId: message.requestId }
+        : null;
+    case 'llamacpp_logs_request':
+      if (
+        typeof message.requestId === 'string' &&
+        typeof message.maxBytes === 'number' &&
+        Number.isSafeInteger(message.maxBytes) &&
+        message.maxBytes >= 1 &&
+        message.maxBytes <= 65536
+      ) {
+        return { type: 'llamacpp_logs_request', requestId: message.requestId, maxBytes: message.maxBytes };
+      }
+      return null;
     default:
       return null;
   }
@@ -444,6 +564,12 @@ export interface ConnectAgentOptions {
    */
   platform?: string;
   shell?: DetectedShell;
+  /**
+   * Capability list declared in `hello` (§2 capability gate). The real agent
+   * always sends `['llamacpp']`; omitted here only to mirror the wire
+   * schema's optionality.
+   */
+  capabilities?: string[];
   onMessage(message: BackendToAgentMessage): void;
   /** Fired once, right after the socket physically opens and `hello` is sent. */
   onOpen?(): void;
@@ -475,11 +601,12 @@ export function connectAgent(options: ConnectAgentOptions): AgentTransportHandle
         agentVersion: options.agentVersion,
         deviceName: options.deviceName,
         // JSON.stringify drops undefined-valued properties, so this stays a
-        // no-op extension when platform/shell are omitted (matching the
-        // wire schema's optionality) and always present in what the real
-        // local agent actually sends (index.ts always supplies both).
+        // no-op extension when platform/shell/capabilities are omitted
+        // (matching the wire schema's optionality) and always present in what
+        // the real local agent actually sends (index.ts always supplies all).
         platform: options.platform,
         shell: options.shell,
+        capabilities: options.capabilities,
       })
     );
     heartbeatTimer = setInterval(() => {

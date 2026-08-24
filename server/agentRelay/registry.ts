@@ -33,6 +33,8 @@ const connections = new Map<string, AgentConnection>();
 const pendingRequests = new Map<string, PendingRequest>();
 const messageHooks = new Set<(userId: string, message: AgentToBackendMessage) => void>();
 const disconnectHooks = new Set<(userId: string) => void>();
+/** Capabilities declared by each connection's most recent `hello` (§2). */
+const helloCapabilities = new Map<AgentConnection, string[]>();
 
 export function registerMessageHook(cb: (userId: string, message: AgentToBackendMessage) => void): () => void {
   messageHooks.add(cb);
@@ -69,6 +71,14 @@ function startTimeout(requestId: string, pending: PendingRequest): NodeJS.Timeou
 }
 
 function handleMessage(userId: string, connection: AgentConnection, message: AgentToBackendMessage): void {
+  if (message.type === 'hello') {
+    // The WS route answers hello separately (hello_ack); here we only record
+    // the declared capability list for `getAgentCapabilities`. A hello
+    // without the field clears any earlier declaration.
+    if (message.capabilities) helloCapabilities.set(connection, [...message.capabilities]);
+    else helloCapabilities.delete(connection);
+  }
+
   for (const hook of messageHooks) {
     try {
       hook(userId, message);
@@ -122,6 +132,11 @@ function handleMessage(userId: string, connection: AgentConnection, message: Age
     || message.type === 'receive_file_response'
     || message.type === 'mcp_start_response'
     || message.type === 'mcp_stop_response'
+    || message.type === 'llamacpp_scan_response'
+    || message.type === 'llamacpp_spawn_response'
+    || message.type === 'llamacpp_stop_response'
+    || message.type === 'llamacpp_status_response'
+    || message.type === 'llamacpp_logs_response'
   ) {
     clearTimeout(pending.timer);
     pendingRequests.delete(message.requestId);
@@ -148,6 +163,7 @@ export function unregisterAgentConnection(
   if (connections.get(userId) === connection) {
     connections.delete(userId);
   }
+  helloCapabilities.delete(connection);
   rejectPendingForConnection(connection);
   for (const hook of disconnectHooks) {
     try {
@@ -172,6 +188,19 @@ export function getAgentShellInfo(userId: string): {
   shell?: { kind: string; execPath: string };
 } | undefined {
   return getAgentConnection(userId)?.getIdentity?.();
+}
+
+/**
+ * Capabilities the connected agent declared in its most recent `hello`
+ * (global-constraints.md §2 capability gate). `undefined` when the agent is
+ * not connected or its hello carried no `capabilities` field — callers treat
+ * that as "capability not supported".
+ */
+export function getAgentCapabilities(userId: string): string[] | undefined {
+  const connection = getAgentConnection(userId);
+  if (!connection) return undefined;
+  const capabilities = helloCapabilities.get(connection);
+  return capabilities ? [...capabilities] : undefined;
 }
 
 export function sendCommandRequest(
@@ -311,4 +340,60 @@ export function cancelHttpProxyRequest(userId: string, requestId: string): void 
   const pending = pendingRequests.get(requestId);
   if (!pending || pending.userId !== userId || !pending.connection.isConnected()) return;
   pending.connection.send({ type: 'http_proxy_cancel', requestId });
+}
+
+export type LlamacppExitEvent = Extract<AgentToBackendMessage, { type: 'llamacpp_exited' }>;
+
+/**
+ * Subscribes to unsolicited `llamacpp_exited` pushes (one tracked llama-server
+ * child per agent). Implemented over the shared messageHooks mechanism, so the
+ * callback fires with the tenant userId plus the event frame. Returns an
+ * unsubscribe function.
+ */
+export function registerLlamacppExitHook(cb: (userId: string, e: LlamacppExitEvent) => void): () => void {
+  return registerMessageHook((userId, message) => {
+    if (message.type === 'llamacpp_exited') cb(userId, message);
+  });
+}
+
+/**
+ * Generic request/response sender for the llamacpp_* frames — modeled on
+ * `sendFileOpRequest` with identical timeout+cancel semantics (a lost response
+ * rejects with 'local agent command timed out' and sends the same
+ * `command_cancel` best-effort cancel other senders use; there is no
+ * llamacpp-specific cancel frame in the §2 contract).
+ */
+export function sendLlamacppRequest<T extends Record<string, unknown>>(
+  userId: string,
+  request: BackendToAgentMessage & { requestId: string },
+  timeoutMs: number,
+): Promise<T> {
+  const connection = getAgentConnection(userId);
+  if (!connection) {
+    return Promise.reject({ error: 'local agent is not connected' });
+  }
+  if (pendingRequests.has(request.requestId)) {
+    return Promise.reject({ error: 'duplicate local agent request id' });
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    const pending = {
+      userId,
+      connection,
+      timeoutMs,
+      timer: undefined as unknown as NodeJS.Timeout,
+      resolve,
+      reject,
+      onOutputChunk: () => {},
+    };
+    pending.timer = startTimeout(request.requestId, pending);
+    pendingRequests.set(request.requestId, pending);
+    try {
+      connection.send(request);
+    } catch {
+      clearTimeout(pending.timer);
+      pendingRequests.delete(request.requestId);
+      reject({ error: 'local agent disconnected mid-command' });
+    }
+  });
 }

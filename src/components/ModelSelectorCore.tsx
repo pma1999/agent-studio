@@ -30,11 +30,11 @@ import type { OpenRouterModel as OpenRouterModelType } from '../types';
 import { useOpenRouterModels } from '../hooks/useOpenRouterModels';
 import { useDeepSeekModels } from '../hooks/useDeepSeekModels';
 import { useCodexModels } from '../hooks/useCodexModels';
-import { useLmStudioModels } from '../hooks/useLmStudioModels';
+import { useLlamaCppModels } from '../hooks/useLlamaCppModels';
 import { useFavoriteModels } from '../hooks/useFavoriteModels';
 import { useRecentModels } from '../hooks/useRecentModels';
 import { useIsMobile } from '../utils/breakpoints';
-import { DEEPSEEK_DIRECT_GROUP, CODEX_DIRECT_GROUP, LMSTUDIO_GROUP, isLmStudioModel } from '../utils/providers';
+import { DEEPSEEK_DIRECT_GROUP, CODEX_DIRECT_GROUP, LLAMACPP_GROUP, isLlamaCppModel, isRemovedLocalProviderId } from '../utils/providers';
 
 const ICON_MAP = { sparkles: Sparkles, zap: Zap, eye: Eye, brain: Brain };
 
@@ -82,7 +82,7 @@ export function ModelSelectorCore({
 }: ModelSelectorCoreProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [search, setSearch] = useState('');
-  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set([DEEPSEEK_DIRECT_GROUP, CODEX_DIRECT_GROUP, LMSTUDIO_GROUP, 'openai', 'anthropic']));
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set([DEEPSEEK_DIRECT_GROUP, CODEX_DIRECT_GROUP, LLAMACPP_GROUP, 'openai', 'anthropic']));
   const dropdownRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const isMobile = useIsMobile();
@@ -90,15 +90,18 @@ export function ModelSelectorCore({
   const { models: openRouterModels, loading } = useOpenRouterModels();
   const { models: deepSeekModels } = useDeepSeekModels();
   const { models: codexModels } = useCodexModels();
-  const { models: lmStudioModels } = useLmStudioModels();
+  const { models: llamaCppModels } = useLlamaCppModels();
   const { favorites, toggleFavorite } = useFavoriteModels();
   const { recent, addRecent } = useRecentModels();
 
-  // DeepSeek-direct, ChatGPT (Codex), and LM Studio (local) models lead the list
-  // so their groups sort to the top.
+  // DeepSeek-direct, ChatGPT (Codex), and llama.cpp (local) models lead the
+  // list so their groups sort to the top. Legacy removed-provider ids
+  // (plan.md D8) never become pickable options — an open conversation holding
+  // one still renders its history and surfaces the server error on send.
   const rawModels = useMemo<OpenRouterModelType[]>(
-    () => [...deepSeekModels, ...codexModels, ...lmStudioModels, ...openRouterModels],
-    [deepSeekModels, codexModels, lmStudioModels, openRouterModels]
+    () => [...deepSeekModels, ...codexModels, ...llamaCppModels, ...openRouterModels]
+      .filter((m) => !isRemovedLocalProviderId(m.id)),
+    [deepSeekModels, codexModels, llamaCppModels, openRouterModels]
   );
 
   const models = useMemo(() => {
@@ -920,8 +923,14 @@ export function ModelSelectorCore({
                                         <span>·</span>
                                         <span>{formatContext(model.context_length)}</span>
                                         <span>·</span>
-                                        {/* LM Studio is free/local — never render a $0.00 price as if metered. */}
-                                        <span>{isLmStudioModel(model.id) ? 'local' : formatPrice(model.pricing.prompt)}</span>
+                                        {/* llama.cpp is free/local — never render a $0.00 price as if metered. */}
+                                        <span>{isLlamaCppModel(model.id) ? 'local' : formatPrice(model.pricing.prompt)}</span>
+                                        {(model as { loaded?: boolean }).loaded === true && (
+                                          <>
+                                            <span>·</span>
+                                            <span style={{ color: 'var(--success)', fontWeight: 600 }}>Loaded</span>
+                                          </>
+                                        )}
                                       </div>
                                     )}
                                   </div>

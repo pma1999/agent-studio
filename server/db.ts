@@ -571,6 +571,14 @@ export function migrate() {
     db.exec('ALTER TABLE settings_new RENAME TO settings');
   }
 
+  // Settings: purge orphaned LM Studio rows (provider removed). ESCAPE makes `_` literal,
+  // so only `lmstudio_*` keys match; conversations/messages model ids are intentionally
+  // untouched (legacy-guard rejection handles them).
+  const removedLmstudioSettings = db.prepare("DELETE FROM settings WHERE key LIKE 'lmstudio@_%' ESCAPE '@'").run();
+  if (removedLmstudioSettings.changes > 0) {
+    console.log(`[Agent Studio] Removed ${removedLmstudioSettings.changes} orphaned lmstudio_* settings row(s)`);
+  }
+
   // Initial admin user for deployment: create or update from INITIAL_ADMIN_PASSWORD
   const INITIAL_ADMIN_EMAIL = 'pablomiguelargudo@gmail.com';
   const adminPasswordEnv = process.env.INITIAL_ADMIN_PASSWORD;

@@ -5,6 +5,7 @@ import { getSettingValue } from './settings.js';
 import { resolveToolsForAgent, resolveToolsFromIds, toOpenRouterTools, appendToolInstructionsIfNeeded } from '../tools/index.js';
 import { CouncilExecutor } from '../services/councilExecutor.js';
 import { getProviderConfig, resolveProviderId, resolveAssistantHistoryContent, type ProviderId } from '../providers/index.js';
+import { isLegacyLmStudioModel, REMOVED_LMSTUDIO_MESSAGE } from '../providers/llamacpp.js';
 import { isUserAllowed } from '../codex/instanceManager.js';
 import { buildDateTimeContext } from '../dateTimeContext.js';
 import { AuthRequest } from '../middleware/auth.js';
@@ -257,9 +258,22 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     // Pre-flight: ensure an API key exists for every provider this run needs (members + synthesizer).
     // The ChatGPT (Codex) provider has no API key — it is gated by account allowlist and its
     // connected-account state is validated when the member/synthesizer turn actually runs.
+    // D8 legacy guard FIRST: removed lmstudio:* member/synthesizer ids are rejected
+    // with the §1-verbatim message BEFORE any provider-key validation or network work.
+    const requiredModels = [
+      ...councilConfig.member_models,
+      councilConfig.synthesizer_model || 'anthropic/claude-3.5-sonnet',
+    ];
+    for (const modelId of requiredModels) {
+      if (isLegacyLmStudioModel(modelId)) {
+        res.status(400).json({ error: REMOVED_LMSTUDIO_MESSAGE });
+        return;
+      }
+    }
     const requiredProviders = new Set<ProviderId>();
-    for (const modelId of councilConfig.member_models) requiredProviders.add(resolveProviderId(modelId));
-    requiredProviders.add(resolveProviderId(councilConfig.synthesizer_model || 'anthropic/claude-3.5-sonnet'));
+    for (const modelId of requiredModels) {
+      requiredProviders.add(resolveProviderId(modelId));
+    }
     const apiKeyByProvider = new Map<ProviderId, string>();
     for (const providerId of requiredProviders) {
       const cfg = getProviderConfig(providerId);
@@ -268,6 +282,12 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
           res.status(403).json({ error: 'ChatGPT provider is not enabled for your account' });
           return;
         }
+        continue;
+      }
+      // llama.cpp is keyless-valid like codex (its sentinel apiKeySetting has no
+      // settings row): requests without an API key are legitimate — the §2
+      // capability gate + transport enforce real validity at fetch time.
+      if (providerId === 'llamacpp') {
         continue;
       }
       const key = getSettingValue(userId, cfg.apiKeySetting);

@@ -28,7 +28,9 @@ import {
 } from '../providers/index.js';
 import { injectDateTimeIntoCurrentTurn } from '../dateTimeContext.js';
 import { runCodexTurn } from '../codex/chat.js';
-import { lmstudioFetch } from '../providers/lmstudioTransport.js';
+import { getAgentCapabilities } from '../agentRelay/registry.js';
+import { isLegacyLmStudioModel, REMOVED_LMSTUDIO_MESSAGE } from '../providers/llamacpp.js';
+import { llamacppFetch, LLAMACPP_CAPABILITY_ERROR } from '../providers/llamacppTransport.js';
 
 const MEMBER_TIMEOUT_MS = 240000; // 4 minutes per member
 const SYNTHESIS_TIMEOUT_MS = 240000; // 4 minutes for synthesis
@@ -137,11 +139,18 @@ export class CouncilExecutor {
     upstreamModel: string;
     provider: ProviderConfig;
   } {
+    // D8 legacy guard: ids from the REMOVED LM Studio provider die BEFORE any
+    // key lookup, upstream resolution, or network call — they must never fall
+    // through to another provider.
+    if (isLegacyLmStudioModel(modelId)) {
+      throw new Error(REMOVED_LMSTUDIO_MESSAGE);
+    }
     const provider = getProviderForModel(modelId);
     const apiKey = this.getApiKey(provider.id);
-    // LM Studio requests are valid WITHOUT a token (local server); every other
-    // provider requires its key.
-    if (!apiKey?.trim() && provider.id !== 'lmstudio') {
+    // Local-provider requests (legacy lmstudio — rejected above — and
+    // llama.cpp) are valid WITHOUT a key (local server); every other provider
+    // requires its key.
+    if (!apiKey?.trim() && provider.id !== 'lmstudio' && provider.id !== 'llamacpp') {
       throw new Error(`${provider.label} API key not configured`);
     }
     return {
@@ -154,18 +163,24 @@ export class CouncilExecutor {
 
   /**
    * Upstream chat-completions seam for member/synthesizer/comparison calls:
-   * LM Studio rides its transport service (`lmstudioFetch` — settings-resolved
-   * base URL + direct/relay auto-select); every other provider keeps plain
-   * fetch against the static config URL.
+   * llama.cpp rides its transport service (`llamacppFetch` — resolved loopback
+   * port + direct/relay auto-select); every other provider keeps plain fetch
+   * against the static config URL.
    */
   private async fetchUpstream(
     userId: string | undefined,
     ep: ReturnType<CouncilExecutor['resolveEndpoint']>,
     init: { method: 'POST'; headers: Record<string, string>; body: string; signal?: AbortSignal | null },
   ): Promise<Response> {
-    if (ep.provider.id === 'lmstudio') {
-      if (!userId) throw new Error('LM Studio requires a user context');
-      return lmstudioFetch(userId, '/v1/chat/completions', init);
+    if (ep.provider.id === 'llamacpp') {
+      if (!userId) throw new Error('llama.cpp requires a user context');
+      // §2 capability gate: fires on the council entry point too. The frozen
+      // message must surface HERE — llamacppFetch (task-2-owned) degrades a
+      // connected-but-incapable agent to a generic "not reachable" 502.
+      if (!(getAgentCapabilities(userId)?.includes('llamacpp') ?? false)) {
+        throw new Error(LLAMACPP_CAPABILITY_ERROR);
+      }
+      return llamacppFetch(userId, '/v1/chat/completions', init);
     }
     return fetch(ep.url, init);
   }

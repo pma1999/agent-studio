@@ -11,19 +11,24 @@
  *   - OpenRouter models keep their native ids: `anthropic/claude-3.5-sonnet`, `openrouter/auto`.
  *   - DeepSeek-direct models use the `deepseek:` prefix: `deepseek:deepseek-v4-flash`.
  *   - ChatGPT (Codex app-server) models use the `codex:` prefix: `codex:gpt-5.1-codex`.
- *   - LM Studio (local server) models use the `lmstudio:` prefix: `lmstudio:qwen/qwen3-coder-30b`.
+ *   - llama.cpp (local llama-server, spawned via the paired local agent) models use
+ *     the `llamacpp:` prefix: `llamacpp:Qwen3.6-35B-A3B-UD-Q4_K_M`.
+ *   - `lmstudio:*` ids from the REMOVED LM Studio provider still resolve to a
+ *     retained `'lmstudio'` stub so they are recognized and rejected (HTTP 400 in
+ *     chat/council) instead of silently falling through to OpenRouter (plan D8).
  *
  * `resolveProviderId` decides routing; `toUpstreamModelId` strips the prefix
  * before the id is sent upstream. The colon cleanly disambiguates from
  * OpenRouter's own `deepseek/...` slugs.
  */
 
-export type ProviderId = 'openrouter' | 'deepseek' | 'codex' | 'lmstudio';
+export type ProviderId = 'openrouter' | 'deepseek' | 'codex' | 'lmstudio' | 'llamacpp';
 
 export const DEEPSEEK_PREFIX = 'deepseek:';
 export const DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 export const CODEX_PREFIX = 'codex:';
 export const LMSTUDIO_PREFIX = 'lmstudio:';
+export const LLAMACPP_PREFIX = 'llamacpp:';
 
 export interface ProviderConfig {
   id: ProviderId;
@@ -96,21 +101,37 @@ const CODEX_CONFIG: ProviderConfig = {
 };
 
 /**
- * LM Studio — a user-run local OpenAI-compatible server. The endpoint is
- * per-user (settings/env), so chatCompletionsUrl is deliberately empty here
- * and resolved at request time; it must never be treated as a static URL.
- * Requests WITHOUT a token are valid (local servers usually need none) — the
- * optional bearer token is stored under `lmstudio_api_token`.
+ * llama.cpp — a llama-server process spawned/supervised on the user's machine
+ * through their paired local agent. The loopback endpoint (port resolved from
+ * settings/env) is built per request, so chatCompletionsUrl stays '' here.
+ * Requests WITHOUT an API key are valid (the spawn passes no `--api-key`); the
+ * key setting below intentionally has NO settings row — the key GATE is
+ * exempted for llamacpp instead of the lookup succeeding.
  */
-const LMSTUDIO_CONFIG: ProviderConfig = {
+const LLAMACPP_CONFIG: ProviderConfig = {
+  id: 'llamacpp',
+  label: 'llama.cpp (Local)',
+  chatCompletionsUrl: '',
+  apiKeySetting: 'llamacpp_api_key_unused',
+  buildHeaders: () => ({ 'Content-Type': 'application/json' }),
+  supportsProviderRouting: false,
+  supportsPlugins: false,
+  supportsReasoningParam: false,
+  supportsJsonSchema: true,
+};
+
+/**
+ * Removed LM Studio provider — retained ONLY so persisted `lmstudio:*` model
+ * ids still resolve to a named provider and are REJECTED upstream of any
+ * network call (HTTP 400 in chat.ts/councilExecutor.ts, plan D8) instead of
+ * silently falling through to OpenRouter. No settings row or endpoint backs it.
+ */
+const LMSTUDIO_REMOVED_CONFIG: ProviderConfig = {
   id: 'lmstudio',
-  label: 'LM Studio (Local)',
-  chatCompletionsUrl: '', // resolved per-user from settings; never a static URL
-  apiKeySetting: 'lmstudio_api_token',
-  buildHeaders: (token) => ({
-    'Content-Type': 'application/json',
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-  }),
+  label: 'LM Studio (removed)',
+  chatCompletionsUrl: '', // never fetched — requests are rejected before any network call
+  apiKeySetting: 'lmstudio_api_key_unused',
+  buildHeaders: () => ({ 'Content-Type': 'application/json' }),
   supportsProviderRouting: false,
   supportsPlugins: false,
   supportsReasoningParam: false,
@@ -121,14 +142,18 @@ const CONFIGS: Record<ProviderId, ProviderConfig> = {
   openrouter: OPENROUTER_CONFIG,
   deepseek: DEEPSEEK_CONFIG,
   codex: CODEX_CONFIG,
-  lmstudio: LMSTUDIO_CONFIG,
+  lmstudio: LMSTUDIO_REMOVED_CONFIG,
+  llamacpp: LLAMACPP_CONFIG,
 };
 
 /** Returns the provider that should serve a given namespaced model id. */
 export function resolveProviderId(modelId: string | null | undefined): ProviderId {
   if (typeof modelId === 'string' && modelId.startsWith(DEEPSEEK_PREFIX)) return 'deepseek';
   if (typeof modelId === 'string' && modelId.startsWith(CODEX_PREFIX)) return 'codex';
+  // D8: retained so legacy ids resolve to 'lmstudio' (rejected downstream),
+  // NEVER to openrouter.
   if (typeof modelId === 'string' && modelId.startsWith(LMSTUDIO_PREFIX)) return 'lmstudio';
+  if (typeof modelId === 'string' && modelId.startsWith(LLAMACPP_PREFIX)) return 'llamacpp';
   return 'openrouter';
 }
 
@@ -137,6 +162,7 @@ export function toUpstreamModelId(modelId: string): string {
   if (modelId.startsWith(DEEPSEEK_PREFIX)) return modelId.slice(DEEPSEEK_PREFIX.length);
   if (modelId.startsWith(CODEX_PREFIX)) return modelId.slice(CODEX_PREFIX.length);
   if (modelId.startsWith(LMSTUDIO_PREFIX)) return modelId.slice(LMSTUDIO_PREFIX.length);
+  if (modelId.startsWith(LLAMACPP_PREFIX)) return modelId.slice(LLAMACPP_PREFIX.length);
   return modelId;
 }
 
@@ -145,7 +171,16 @@ export function isCodexModel(modelId: string | null | undefined): boolean {
   return resolveProviderId(modelId) === 'codex';
 }
 
-/** True when the model id targets a local LM Studio server. */
+/** True when the model id targets the local llama.cpp (llama-server) provider. */
+export function isLlamacppModel(modelId: string | null | undefined): boolean {
+  return resolveProviderId(modelId) === 'llamacpp';
+}
+
+/**
+ * Legacy classifier: true for ids from the REMOVED LM Studio provider. Kept so
+ * consumers can recognize-and-error on persisted rows (plan D8); such ids must
+ * never be routed anywhere.
+ */
 export function isLmStudioModel(modelId: string | null | undefined): boolean {
   return resolveProviderId(modelId) === 'lmstudio';
 }
@@ -173,17 +208,18 @@ export function assistantReasoningField(id: ProviderId): 'reasoning' | 'reasonin
  *
  * Namespaced providers whose APIs echo the bare key back in the response
  * (`parsed.model`) must keep the NAMESPACED effective id — trusting the echo
- * would drop the scheme prefix from history. That applies to DeepSeek-direct
- * and to lmstudio (local servers echo the stripped key). Every other provider
- * records the model the upstream actually served (OpenRouter may route to a
- * variant), falling back to the requested id when nothing was echoed.
+ * would drop the scheme prefix from history. That applies to DeepSeek-direct,
+ * llama.cpp (llama-server echoes `--alias`), and legacy lmstudio ids (which
+ * are rejected before a response can exist). Every other provider records the
+ * model the upstream actually served (OpenRouter may route to a variant),
+ * falling back to the requested id when nothing was echoed.
  */
 export function persistedModelId(
   providerId: ProviderId,
   effectiveModel: string,
   actualModelFromResponse: string | null,
 ): string {
-  if (providerId === 'deepseek' || providerId === 'lmstudio') return effectiveModel;
+  if (providerId === 'deepseek' || providerId === 'lmstudio' || providerId === 'llamacpp') return effectiveModel;
   return actualModelFromResponse ?? effectiveModel;
 }
 

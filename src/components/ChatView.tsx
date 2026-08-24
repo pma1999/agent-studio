@@ -19,7 +19,9 @@ import { ModelSelectorCore } from './ModelSelectorCore';
 import { ProviderRoutingSelector } from './ProviderRoutingSelector';
 import { ConversationToolsSelector } from './ConversationToolsSelector';
 import { ConversationSkillsSelector } from './ConversationSkillsSelector';
-import { conversationsApi, skillsApi, agentPairingApi, agentUploadsApi } from '../api/client';
+import { conversationsApi, skillsApi, agentPairingApi, agentUploadsApi, settingsApi } from '../api/client';
+import { isLlamaCppModel, stripLlamaCppPrefix } from '../utils/providers';
+import { effectiveReasoningBudget } from '../utils/llamacppKnobs';
 import { PremiumMentionInput } from './ui/PremiumMentionInput';
 import { Sheet } from './ui/Sheet';
 import { ConversationTokenSummary, StreamingTokenCounter } from './TokenCounter';
@@ -383,6 +385,34 @@ export function ChatView() {
 
   const reasoningActive = effectiveReasoning.enabled;
   const currentEffort = effectiveReasoning.effort || 'medium';
+
+  // D5 honesty: when the chat runs on a llama.cpp model whose persisted launch
+  // config pins reasoning_budget = 0, per-chat thinking cannot produce tokens.
+  // Read the two settings rows fail-soft and surface the cap on the toggle.
+  const chatModelId = effectiveConversationModel ?? defaultModelForChat;
+  const chatModelIsLlamaCpp = isLlamaCppModel(chatModelId);
+  const chatModelKey = chatModelIsLlamaCpp ? stripLlamaCppPrefix(chatModelId) : null;
+  const [llamacppBudgetCapped, setLlamacppBudgetCapped] = useState(false);
+  useEffect(() => {
+    if (!chatModelIsLlamaCpp) {
+      setLlamacppBudgetCapped(false);
+      return;
+    }
+    let cancelled = false;
+    Promise.all([
+      settingsApi.get('llamacpp_load_defaults'),
+      settingsApi.get('llamacpp_model_overrides'),
+    ]).then(([defaultsRow, overridesRow]) => {
+      if (cancelled) return;
+      setLlamacppBudgetCapped(
+        effectiveReasoningBudget(defaultsRow.value, overridesRow.value, chatModelKey) === 0
+      );
+    }).catch(() => {
+      if (!cancelled) setLlamacppBudgetCapped(false);
+    });
+    return () => { cancelled = true; };
+  }, [chatModelIsLlamaCpp, chatModelKey]);
+
   const isMobile = useIsMobile();
   const setComposerFocused = useStore((s) => s.setComposerFocused);
   const [optionsOpen, setOptionsOpen] = useState(false);
@@ -1271,6 +1301,22 @@ export function ChatView() {
                                 <span style={{ color: 'var(--text-secondary)' }}> Using general chat defaults.</span>
                               ) : null)}
                             </div>
+
+                            {/* D5: launch config caps thinking for this provider */}
+                            {chatModelIsLlamaCpp && llamacppBudgetCapped && (
+                              <div style={{
+                                marginTop: '8px',
+                                padding: '6px 8px',
+                                background: 'rgba(245, 158, 11, 0.08)',
+                                border: '1px solid rgba(245, 158, 11, 0.2)',
+                                borderRadius: 'var(--radius-sm)',
+                                fontSize: '0.625rem',
+                                color: 'var(--state-warning)',
+                                lineHeight: 1.4,
+                              }}>
+                                Thinking is capped by the launch config (reasoning_budget = 0).
+                              </div>
+                            )}
                           </div>
                         )}
                       </motion.div>

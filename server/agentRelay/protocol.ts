@@ -7,6 +7,9 @@ export const AgentToBackendMessageSchema = z.discriminatedUnion('type', [
     type: z.literal('hello'),
     agentVersion: z.string(),
     deviceName: z.string(),
+    // Declared agent capabilities (§2 capability gate). New agents send
+    // ['llamacpp']; older paired agents omit the field entirely.
+    capabilities: z.array(z.string()).optional(),
     platform: z.string().optional(),
     shell: z.object({
       kind: z.enum(['pwsh', 'powershell', 'cmd', 'bash', 'sh']),
@@ -136,6 +139,63 @@ export const AgentToBackendMessageSchema = z.discriminatedUnion('type', [
     totalBytes: z.number().optional(),
     error: z.string().optional(),
   }).strict(),
+  // Hand-mirrored by local-agent/src/transport.ts (global-constraints.md §2).
+  // All literals spelled `llamacpp_*` — do NOT introduce a second casing.
+  z.object({
+    type: z.literal('llamacpp_scan_response'),
+    requestId: z.string(),
+    ok: z.boolean(),
+    error: z.string().optional(),
+    entries: z.array(z.object({
+      path: z.string(),
+      name: z.string(),
+      sizeBytes: z.number().int().nonnegative().optional(),
+    }).strict()).optional(),
+    truncated: z.boolean().optional(),
+  }).strict(),
+  z.object({
+    type: z.literal('llamacpp_spawn_response'),
+    requestId: z.string(),
+    ok: z.boolean(),
+    pid: z.number().optional(),
+    error: z.string().optional(),
+  }).strict(),
+  z.object({
+    type: z.literal('llamacpp_stop_response'),
+    requestId: z.string(),
+    ok: z.boolean(),
+    forced: z.boolean().optional(),
+    error: z.string().optional(),
+  }).strict(),
+  z.object({
+    type: z.literal('llamacpp_status_response'),
+    requestId: z.string(),
+    running: z.boolean(),
+    pid: z.number().nullable().optional(),
+    exePath: z.string().nullable().optional(),
+    args: z.array(z.string()).nullable().optional(),
+    host: z.string().optional(),
+    port: z.number().nullable().optional(),
+    startedAt: z.number().nullable().optional(),
+    lastExitCode: z.number().nullable().optional(),
+    lastExitAt: z.number().nullable().optional(),
+  }).strict(),
+  z.object({
+    type: z.literal('llamacpp_logs_response'),
+    requestId: z.string(),
+    ok: z.boolean(),
+    text: z.string().optional(),
+    truncated: z.boolean().optional(),
+    error: z.string().optional(),
+  }).strict(),
+  // Unsolicited push (no requestId) — routed to hooks, never to pendings.
+  z.object({
+    type: z.literal('llamacpp_exited'),
+    pid: z.number(),
+    exitCode: z.number().nullable(),
+    terminatedByAgent: z.boolean().optional(),
+    stderrTail: z.string().optional(),
+  }).strict(),
 ]);
 
 export const BackendToAgentMessageSchema = z.discriminatedUnion('type', [
@@ -228,6 +288,36 @@ export const BackendToAgentMessageSchema = z.discriminatedUnion('type', [
     timeoutMs: z.number().int().positive(),
   }).strict(),
   z.object({ type: z.literal('http_proxy_cancel'), requestId: z.string() }).strict(),
+  // Hand-mirrored by local-agent/src/transport.ts (global-constraints.md §2).
+  // All literals spelled `llamacpp_*` — do NOT introduce a second casing.
+  z.object({
+    type: z.literal('llamacpp_scan_request'),
+    requestId: z.string(),
+    dir: z.string(), // absolute path
+  }).strict(),
+  z.object({
+    type: z.literal('llamacpp_spawn'),
+    requestId: z.string(),
+    exePath: z.string(), // absolute
+    host: z.enum(['127.0.0.1', 'localhost', '::1']),
+    port: z.number().int().min(1024).max(65535),
+    args: z.array(z.string()), // full argv AFTER exe, incl. --host/--port/--model
+  }).strict(),
+  z.object({
+    type: z.literal('llamacpp_stop'),
+    requestId: z.string(),
+    pid: z.number(),
+    graceMs: z.number().int().min(0),
+  }).strict(),
+  z.object({
+    type: z.literal('llamacpp_status_request'),
+    requestId: z.string(),
+  }).strict(),
+  z.object({
+    type: z.literal('llamacpp_logs_request'),
+    requestId: z.string(),
+    maxBytes: z.number().int().min(1).max(65536),
+  }).strict(),
 ]);
 
 export type AgentToBackendMessage = z.infer<typeof AgentToBackendMessageSchema>;

@@ -25,6 +25,26 @@ export function parseProxyAllowlist(raw: string | undefined): string[] {
   return entries.length > 0 ? entries : [...DEFAULT_PROXY_ALLOWLIST];
 }
 
+/**
+ * Effective allowlist for a provider that binds llama-server to a configured
+ * loopback port (global-constraints.md §7): the parsed
+ * `AGENT_HTTP_PROXY_ALLOW_HOSTS` entries plus — when a port is given — the
+ * three loopback forms of `host:port` (`127.0.0.1:P`, `localhost:P`,
+ * `[::1]:P`). Env parsing rules are untouched; callers pass their RESOLVED
+ * port so no provider port stays hardcoded here.
+ */
+export function buildEffectiveAllowlist(extraLoopbackPort?: number): string[] {
+  const entries = parseProxyAllowlist(process.env.AGENT_HTTP_PROXY_ALLOW_HOSTS);
+  if (extraLoopbackPort !== undefined && Number.isSafeInteger(extraLoopbackPort)) {
+    entries.push(
+      `127.0.0.1:${extraLoopbackPort}`,
+      `localhost:${extraLoopbackPort}`,
+      `[::1]:${extraLoopbackPort}`,
+    );
+  }
+  return entries;
+}
+
 /** Loopback names collapse onto 127.0.0.1; surrounding IPv6 brackets are optional. */
 function normalizeHost(host: string): string {
   const unbracketed = host.startsWith('[') && host.endsWith(']')

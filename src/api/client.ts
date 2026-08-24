@@ -675,7 +675,9 @@ export const modelsApi = {
   ),
   deepseek: () => request<{ data: OpenRouterModel[] }>('/models/deepseek'),
   codex: () => request<{ data: OpenRouterModel[] }>('/models/codex'),
-  lmstudio: () => request<{ data: LmStudioModel[] }>('/models/lmstudio'),
+  llamacpp: () => request<{ data: LlamaCppModel[] }>('/models/llamacpp'),
+  /** NEVER-THROWS §5 status payload. */
+  llamacppStatus: () => request<LlamaCppStatus>('/models/llamacpp/status'),
 };
 
 // ChatGPT (Codex app-server) provider
@@ -727,74 +729,81 @@ export const deepseekApi = {
   validate: () => request<DeepSeekValidateResult>('/models/deepseek/validate'),
 };
 
-// LM Studio (local provider) — response types pinned field-for-field to
-// plans/lmstudio-local-provider/global-constraints.md §8. Do not invent fields;
-// consumers must tolerate their absence (optional chaining everywhere).
-export type LmStudioProfileId = 'rapido' | 'equilibrado' | 'contexto_grande';
-
-/** Catalog entry (`GET /api/models/lmstudio`); `id` is namespaced (`lmstudio:<key>`). */
-export interface LmStudioModel extends OpenRouterModel {
-  quantization?: string | null;
+// llama.cpp (local provider via the paired local agent) — response types
+// pinned field-for-field to plans/llamacpp-local-provider/global-constraints.md
+// §5. Do not invent fields; consumers must tolerate their absence.
+export interface LlamaCppModel extends OpenRouterModel {
+  /** Absolute path of the representative (first-shard) .gguf file. */
+  path: string;
+  size_bytes?: number;
+  /** Number of shard files collapsed into this logical model. */
+  shards: number;
+  mtp_capable: boolean;
   loaded?: boolean;
-  trained_for_tool_use?: boolean | null;
 }
 
-export interface LmStudioStatus {
-  reachable: boolean;
-  transport: 'direct' | 'relay' | null;
-  apiSurface: 'native-v1' | 'openai-only' | null;
+/** NEVER-THROWS §5 status payload (GET /api/models/llamacpp/status). */
+export interface LlamaCppStatus {
   agentConnected: boolean;
-  baseUrl: string;
-  profile: LmStudioProfileId;
+  capabilitySupported: boolean;
+  running: boolean;
+  pid: number | null;
+  modelPath: string | null;
+  modelKey: string | null;
+  port: number | null;
+  transport: 'direct' | 'relay' | null;
+  healthy: boolean | null;
+  startedAt: number | null;
+  lastExitCode: number | null;
+  argv: string[] | null;
+  mtpActive: boolean;
 }
 
-export interface LmStudioLoadResult {
-  ok: boolean;
-  instance_id?: string;
-  status?: string;
-  load_config?: unknown;
+/** §5 start envelope — resolves only after the /health wait (≥120 s budget). */
+export interface LlamaCppStartResult {
+  ok: true;
+  pid: number;
+  port: number;
+  argv: string[];
+  waitedMs: number;
 }
 
-export interface LmStudioComplianceKnob {
-  key: string;
-  label: string;
-  expected: string;
-  actual: string | null;
-  /** true met / false unmet / null not observable live. */
-  met: boolean | null;
-  how: 'rest' | 'gui' | 'sdk-script';
-  guidance?: string;
+/** §5 FROZEN stop envelope; 'not-running' is SUCCESS (fail-soft idempotency). */
+export interface LlamaCppStopResult {
+  ok: true;
+  status: 'stopped' | 'not-running';
 }
 
-export interface LmStudioComplianceResult {
-  ok: boolean;
-  profile: { id: string; label: string };
-  apiSurface: LmStudioStatus['apiSurface'];
-  knobs: LmStudioComplianceKnob[];
+export interface LlamaCppConfigPayload {
+  defaults?: object;
+  overrides?: Record<string, object>;
 }
 
-/** §11 unload envelope; 'not-loaded' is SUCCESS (fail-soft idempotency). */
-export interface LmStudioUnloadResult {
-  ok: boolean;
-  status: 'unloaded' | 'not-loaded';
-  instances_unloaded?: number;
-  error?: string;
+/** §5 logs envelope — text never exceeds maxBytes. */
+export interface LlamaCppLogsResult {
+  ok: true;
+  text: string;
+  truncated: boolean;
 }
 
-export const lmstudioApi = {
-  status: () => request<LmStudioStatus>('/models/lmstudio/status'),
-  load: (model: string) => request<LmStudioLoadResult>('/models/lmstudio/load', {
-    method: 'POST',
-    body: JSON.stringify({ model }),
-  }),
-  compliance: (model: string) => request<LmStudioComplianceResult>('/models/lmstudio/compliance', {
-    method: 'POST',
-    body: JSON.stringify({ model }),
-  }),
-  unload: (model: string) => request<LmStudioUnloadResult>('/models/lmstudio/unload', {
-    method: 'POST',
-    body: JSON.stringify({ model }),
-  }),
+export const llamacppApi = {
+  start: (model: string, overrides?: object) =>
+    request<LlamaCppStartResult>('/models/llamacpp/start', {
+      method: 'POST',
+      body: JSON.stringify({ model, ...(overrides !== undefined ? { overrides } : {}) }),
+    }),
+  stop: () =>
+    request<LlamaCppStopResult>('/models/llamacpp/stop', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+  config: (payload: LlamaCppConfigPayload) =>
+    request<{ ok: true }>('/models/llamacpp/config', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  logs: (maxBytes = 8192) =>
+    request<LlamaCppLogsResult>(`/models/llamacpp/logs?maxBytes=${maxBytes}`),
 };
 
 // Settings

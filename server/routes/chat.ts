@@ -32,17 +32,21 @@ import {
   computeDeepSeekCost,
   deepSeekCachedTokens,
   isCodexModel,
-  isLmStudioModel,
+  isLlamacppModel,
   persistedModelId,
 } from '../providers/index.js';
-import { createThinkStreamSplitter, resolveLmStudioSampling, type ThinkSplitResult } from '../providers/lmstudio.js';
 import {
-  ensureModelLoaded,
-  getModelCapabilities,
-  getLmStudioSettings,
-  lmstudioFetch,
-  probeLmStudio,
-} from '../providers/lmstudioTransport.js';
+  createThinkStreamSplitter,
+  isLegacyLmStudioModel,
+  LLAMACPP_SAMPLING_TOP_P,
+  REMOVED_LMSTUDIO_MESSAGE,
+  type ThinkSplitResult,
+} from '../providers/llamacpp.js';
+import {
+  ensureLlamacppRunning,
+  llamacppFetch,
+  resolveLlamacppConfig,
+} from '../providers/llamacppTransport.js';
 import { runCodexTurn } from '../codex/chat.js';
 import { CodexUnavailableError } from '../codex/instanceManager.js';
 import { buildDateTimeContext, injectDateTimeIntoCurrentTurn } from '../dateTimeContext.js';
@@ -434,12 +438,20 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     const provider = getProviderForModel(effectiveModel);
     const upstreamModel = toUpstreamModelId(effectiveModel);
 
+    // D8 legacy guard: ids from the REMOVED LM Studio provider are rejected
+    // BEFORE any key lookup, settings read, or network call — they must never
+    // fall through to another provider.
+    if (isLegacyLmStudioModel(effectiveModel)) {
+      res.status(400).json({ error: REMOVED_LMSTUDIO_MESSAGE });
+      return;
+    }
+
     // API key for the resolved provider (decrypted server-side). The ChatGPT
     // (Codex) provider has no API key — its account state is validated in the
-    // codex branch below. LM Studio requests are valid WITHOUT a token too
-    // (local server; the optional bearer token only adds an Authorization).
+    // codex branch below. llama.cpp requests are valid WITHOUT an API key too
+    // (loopback server spawned without --api-key).
     const apiKey = getSettingValue(userId, provider.apiKeySetting);
-    if (!apiKey?.trim() && !isCodexModel(effectiveModel) && !isLmStudioModel(effectiveModel)) {
+    if (!apiKey?.trim() && !isCodexModel(effectiveModel) && !isLlamacppModel(effectiveModel)) {
       res.status(400).json({ error: `${provider.label} API key not configured. Please set your API key in Settings.` });
       return;
     }
@@ -703,17 +715,18 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         console.warn('[chat] Conversation title generation skipped:', err instanceof Error ? err.message : String(err));
       });
 
-    // Static providers fetch their configured endpoint; LM Studio resolves a
-    // per-user base URL (+ optional token) from settings/env at request time
-    // (the static chatCompletionsUrl stays '' for it). apiUrl stays defined so
-    // logs and error messages keep a concrete endpoint.
+    // Static providers fetch their configured endpoint; llama.cpp serves a
+    // loopback OpenAI-compatible API on the port resolved from settings/env,
+    // so apiUrl is rebuilt per request (the static chatCompletionsUrl stays ''
+    // for it). apiUrl stays defined so logs and error messages keep a concrete
+    // endpoint. No Authorization header is ever sent for llama.cpp.
     let apiUrl = provider.chatCompletionsUrl;
 
     let headers: Record<string, string> = provider.buildHeaders(apiKey);
-    if (isLmStudioModel(effectiveModel)) {
-      const lmStudioSettings = getLmStudioSettings(userId);
-      apiUrl = `${lmStudioSettings.baseUrl}/v1/chat/completions`;
-      headers = provider.buildHeaders(lmStudioSettings.token ?? '');
+    if (isLlamacppModel(effectiveModel)) {
+      const llamacppConfig = resolveLlamacppConfig(userId);
+      apiUrl = `http://127.0.0.1:${llamacppConfig.port}/v1/chat/completions`;
+      headers = provider.buildHeaders('');
     }
 
     let actualModelFromResponse: string | null = null;
@@ -725,27 +738,19 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       max_tokens: agent.max_tokens,
       stream: true,
     };
-    if (isLmStudioModel(effectiveModel)) {
-      // Local-model sampling default (§4): pin top_p; the agent's temperature
-      // override surface is untouched.
-      requestBody.top_p = resolveLmStudioSampling(agent.temperature, 'general').top_p;
+    if (isLlamacppModel(effectiveModel)) {
+      // Local-model sampling default (§6): pin top_p (Unsloth non-thinking
+      // rec); the agent's temperature override surface is untouched.
+      requestBody.top_p = LLAMACPP_SAMPLING_TOP_P;
     }
     if (openRouterProviderPreference) {
       requestBody.provider = openRouterProviderPreference;
     }
 
-    // LM Studio advisory tool gate (fail-open): tools are omitted ONLY when the
-    // catalog explicitly reports the model as not trained for tool use. The
-    // flag also guards the per-iteration re-attach inside the agentic loop so
-    // vetoed requests never regain tools on later iterations.
-    const lmstudioToolsOmitted =
-      isLmStudioModel(effectiveModel) &&
-      openRouterTools.length > 0 &&
-      (await getModelCapabilities(userId, upstreamModel)).trainedForToolUse === false;
-    if (lmstudioToolsOmitted) {
-      console.warn(`[chat] LM Studio model "${upstreamModel}" is not trained for tool use; omitting tools from the request.`);
-    }
-    if (openRouterTools.length > 0 && !lmstudioToolsOmitted) {
+    // Tools attach normally for every chat-completions provider — llama.cpp
+    // has no advisory capability gate; the old LM Studio tool-veto concept
+    // died with that provider.
+    if (openRouterTools.length > 0) {
       requestBody.tools = openRouterTools;
       requestBody.tool_choice = agent.tool_choice === 'none' ? 'none' : 'auto';
       requestBody.parallel_tool_calls = agent.parallel_tool_calls === 0 ? false : true;
@@ -792,6 +797,14 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       Object.assign(requestBody, buildDeepSeekThinking(reasoningEnabled, reasoningEffort));
     }
 
+    if (isLlamacppModel(effectiveModel)) {
+      // llama.cpp request-body extras (§6): a usage frame on stream close, and
+      // an explicit thinking toggle for the jinja chat template of Qwen3-class
+      // models (reasoning off ⇒ enable_thinking:false).
+      requestBody.stream_options = { include_usage: true };
+      requestBody.chat_template_kwargs = { enable_thinking: !reasoningEnabled };
+    }
+
     // Structured outputs (OpenRouter JSON Schema)
     // Accept both: short form { name, strict, schema } or full API form { type: "json_schema", json_schema: { name, strict, schema } }
     const structuredEnabled = !!agent.structured_output_enabled;
@@ -829,9 +842,9 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     }
 
     // Response healing is an OpenRouter plugin: codex has no chat-completions
-    // fetch and LM Studio serves response_format json_schema natively (the
+    // fetch and llama.cpp serves response_format json_schema natively (the
     // 'response-healing' field is meaningless upstream), so both are excluded.
-    const useResponseHealing = !!agent.response_healing_enabled && !!responseFormat && provider.id !== 'codex' && provider.id !== 'lmstudio';
+    const useResponseHealing = !!agent.response_healing_enabled && !!responseFormat && provider.id !== 'codex' && provider.id !== 'llamacpp';
     if (useResponseHealing) {
       requestBody.stream = false;
       const plugins = (requestBody.plugins as { id: string; pdf?: { engine: string } }[]) || [];
@@ -841,10 +854,10 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     }
 
     // Ultra effort ('max') is model-dependent on OpenRouter: send it as-is and
-    // retry once with 'xhigh' when the model rejects the value. LM Studio never
+    // retry once with 'xhigh' when the model rejects the value. llama.cpp never
     // receives a reasoning param, so a local model error merely mentioning
     // "max" must never trigger this retry.
-    const requestedMaxEffort = reasoningEnabled && reasoningEffort === 'max' && provider.id !== 'codex' && provider.id !== 'lmstudio';
+    const requestedMaxEffort = reasoningEnabled && reasoningEffort === 'max' && provider.id !== 'codex' && provider.id !== 'llamacpp';
     let maxEffortFallbackDone = false;
     const effortMaxRejected = (msg: string): boolean =>
       /unsupported value: ?'?max|'max' is not supported|max is not supported/i.test(msg);
@@ -887,7 +900,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         reasoningTokens,
         cachedTokens,
         toolCallsJson,
-        // Namespaced providers (deepseek, lmstudio) echo the bare upstream key,
+        // Namespaced providers (deepseek, llamacpp) echo the bare upstream key,
         // so history/UI keeps the NAMESPACED id (shared helper in providers).
         persistedModelId(provider.id, effectiveModel, actualModelFromResponse),
         processedByAgentId,
@@ -1275,25 +1288,28 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       }
     }
 
-    // LM Studio pre-flight: ensure the local model is loaded before the first
-    // token (only meaningful on the native /api/v1 surface). The call is
-    // bounded by LMSTUDIO_LOAD_TIMEOUT_MS inside ensureModelLoaded; SSE
-    // keepalive comments keep proxies from closing the idle connection while a
-    // cold load runs. Any non-loaded mode proceeds anyway — the OpenAI-
-    // compatible endpoint JIT-loads on demand.
-    if (provider.id === 'lmstudio') {
-      const lmProbe = await probeLmStudio(userId);
-      if (lmProbe.apiSurface === 'native-v1') {
-        const loadKeepalive = setInterval(() => {
-          if (!clientDisconnected && !res.writableEnded) res.write(': keepalive\n\n');
-        }, 15_000);
-        const loaded = await ensureModelLoaded(userId, upstreamModel);
-        clearInterval(loadKeepalive);
-        if (loaded.loaded) {
-          console.log(`[chat] LM Studio model ready (mode=${loaded.mode})`);
+    // llama.cpp pre-flight: make sure the requested model IS the loaded child
+    // (swap = stop → spawn happens inside ensureLlamacppRunning). SSE keepalive
+    // comments keep proxies from closing the idle connection while a cold
+    // 20+ GB load runs. The pre-flight NEVER throws and NEVER aborts the
+    // request — failures surface later at the fetch seam as descriptive 502s.
+    if (provider.id === 'llamacpp') {
+      const llamacppKeepalive = setInterval(() => {
+        if (!clientDisconnected && !res.writableEnded) res.write(': keepalive\n\n');
+      }, 15_000);
+      try {
+        const ensured = await ensureLlamacppRunning(userId, upstreamModel);
+        if (ensured.running) {
+          console.log(`[chat] llama.cpp model ready (mode=${ensured.mode})`);
         } else {
-          console.warn(`[chat] LM Studio pre-load skipped (mode=${loaded.mode}): ${loaded.error ?? 'unknown reason'} — continuing with JIT loading.`);
+          console.warn(`[chat] llama.cpp pre-flight failed (${ensured.error ?? 'unknown reason'}) — continuing; the request will surface a descriptive error at the fetch seam.`);
         }
+      } catch (preFlightErr) {
+        // belt-and-braces: ensureLlamacppRunning is total, but the keepalive
+        // must be cleared on EVERY path regardless.
+        console.warn('[chat] llama.cpp pre-flight threw (continuing):', preFlightErr instanceof Error ? preFlightErr.message : String(preFlightErr));
+      } finally {
+        clearInterval(llamacppKeepalive);
       }
     }
 
@@ -1313,7 +1329,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       fullContent = '';
       fullReasoning = '';
       requestBody.messages = messages;
-      if (openRouterTools.length > 0 && !lmstudioToolsOmitted) {
+      if (openRouterTools.length > 0) {
         requestBody.tools = openRouterTools;
         requestBody.tool_choice = agent.tool_choice === 'none' ? 'none' : 'auto';
         requestBody.parallel_tool_calls = agent.parallel_tool_calls === 0 ? false : true;
@@ -1321,7 +1337,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
 
       // Per-segment <think>…</think> state — instantiated EVERY iteration so
       // splitter state never leaks across agentic-loop segments.
-      const thinkSplitter = provider.id === 'lmstudio' ? createThinkStreamSplitter() : null;
+      const thinkSplitter = provider.id === 'llamacpp' ? createThinkStreamSplitter() : null;
       const emitThinkSplit = (split: ThinkSplitResult): void => {
         if (split.reasoning) {
           fullReasoning += split.reasoning;
@@ -1345,8 +1361,8 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
 
       let apiResponse: globalThis.Response;
       try {
-        apiResponse = provider.id === 'lmstudio'
-          ? await lmstudioFetch(userId, '/v1/chat/completions', {
+        apiResponse = provider.id === 'llamacpp'
+          ? await llamacppFetch(userId, '/v1/chat/completions', {
               method: 'POST',
               headers,
               body: JSON.stringify(requestBody),
@@ -1468,8 +1484,9 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
               }
               if (delta?.content) {
                 if (thinkSplitter) {
-                  // LM Studio: <think>…</think> bodies are reasoning; the rest
-                  // is content. Each part rides its existing SSE/draft path.
+                  // llama.cpp (Qwen3-class): <think>…</think> bodies are
+                  // reasoning; the rest is content. Each part rides its
+                  // existing SSE/draft path.
                   emitThinkSplit(thinkSplitter.push(delta.content));
                 } else {
                   fullContent += delta.content;

@@ -1,21 +1,26 @@
 import { Router, Response } from 'express';
+import { nanoid } from 'nanoid';
 import { AuthRequest } from '../middleware/auth.js';
+import db from '../db.js';
 import { getSettingValue } from './settings.js';
 import { normalizeOpenRouterEndpoints } from '../providerRouting.js';
-import { DEEPSEEK_BASE_URL, DEEPSEEK_CATALOG } from '../providers/index.js';
+import { DEEPSEEK_BASE_URL, DEEPSEEK_CATALOG, LLAMACPP_PREFIX } from '../providers/index.js';
 import {
-  DEFAULT_LMSTUDIO_PROFILE_ID,
-  normalizeCatalogEntry,
-  toCatalogModel,
-} from '../providers/lmstudio.js';
+  LLAMACPP_DEFAULT_KNOBS,
+  LLAMACPP_MODEL_OVERRIDES_ROW_SCHEMA,
+  mergeKnobLayers,
+  parseKnobs,
+} from '../providers/llamacpp.js';
 import {
-  buildComplianceReport,
-  ensureModelLoaded,
-  getLmStudioSettings,
-  lmstudioFetch,
-  probeLmStudio,
-  unloadLmStudioModel,
-} from '../providers/lmstudioTransport.js';
+  ensureLlamacppRunning,
+  getLlamacppStatus,
+  LLAMACPP_CAPABILITY_ERROR,
+  listLlamacppModels,
+  resolveLlamacppConfig,
+  stopLlamacpp,
+} from '../providers/llamacppTransport.js';
+import { getAgentCapabilities, sendLlamacppRequest } from '../agentRelay/registry.js';
+import type { BackendToAgentMessage } from '../agentRelay/protocol.js';
 import { listChatgptModels, CodexForbiddenError } from '../codex/instanceManager.js';
 
 const router = Router();
@@ -205,192 +210,302 @@ router.get('/deepseek/validate', async (req: AuthRequest, res: Response) => {
 });
 
 // ---------------------------------------------------------------------------
-// LM Studio (local server) — global-constraints §8 pinned endpoints.
-// All four routes are authenticated exactly like their neighbors and key every
-// transport call by the authenticated userId (tenant isolation).
+// llama.cpp (local llama-server via the paired local agent) — global-constraints
+// §5 pinned endpoints. All routes are authenticated exactly like their
+// neighbors, key every transport call by the authenticated userId (tenant
+// isolation), and gate on the agent's declared 'llamacpp' capability FIRST
+// (§2: an outdated agent gets the exact update message instead of a confusing
+// timeout). Route handlers NEVER throw.
+//
+// Frontend-facing literals chosen here for task 4 to mirror (server does not
+// own the frontend file): selector group id 'llamacpp-local'; status-changed
+// window event name 'llamacpp:status-changed'.
 // ---------------------------------------------------------------------------
 
-function requireLmStudioModel(body: unknown): string | null {
-  const model = (body as { model?: unknown } | null)?.model;
-  return typeof model === 'string' && model.trim() ? model.trim() : null;
+/** §2 frozen capability-gate rejection message lives in llamacppTransport. */
+
+/**
+ * Capability gate + auth guard for every llamacpp action route. Returns the
+ * authenticated userId, or has already responded (401 / 503) when null.
+ * GET /llamacpp/status deliberately does NOT pass through here: its §5
+ * contract is a never-throw payload that REPORTS capabilitySupported so users
+ * with outdated agents can see why nothing works.
+ */
+function llamacppGate(req: AuthRequest, res: Response): string | null {
+  const userId = req.userId;
+  if (!userId) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return null;
+  }
+  if (!(getAgentCapabilities(userId)?.includes('llamacpp') ?? false)) {
+    res.status(503).json({ error: LLAMACPP_CAPABILITY_ERROR });
+    return null;
+  }
+  return userId;
 }
 
-// GET /api/models/lmstudio - Live LM Studio catalog (cached ~30 s per user).
-const lmStudioModelsCache = new Map<string, { data: unknown[]; timestamp: number }>();
-const LMSTUDIO_MODELS_CACHE_TTL = 30_000;
+function upsertSetting(userId: string, key: string, value: string): void {
+  db.prepare(`
+    INSERT INTO settings (user_id, key, value) VALUES (?, ?, ?)
+    ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value
+  `).run(userId, key, value);
+}
 
-router.get('/lmstudio', async (req: AuthRequest, res: Response) => {
+// GET /api/models/llamacpp — scanned .gguf catalog (cached ~30 s per user,
+// invalidated by start/stop; a fresh scan re-populates it).
+const llamacppCatalogCache = new Map<string, { data: unknown[]; timestamp: number }>();
+const LLAMACPP_CATALOG_TTL_MS = 30_000;
+
+router.get('/llamacpp', async (req: AuthRequest, res: Response) => {
+  const userId = llamacppGate(req, res);
+  if (!userId) return;
   try {
-    const userId = req.userId;
-    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
-
-    const cached = lmStudioModelsCache.get(userId);
-    if (cached && Date.now() - cached.timestamp < LMSTUDIO_MODELS_CACHE_TTL) {
+    const cached = llamacppCatalogCache.get(userId);
+    if (cached && Date.now() - cached.timestamp < LLAMACPP_CATALOG_TTL_MS) {
       return res.json({ data: cached.data });
     }
 
-    const probe = await probeLmStudio(userId);
-    if (!probe.reachable || probe.transport === null) {
-      // Fail-soft contract (§8): the frontend hook treats this as "offline".
-      return res.status(503).json({ error: 'LM Studio is not reachable.' });
-    }
+    // Capability-missing / no-agent / scan failure all land here as throws ⇒
+    // fail-soft 503 {error} per §5.
+    const entries = await listLlamacppModels(userId);
+    const status = await getLlamacppStatus(userId);
+    const data = entries.map((entry) => ({
+      id: `${LLAMACPP_PREFIX}${entry.key}`,
+      name: entry.key,
+      description: '',
+      context_length: 0, // unknown locally; frontend tolerates zero metadata
+      pricing: { prompt: '0', completion: '0' }, // local: 'local' price column
+      path: entry.path,
+      ...(entry.sizeBytes !== undefined ? { size_bytes: entry.sizeBytes } : {}),
+      shards: entry.shards,
+      mtp_capable: entry.mtpCapable,
+      loaded: status.running && status.modelKey === entry.key,
+    }));
 
-    // §7 version detection: 0.4.x serves the rich native catalog; ≤0.3.x only
-    // exposes the OpenAI-compatible list. normalizeCatalogEntry tolerates both.
-    const catalogPath = probe.apiSurface === 'native-v1' ? '/api/v1/models' : '/v1/models';
-    const response = await lmstudioFetch(userId, catalogPath, { timeoutMs: 10_000 });
-    if (!response.ok) {
-      const detail = await response.text().catch(() => '');
-      return res.status(503).json({
-        error:
-          `Failed to fetch LM Studio models (${response.status})` +
-          (detail ? `: ${detail.slice(0, 300)}` : ''),
-      });
-    }
-    const json = (await response.json().catch(() => null)) as {
-      models?: unknown[];
-      data?: unknown[];
-    } | null;
-    const rawModels = Array.isArray(json?.models) ? json.models : Array.isArray(json?.data) ? json.data : [];
-    const models = rawModels
-      .filter((entry): entry is Record<string, unknown> => entry !== null && typeof entry === 'object')
-      .map((entry) => toCatalogModel(normalizeCatalogEntry(entry)));
-
-    lmStudioModelsCache.set(userId, { data: models, timestamp: Date.now() });
-    return res.json({ data: models });
+    llamacppCatalogCache.set(userId, { data, timestamp: Date.now() });
+    return res.json({ data });
   } catch (err) {
-    console.error('Error fetching LM Studio models:', err);
-    return res
-      .status(503)
-      .json({ error: err instanceof Error ? err.message : 'Failed to reach LM Studio' });
+    console.error('Error scanning llama.cpp models:', err);
+    return res.status(503).json({
+      error: err instanceof Error ? err.message : 'Failed to scan the llama.cpp models directory.',
+    });
   }
 });
 
-// GET /api/models/lmstudio/status - Connection/transport status for the UI.
-// Never throws: unreachable is a valid 200 payload.
-router.get('/lmstudio/status', async (req: AuthRequest, res: Response) => {
+// GET /api/models/llamacpp/status - never-throw §5 payload; capability state is
+// REPORTED (capabilitySupported) rather than gated so old agents get a usable answer.
+router.get('/llamacpp/status', async (req: AuthRequest, res: Response) => {
   const userId = req.userId;
   if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
   try {
-    const probe = await probeLmStudio(userId, { force: true });
-    const settings = getLmStudioSettings(userId);
-    return res.json({
-      reachable: probe.reachable,
-      transport: probe.transport,
-      apiSurface: probe.apiSurface,
-      agentConnected: probe.agentConnected,
-      baseUrl: settings.baseUrl,
-      profile: settings.profileId,
-    });
+    return res.json(await getLlamacppStatus(userId));
   } catch (err) {
-    console.error('Error probing LM Studio status:', err);
+    console.error('Error building llama.cpp status:', err);
     return res.json({
-      reachable: false,
-      transport: null,
-      apiSurface: null,
       agentConnected: false,
-      baseUrl: 'http://127.0.0.1:1234', // §9 default; settings were unreadable
-      profile: DEFAULT_LMSTUDIO_PROFILE_ID,
+      capabilitySupported: false,
+      running: false,
+      pid: null,
+      modelPath: null,
+      modelKey: null,
+      port: null,
+      transport: null,
+      healthy: null,
+      startedAt: null,
+      lastExitCode: null,
+      argv: null,
+      mtpActive: false,
     });
   }
 });
 
-// POST /api/models/lmstudio/load - Pre-load a model with the ACTIVE profile.
-router.post('/lmstudio/load', async (req: AuthRequest, res: Response) => {
+// POST /api/models/llamacpp/start — swap-then-spawn-then-health-wait (≥120 s
+// budget inside ensureLlamacppRunning). Request-level overrides merge LAST but
+// are NOT persisted (precedence request > model > global > default).
+router.post('/llamacpp/start', async (req: AuthRequest, res: Response) => {
+  const userId = llamacppGate(req, res);
+  if (!userId) return;
   try {
-    const userId = req.userId;
-    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
-
-    const model = requireLmStudioModel(req.body);
+    const body = (req.body ?? {}) as { model?: unknown; overrides?: unknown };
+    const model = typeof body.model === 'string' ? body.model.trim() : '';
     if (!model) {
-      return res.status(400).json({ error: 'model must be a non-empty string' });
+      return res.status(400).json({ error: 'model must be a non-empty string (the stripped llamacpp key)' });
+    }
+    if (body.overrides !== undefined && (typeof body.overrides !== 'object' || body.overrides === null || Array.isArray(body.overrides))) {
+      return res.status(400).json({ error: 'overrides must be an object when provided' });
+    }
+    let requestOverrides: Record<string, unknown> | undefined;
+    if (body.overrides !== undefined) {
+      const parsed = parseKnobs(body.overrides);
+      if (!parsed.ok) {
+        return res.status(400).json({ error: `Invalid overrides: ${parsed.error}` });
+      }
+      requestOverrides = parsed.knobs;
     }
 
-    const result = await ensureModelLoaded(userId, model);
-    if (result.loaded && (result.mode === 'loaded' || result.mode === 'already')) {
-      // §8 ok payload; instance/load_config are surfaced when the transport
-      // provides them (EnsureLoadedResult carries none — fields stay omitted).
-      return res.json({ ok: true });
-    }
-    if (result.mode === 'unsupported') {
-      // ≤0.3.x has no REST load surface: explain the degradation + JIT fallback.
-      return res.status(400).json({
-        error: `${result.error ?? 'REST load unavailable.'} JIT loading will be used instead.`,
+    // Model-not-found is a client error (400); distinguish it from spawn /
+    // health failures (502) before handing off to the transport.
+    let entries;
+    try {
+      entries = await listLlamacppModels(userId);
+    } catch (err) {
+      return res.status(503).json({
+        error: err instanceof Error ? err.message : 'Failed to scan the llama.cpp models directory.',
       });
     }
-    if (result.mode === 'jit-fallback') {
-      // Not pre-loadable (absent from the native catalog); do not claim success.
-      return res.status(400).json({
-        error: `${result.error ?? 'REST load unavailable.'} JIT loading will be used instead.`,
-      });
+    if (!entries.some((entry) => entry.key === model)) {
+      return res.status(400).json({ error: `Model "${model}" was not found in the scanned llama.cpp models directory.` });
     }
-    return res.status(502).json({ error: result.error ?? 'Failed to load model in LM Studio' });
+
+    const startedAt = Date.now();
+    const result = await ensureLlamacppRunning(
+      userId,
+      model,
+      requestOverrides ? { overrides: requestOverrides } : {},
+    );
+    const waitedMs = Date.now() - startedAt;
+    if (
+      result.running
+      && typeof result.pid === 'number'
+      && typeof result.port === 'number'
+      && Array.isArray(result.argv)
+    ) {
+      llamacppCatalogCache.delete(userId); // §5 cache invalidation (loaded flags)
+      return res.json({ ok: true, pid: result.pid, port: result.port, argv: result.argv, waitedMs });
+    }
+    return res.status(502).json({ error: result.error ?? 'Failed to start llama-server.' });
   } catch (err) {
-    console.error('Error loading LM Studio model:', err);
-    return res
-      .status(502)
-      .json({ error: err instanceof Error ? err.message : 'Failed to load model in LM Studio' });
+    console.error('Error starting llama-server:', err);
+    return res.status(502).json({
+      error: err instanceof Error ? err.message : 'Failed to start llama-server.',
+    });
   }
 });
 
-// POST /api/models/lmstudio/compliance - Active profile vs live load config.
-router.post('/lmstudio/compliance', async (req: AuthRequest, res: Response) => {
+// POST /api/models/llamacpp/stop — FROZEN §5 envelope; idempotent ('not-running'
+// is success). Failure ⇒ 502 {error}; state truth lives in /status either way.
+router.post('/llamacpp/stop', async (req: AuthRequest, res: Response) => {
+  const userId = llamacppGate(req, res);
+  if (!userId) return;
   try {
-    const userId = req.userId;
-    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
-
-    const model = requireLmStudioModel(req.body);
-    if (!model) {
-      return res.status(400).json({ error: 'model must be a non-empty string' });
+    const result = await stopLlamacpp(userId);
+    if (result.ok) {
+      llamacppCatalogCache.delete(userId); // §5 cache invalidation (loaded flags)
+      return res.json({ ok: true, status: result.status });
     }
-
-    // Total per task-3: degraded surfaces keep ok:true with met:null knobs +
-    // apiSurface so the UI can explain WHY compliance is unobservable.
-    const report = await buildComplianceReport(userId, model);
-    return res.json(report);
+    return res.status(502).json({ error: result.error ?? 'Failed to stop llama-server.' });
   } catch (err) {
-    console.error('Error building LM Studio compliance report:', err);
-    return res
-      .status(500)
-      .json({ error: err instanceof Error ? err.message : 'Failed to build compliance report' });
+    console.error('Error stopping llama-server:', err);
+    return res.status(502).json({
+      error: err instanceof Error ? err.message : 'Failed to stop llama-server.',
+    });
   }
 });
 
-// POST /api/models/lmstudio/unload - Eject all live instances of one model (§11).
-router.post('/lmstudio/unload', async (req: AuthRequest, res: Response) => {
+// GET /api/models/llamacpp/config — effective config view (resolved scalars +
+// validated knob rows) for the settings UI/diagnostics.
+router.get('/llamacpp/config', async (req: AuthRequest, res: Response) => {
+  const userId = llamacppGate(req, res);
+  if (!userId) return;
   try {
-    const userId = req.userId;
-    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
-
-    const model = requireLmStudioModel(req.body);
-    if (!model) {
-      return res.status(400).json({ error: 'model must be a non-empty string' });
-    }
-
-    const result = await unloadLmStudioModel(userId, model);
-    if (result.status === 'unloaded' || result.status === 'not-loaded') {
-      // §11 frozen 200 envelope; 'not-loaded' is SUCCESS (fail-soft idempotency).
-      return res.json({
-        ok: true,
-        status: result.status,
-        instances_unloaded: result.instancesUnloaded ?? 0,
-      });
-    }
-    if (result.status === 'unsupported') {
-      // ≤0.3.x has no REST unload surface either.
-      return res
-        .status(400)
-        .json({ error: result.error ?? 'REST unload requires LM Studio 0.4.x.' });
-    }
-    return res
-      .status(502)
-      .json({ error: result.error ?? 'Failed to unload model in LM Studio' });
+    const config = resolveLlamacppConfig(userId);
+    return res.json({
+      ok: true,
+      exePath: config.exePath,
+      modelsDir: config.modelsDir,
+      port: config.port,
+      idleUnloadMinutes: config.idleUnloadMinutes,
+      defaults: config.knobs,
+      overrides: config.overrides,
+    });
   } catch (err) {
-    console.error('Error unloading LM Studio model:', err);
-    return res
-      .status(502)
-      .json({ error: err instanceof Error ? err.message : 'Failed to unload model in LM Studio' });
+    console.error('Error reading llama.cpp config:', err);
+    return res.status(500).json({ error: 'Failed to read the llama.cpp configuration.' });
+  }
+});
+
+// POST /api/models/llamacpp/config — zod-validated persistence with key-level
+// errors; each provided section replaces its whole settings row (omitted
+// sections are untouched).
+router.post('/llamacpp/config', async (req: AuthRequest, res: Response) => {
+  const userId = llamacppGate(req, res);
+  if (!userId) return;
+  try {
+    const body = (req.body ?? {}) as { defaults?: unknown; overrides?: unknown };
+    if (body.defaults === undefined && body.overrides === undefined) {
+      return res.status(400).json({ error: 'Provide at least one of: defaults, overrides' });
+    }
+    if (body.defaults !== undefined && (typeof body.defaults !== 'object' || body.defaults === null || Array.isArray(body.defaults))) {
+      return res.status(400).json({ error: 'defaults must be an object when provided' });
+    }
+    if (body.overrides !== undefined && (typeof body.overrides !== 'object' || body.overrides === null || Array.isArray(body.overrides))) {
+      return res.status(400).json({ error: 'overrides must be an object keyed by model name when provided' });
+    }
+
+    let defaultsRow: string | null = null;
+    if (body.defaults !== undefined) {
+      const parsed = parseKnobs(body.defaults);
+      if (!parsed.ok) {
+        // parseKnobs errors read like "ctx: Expected number" — key-level detail.
+        return res.status(400).json({ error: `defaults.${parsed.error}` });
+      }
+      // Persist the FULL canonical bag (⊕ saved layer) so the row always parses standalone.
+      defaultsRow = JSON.stringify(mergeKnobLayers(LLAMACPP_DEFAULT_KNOBS, parsed.knobs));
+    }
+    let overridesRow: string | null = null;
+    if (body.overrides !== undefined) {
+      const parsed = LLAMACPP_MODEL_OVERRIDES_ROW_SCHEMA.safeParse(body.overrides);
+      if (!parsed.success) {
+        const issue = parsed.error.issues[0];
+        const where = issue && issue.path.length > 0 ? issue.path.join('.') : '(root)';
+        return res.status(400).json({ error: `Invalid overrides at "${where}": ${issue?.message ?? 'schema mismatch'}` });
+      }
+      overridesRow = JSON.stringify(parsed.data);
+    }
+
+    if (defaultsRow !== null) upsertSetting(userId, 'llamacpp_load_defaults', defaultsRow);
+    if (overridesRow !== null) upsertSetting(userId, 'llamacpp_model_overrides', overridesRow);
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('Error saving llama.cpp config:', err);
+    return res.status(500).json({ error: 'Failed to save the llama.cpp configuration.' });
+  }
+});
+
+// GET /api/models/llamacpp/logs?maxBytes=8192 — bounded tail of the tracked
+// child's merged stdout+stderr. Fail-soft: ANY failure degrades to the empty
+// envelope instead of erroring the log viewer.
+const LLAMACPP_LOGS_DEFAULT_MAX_BYTES = 8192;
+const LLAMACPP_LOGS_TIMEOUT_MS = 10_000;
+
+router.get('/llamacpp/logs', async (req: AuthRequest, res: Response) => {
+  const userId = llamacppGate(req, res);
+  if (!userId) return;
+  try {
+    const requested = Number(req.query.maxBytes ?? LLAMACPP_LOGS_DEFAULT_MAX_BYTES);
+    // Clamp into the protocol's 1..65536 range; non-numeric falls to the default.
+    const maxBytes = Number.isInteger(requested) && requested >= 1
+      ? Math.min(requested, 65_536)
+      : LLAMACPP_LOGS_DEFAULT_MAX_BYTES;
+
+    const status = await getLlamacppStatus(userId);
+    if (!status.running) {
+      return res.json({ ok: true, text: '', truncated: false });
+    }
+    const response = await sendLlamacppRequest<{ ok: boolean; text?: string; truncated?: boolean; error?: string }>(
+      userId,
+      { type: 'llamacpp_logs_request', requestId: `llamacpp_${nanoid()}`, maxBytes } as BackendToAgentMessage & { requestId: string },
+      LLAMACPP_LOGS_TIMEOUT_MS,
+    );
+    if (!response.ok) {
+      console.warn(`[models] llama.cpp logs unavailable: ${response.error ?? 'unknown error'}`);
+      return res.json({ ok: true, text: '', truncated: false });
+    }
+    return res.json({ ok: true, text: response.text ?? '', truncated: response.truncated ?? false });
+  } catch (err) {
+    console.warn('[models] llama.cpp logs fetch failed (fail-soft):', err instanceof Error ? err.message : String(err));
+    return res.json({ ok: true, text: '', truncated: false });
   }
 });
 
