@@ -111,6 +111,78 @@ function main(): void {
     console.log('malformed file-op frames still rejected: OK');
   }
 
+  // http_proxy_request — hand-mirrored from global-constraints.md §5.
+  {
+    const full = parseBackendMessage(
+      JSON.stringify({
+        type: 'http_proxy_request',
+        requestId: 'px-1',
+        url: 'http://127.0.0.1:1234/v1/models',
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer t' },
+        body: '{"prompt":"hi"}',
+        timeoutMs: 1000,
+      })
+    ) as any;
+    assert.ok(full, 'http_proxy_request (full) must not be null');
+    assert.equal(full.type, 'http_proxy_request');
+    assert.equal(full.requestId, 'px-1');
+    assert.equal(full.url, 'http://127.0.0.1:1234/v1/models');
+    assert.equal(full.method, 'GET');
+    assert.deepEqual(full.headers, { 'Content-Type': 'application/json', Authorization: 'Bearer t' });
+    assert.equal(full.body, '{"prompt":"hi"}');
+    assert.equal(full.timeoutMs, 1000);
+
+    const minimal = parseBackendMessage(
+      JSON.stringify({ type: 'http_proxy_request', requestId: 'px-2', url: 'http://localhost:1234/x', method: 'POST', headers: {}, timeoutMs: 5 })
+    ) as any;
+    assert.ok(minimal, 'http_proxy_request (body omitted) must be accepted');
+    assert.equal(minimal.body, null, 'omitted body must normalize to null');
+    assert.equal(minimal.method, 'POST');
+
+    const explicitNull = parseBackendMessage(
+      JSON.stringify({ type: 'http_proxy_request', requestId: 'px-3', url: 'http://127.0.0.1:1/x', method: 'GET', headers: {}, body: null, timeoutMs: 5 })
+    ) as any;
+    assert.ok(explicitNull, 'explicit null body must be accepted');
+
+    const malformed = [
+      { type: 'http_proxy_request', requestId: 'px-4', method: 'DELETE', headers: {}, body: null, timeoutMs: 5 }, // bad method
+      { type: 'http_proxy_request', requestId: 'px-5', headers: {}, body: null, timeoutMs: 5 }, // missing url
+      { type: 'http_proxy_request', requestId: 'px-6', url: 'http://127.0.0.1:1/x', method: 'GET', headers: {}, body: null, timeoutMs: 0 }, // timeoutMs <= 0
+      { type: 'http_proxy_request', requestId: 'px-7', url: 'http://127.0.0.1:1/x', method: 'GET', headers: {}, body: null, timeoutMs: -3 },
+      { type: 'http_proxy_request', requestId: 'px-8', url: 'http://127.0.0.1:1/x', method: 'GET', body: null, timeoutMs: 5 }, // missing headers
+      { type: 'http_proxy_request', requestId: 'px-9', url: 'http://127.0.0.1:1/x', method: 'GET', headers: [], body: null, timeoutMs: 5 }, // array headers
+      {
+        type: 'http_proxy_request',
+        requestId: 'px-10',
+        url: 'http://127.0.0.1:1/x',
+        method: 'GET',
+        headers: { A: 42 },
+        body: null,
+        timeoutMs: 5,
+      }, // non-string header value
+      { type: 'http_proxy_request', requestId: 'px-11', url: 'http://127.0.0.1:1/x', method: 'GET', headers: {}, body: 42, timeoutMs: 5 }, // bad body
+    ];
+    for (const [index, frame] of malformed.entries()) {
+      assert.equal(parseBackendMessage(JSON.stringify(frame)), null, `malformed http_proxy_request variant ${index} must be rejected`);
+    }
+    console.log('http_proxy_request: parsed (full/minimal/null-body) + malformed rejected: OK');
+  }
+
+  // http_proxy_cancel
+  {
+    const parsed = parseBackendMessage(JSON.stringify({ type: 'http_proxy_cancel', requestId: 'px-c1' })) as any;
+    assert.ok(parsed, 'http_proxy_cancel must not be null');
+    assert.equal(parsed.type, 'http_proxy_cancel');
+    assert.equal(parsed.requestId, 'px-c1');
+    assert.equal(
+      parseBackendMessage(JSON.stringify({ type: 'http_proxy_cancel' })),
+      null,
+      'cancel without requestId must be rejected'
+    );
+    console.log('http_proxy_cancel: parsed + malformed rejected: OK');
+  }
+
   console.log('\ntransport: all parseBackendMessage file-op tests passed');
 }
 

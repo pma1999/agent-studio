@@ -11,17 +11,19 @@
  *   - OpenRouter models keep their native ids: `anthropic/claude-3.5-sonnet`, `openrouter/auto`.
  *   - DeepSeek-direct models use the `deepseek:` prefix: `deepseek:deepseek-v4-flash`.
  *   - ChatGPT (Codex app-server) models use the `codex:` prefix: `codex:gpt-5.1-codex`.
+ *   - LM Studio (local server) models use the `lmstudio:` prefix: `lmstudio:qwen/qwen3-coder-30b`.
  *
  * `resolveProviderId` decides routing; `toUpstreamModelId` strips the prefix
  * before the id is sent upstream. The colon cleanly disambiguates from
  * OpenRouter's own `deepseek/...` slugs.
  */
 
-export type ProviderId = 'openrouter' | 'deepseek' | 'codex';
+export type ProviderId = 'openrouter' | 'deepseek' | 'codex' | 'lmstudio';
 
 export const DEEPSEEK_PREFIX = 'deepseek:';
 export const DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 export const CODEX_PREFIX = 'codex:';
+export const LMSTUDIO_PREFIX = 'lmstudio:';
 
 export interface ProviderConfig {
   id: ProviderId;
@@ -93,16 +95,40 @@ const CODEX_CONFIG: ProviderConfig = {
   supportsJsonSchema: true,
 };
 
+/**
+ * LM Studio — a user-run local OpenAI-compatible server. The endpoint is
+ * per-user (settings/env), so chatCompletionsUrl is deliberately empty here
+ * and resolved at request time; it must never be treated as a static URL.
+ * Requests WITHOUT a token are valid (local servers usually need none) — the
+ * optional bearer token is stored under `lmstudio_api_token`.
+ */
+const LMSTUDIO_CONFIG: ProviderConfig = {
+  id: 'lmstudio',
+  label: 'LM Studio (Local)',
+  chatCompletionsUrl: '', // resolved per-user from settings; never a static URL
+  apiKeySetting: 'lmstudio_api_token',
+  buildHeaders: (token) => ({
+    'Content-Type': 'application/json',
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  }),
+  supportsProviderRouting: false,
+  supportsPlugins: false,
+  supportsReasoningParam: false,
+  supportsJsonSchema: true,
+};
+
 const CONFIGS: Record<ProviderId, ProviderConfig> = {
   openrouter: OPENROUTER_CONFIG,
   deepseek: DEEPSEEK_CONFIG,
   codex: CODEX_CONFIG,
+  lmstudio: LMSTUDIO_CONFIG,
 };
 
 /** Returns the provider that should serve a given namespaced model id. */
 export function resolveProviderId(modelId: string | null | undefined): ProviderId {
   if (typeof modelId === 'string' && modelId.startsWith(DEEPSEEK_PREFIX)) return 'deepseek';
   if (typeof modelId === 'string' && modelId.startsWith(CODEX_PREFIX)) return 'codex';
+  if (typeof modelId === 'string' && modelId.startsWith(LMSTUDIO_PREFIX)) return 'lmstudio';
   return 'openrouter';
 }
 
@@ -110,12 +136,18 @@ export function resolveProviderId(modelId: string | null | undefined): ProviderI
 export function toUpstreamModelId(modelId: string): string {
   if (modelId.startsWith(DEEPSEEK_PREFIX)) return modelId.slice(DEEPSEEK_PREFIX.length);
   if (modelId.startsWith(CODEX_PREFIX)) return modelId.slice(CODEX_PREFIX.length);
+  if (modelId.startsWith(LMSTUDIO_PREFIX)) return modelId.slice(LMSTUDIO_PREFIX.length);
   return modelId;
 }
 
 /** True when the model id targets the ChatGPT (Codex app-server) provider. */
 export function isCodexModel(modelId: string | null | undefined): boolean {
   return resolveProviderId(modelId) === 'codex';
+}
+
+/** True when the model id targets a local LM Studio server. */
+export function isLmStudioModel(modelId: string | null | undefined): boolean {
+  return resolveProviderId(modelId) === 'lmstudio';
 }
 
 export function getProviderConfig(id: ProviderId): ProviderConfig {
@@ -134,6 +166,25 @@ export function getProviderForModel(modelId: string | null | undefined): Provide
  */
 export function assistantReasoningField(id: ProviderId): 'reasoning' | 'reasoning_content' {
   return id === 'deepseek' ? 'reasoning_content' : 'reasoning';
+}
+
+/**
+ * Model id to persist on `messages.model` / draft rows for a completed turn.
+ *
+ * Namespaced providers whose APIs echo the bare key back in the response
+ * (`parsed.model`) must keep the NAMESPACED effective id — trusting the echo
+ * would drop the scheme prefix from history. That applies to DeepSeek-direct
+ * and to lmstudio (local servers echo the stripped key). Every other provider
+ * records the model the upstream actually served (OpenRouter may route to a
+ * variant), falling back to the requested id when nothing was echoed.
+ */
+export function persistedModelId(
+  providerId: ProviderId,
+  effectiveModel: string,
+  actualModelFromResponse: string | null,
+): string {
+  if (providerId === 'deepseek' || providerId === 'lmstudio') return effectiveModel;
+  return actualModelFromResponse ?? effectiveModel;
 }
 
 /**

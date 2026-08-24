@@ -675,6 +675,7 @@ export const modelsApi = {
   ),
   deepseek: () => request<{ data: OpenRouterModel[] }>('/models/deepseek'),
   codex: () => request<{ data: OpenRouterModel[] }>('/models/codex'),
+  lmstudio: () => request<{ data: LmStudioModel[] }>('/models/lmstudio'),
 };
 
 // ChatGPT (Codex app-server) provider
@@ -724,6 +725,76 @@ export interface DeepSeekValidateResult {
 
 export const deepseekApi = {
   validate: () => request<DeepSeekValidateResult>('/models/deepseek/validate'),
+};
+
+// LM Studio (local provider) — response types pinned field-for-field to
+// plans/lmstudio-local-provider/global-constraints.md §8. Do not invent fields;
+// consumers must tolerate their absence (optional chaining everywhere).
+export type LmStudioProfileId = 'rapido' | 'equilibrado' | 'contexto_grande';
+
+/** Catalog entry (`GET /api/models/lmstudio`); `id` is namespaced (`lmstudio:<key>`). */
+export interface LmStudioModel extends OpenRouterModel {
+  quantization?: string | null;
+  loaded?: boolean;
+  trained_for_tool_use?: boolean | null;
+}
+
+export interface LmStudioStatus {
+  reachable: boolean;
+  transport: 'direct' | 'relay' | null;
+  apiSurface: 'native-v1' | 'openai-only' | null;
+  agentConnected: boolean;
+  baseUrl: string;
+  profile: LmStudioProfileId;
+}
+
+export interface LmStudioLoadResult {
+  ok: boolean;
+  instance_id?: string;
+  status?: string;
+  load_config?: unknown;
+}
+
+export interface LmStudioComplianceKnob {
+  key: string;
+  label: string;
+  expected: string;
+  actual: string | null;
+  /** true met / false unmet / null not observable live. */
+  met: boolean | null;
+  how: 'rest' | 'gui' | 'sdk-script';
+  guidance?: string;
+}
+
+export interface LmStudioComplianceResult {
+  ok: boolean;
+  profile: { id: string; label: string };
+  apiSurface: LmStudioStatus['apiSurface'];
+  knobs: LmStudioComplianceKnob[];
+}
+
+/** §11 unload envelope; 'not-loaded' is SUCCESS (fail-soft idempotency). */
+export interface LmStudioUnloadResult {
+  ok: boolean;
+  status: 'unloaded' | 'not-loaded';
+  instances_unloaded?: number;
+  error?: string;
+}
+
+export const lmstudioApi = {
+  status: () => request<LmStudioStatus>('/models/lmstudio/status'),
+  load: (model: string) => request<LmStudioLoadResult>('/models/lmstudio/load', {
+    method: 'POST',
+    body: JSON.stringify({ model }),
+  }),
+  compliance: (model: string) => request<LmStudioComplianceResult>('/models/lmstudio/compliance', {
+    method: 'POST',
+    body: JSON.stringify({ model }),
+  }),
+  unload: (model: string) => request<LmStudioUnloadResult>('/models/lmstudio/unload', {
+    method: 'POST',
+    body: JSON.stringify({ model }),
+  }),
 };
 
 // Settings

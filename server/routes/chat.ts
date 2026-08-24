@@ -32,7 +32,17 @@ import {
   computeDeepSeekCost,
   deepSeekCachedTokens,
   isCodexModel,
+  isLmStudioModel,
+  persistedModelId,
 } from '../providers/index.js';
+import { createThinkStreamSplitter, resolveLmStudioSampling, type ThinkSplitResult } from '../providers/lmstudio.js';
+import {
+  ensureModelLoaded,
+  getModelCapabilities,
+  getLmStudioSettings,
+  lmstudioFetch,
+  probeLmStudio,
+} from '../providers/lmstudioTransport.js';
 import { runCodexTurn } from '../codex/chat.js';
 import { CodexUnavailableError } from '../codex/instanceManager.js';
 import { buildDateTimeContext, injectDateTimeIntoCurrentTurn } from '../dateTimeContext.js';
@@ -426,9 +436,10 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
 
     // API key for the resolved provider (decrypted server-side). The ChatGPT
     // (Codex) provider has no API key — its account state is validated in the
-    // codex branch below.
+    // codex branch below. LM Studio requests are valid WITHOUT a token too
+    // (local server; the optional bearer token only adds an Authorization).
     const apiKey = getSettingValue(userId, provider.apiKeySetting);
-    if (!apiKey?.trim() && !isCodexModel(effectiveModel)) {
+    if (!apiKey?.trim() && !isCodexModel(effectiveModel) && !isLmStudioModel(effectiveModel)) {
       res.status(400).json({ error: `${provider.label} API key not configured. Please set your API key in Settings.` });
       return;
     }
@@ -692,9 +703,18 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         console.warn('[chat] Conversation title generation skipped:', err instanceof Error ? err.message : String(err));
       });
 
-    const apiUrl = provider.chatCompletionsUrl;
+    // Static providers fetch their configured endpoint; LM Studio resolves a
+    // per-user base URL (+ optional token) from settings/env at request time
+    // (the static chatCompletionsUrl stays '' for it). apiUrl stays defined so
+    // logs and error messages keep a concrete endpoint.
+    let apiUrl = provider.chatCompletionsUrl;
 
-    const headers: Record<string, string> = provider.buildHeaders(apiKey);
+    let headers: Record<string, string> = provider.buildHeaders(apiKey);
+    if (isLmStudioModel(effectiveModel)) {
+      const lmStudioSettings = getLmStudioSettings(userId);
+      apiUrl = `${lmStudioSettings.baseUrl}/v1/chat/completions`;
+      headers = provider.buildHeaders(lmStudioSettings.token ?? '');
+    }
 
     let actualModelFromResponse: string | null = null;
 
@@ -705,10 +725,27 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       max_tokens: agent.max_tokens,
       stream: true,
     };
+    if (isLmStudioModel(effectiveModel)) {
+      // Local-model sampling default (§4): pin top_p; the agent's temperature
+      // override surface is untouched.
+      requestBody.top_p = resolveLmStudioSampling(agent.temperature, 'general').top_p;
+    }
     if (openRouterProviderPreference) {
       requestBody.provider = openRouterProviderPreference;
     }
-    if (openRouterTools.length > 0) {
+
+    // LM Studio advisory tool gate (fail-open): tools are omitted ONLY when the
+    // catalog explicitly reports the model as not trained for tool use. The
+    // flag also guards the per-iteration re-attach inside the agentic loop so
+    // vetoed requests never regain tools on later iterations.
+    const lmstudioToolsOmitted =
+      isLmStudioModel(effectiveModel) &&
+      openRouterTools.length > 0 &&
+      (await getModelCapabilities(userId, upstreamModel)).trainedForToolUse === false;
+    if (lmstudioToolsOmitted) {
+      console.warn(`[chat] LM Studio model "${upstreamModel}" is not trained for tool use; omitting tools from the request.`);
+    }
+    if (openRouterTools.length > 0 && !lmstudioToolsOmitted) {
       requestBody.tools = openRouterTools;
       requestBody.tool_choice = agent.tool_choice === 'none' ? 'none' : 'auto';
       requestBody.parallel_tool_calls = agent.parallel_tool_calls === 0 ? false : true;
@@ -791,7 +828,10 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       }
     }
 
-    const useResponseHealing = !!agent.response_healing_enabled && !!responseFormat && provider.id !== 'codex';
+    // Response healing is an OpenRouter plugin: codex has no chat-completions
+    // fetch and LM Studio serves response_format json_schema natively (the
+    // 'response-healing' field is meaningless upstream), so both are excluded.
+    const useResponseHealing = !!agent.response_healing_enabled && !!responseFormat && provider.id !== 'codex' && provider.id !== 'lmstudio';
     if (useResponseHealing) {
       requestBody.stream = false;
       const plugins = (requestBody.plugins as { id: string; pdf?: { engine: string } }[]) || [];
@@ -801,8 +841,10 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     }
 
     // Ultra effort ('max') is model-dependent on OpenRouter: send it as-is and
-    // retry once with 'xhigh' when the model rejects the value.
-    const requestedMaxEffort = reasoningEnabled && reasoningEffort === 'max' && provider.id !== 'codex';
+    // retry once with 'xhigh' when the model rejects the value. LM Studio never
+    // receives a reasoning param, so a local model error merely mentioning
+    // "max" must never trigger this retry.
+    const requestedMaxEffort = reasoningEnabled && reasoningEffort === 'max' && provider.id !== 'codex' && provider.id !== 'lmstudio';
     let maxEffortFallbackDone = false;
     const effortMaxRejected = (msg: string): boolean =>
       /unsupported value: ?'?max|'max' is not supported|max is not supported/i.test(msg);
@@ -845,9 +887,9 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         reasoningTokens,
         cachedTokens,
         toolCallsJson,
-        // Keep the namespaced id for DeepSeek so history/UI shows DeepSeek-direct
-        // (the upstream response reports the bare upstream model name).
-        provider.id === 'deepseek' ? effectiveModel : (actualModelFromResponse ?? effectiveModel),
+        // Namespaced providers (deepseek, lmstudio) echo the bare upstream key,
+        // so history/UI keeps the NAMESPACED id (shared helper in providers).
+        persistedModelId(provider.id, effectiveModel, actualModelFromResponse),
         processedByAgentId,
         chainTailId,
         turnId,
@@ -923,7 +965,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         cost,
         reasoningTokens,
         cachedTokens,
-        provider.id === 'deepseek' ? effectiveModel : (actualModelFromResponse ?? effectiveModel),
+        persistedModelId(provider.id, effectiveModel, actualModelFromResponse),
         processedByAgentId,
         chainTailId,
         turnId,
@@ -973,7 +1015,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       const vals: Array<string | number | null> = [
         fullContent || '',
         fullReasoning || null,
-        provider.id === 'deepseek' ? effectiveModel : (actualModelFromResponse ?? effectiveModel),
+        persistedModelId(provider.id, effectiveModel, actualModelFromResponse),
         totalTokens,
         promptTokens,
         completionTokens,
@@ -1233,6 +1275,28 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       }
     }
 
+    // LM Studio pre-flight: ensure the local model is loaded before the first
+    // token (only meaningful on the native /api/v1 surface). The call is
+    // bounded by LMSTUDIO_LOAD_TIMEOUT_MS inside ensureModelLoaded; SSE
+    // keepalive comments keep proxies from closing the idle connection while a
+    // cold load runs. Any non-loaded mode proceeds anyway — the OpenAI-
+    // compatible endpoint JIT-loads on demand.
+    if (provider.id === 'lmstudio') {
+      const lmProbe = await probeLmStudio(userId);
+      if (lmProbe.apiSurface === 'native-v1') {
+        const loadKeepalive = setInterval(() => {
+          if (!clientDisconnected && !res.writableEnded) res.write(': keepalive\n\n');
+        }, 15_000);
+        const loaded = await ensureModelLoaded(userId, upstreamModel);
+        clearInterval(loadKeepalive);
+        if (loaded.loaded) {
+          console.log(`[chat] LM Studio model ready (mode=${loaded.mode})`);
+        } else {
+          console.warn(`[chat] LM Studio pre-load skipped (mode=${loaded.mode}): ${loaded.error ?? 'unknown reason'} — continuing with JIT loading.`);
+        }
+      }
+    }
+
     let iteration = 0;
     let lastFinishReason: string | null = null;
     let toolCallCount = 0;
@@ -1249,11 +1313,29 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       fullContent = '';
       fullReasoning = '';
       requestBody.messages = messages;
-      if (openRouterTools.length > 0) {
+      if (openRouterTools.length > 0 && !lmstudioToolsOmitted) {
         requestBody.tools = openRouterTools;
         requestBody.tool_choice = agent.tool_choice === 'none' ? 'none' : 'auto';
         requestBody.parallel_tool_calls = agent.parallel_tool_calls === 0 ? false : true;
       }
+
+      // Per-segment <think>…</think> state — instantiated EVERY iteration so
+      // splitter state never leaks across agentic-loop segments.
+      const thinkSplitter = provider.id === 'lmstudio' ? createThinkStreamSplitter() : null;
+      const emitThinkSplit = (split: ThinkSplitResult): void => {
+        if (split.reasoning) {
+          fullReasoning += split.reasoning;
+          ensureDraftRow();
+          flushDraft();
+          if (!clientDisconnected && !res.writableEnded) res.write(`data: ${JSON.stringify({ reasoning: split.reasoning })}\n\n`);
+        }
+        if (split.content) {
+          fullContent += split.content;
+          ensureDraftRow();
+          flushDraft();
+          if (!clientDisconnected && !res.writableEnded) res.write(`data: ${JSON.stringify({ content: split.content })}\n\n`);
+        }
+      };
 
       console.log(`[chat] Request iteration ${iteration + 1} to ${apiUrl} messages=${messages.length}`);
 
@@ -1263,12 +1345,19 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
 
       let apiResponse: globalThis.Response;
       try {
-        apiResponse = await fetch(apiUrl, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(requestBody),
-          signal: abortController!.signal,
-        });
+        apiResponse = provider.id === 'lmstudio'
+          ? await lmstudioFetch(userId, '/v1/chat/completions', {
+              method: 'POST',
+              headers,
+              body: JSON.stringify(requestBody),
+              signal: abortController!.signal,
+            })
+          : await fetch(apiUrl, {
+              method: 'POST',
+              headers,
+              body: JSON.stringify(requestBody),
+              signal: abortController!.signal,
+            });
         clearTimeout(fetchTimeout);
       } catch (fetchErr: unknown) {
         clearTimeout(fetchTimeout);
@@ -1378,10 +1467,16 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
                 if (!clientDisconnected && !res.writableEnded) res.write(`data: ${JSON.stringify({ reasoning: reasoningChunk })}\n\n`);
               }
               if (delta?.content) {
-                fullContent += delta.content;
-                ensureDraftRow();
-                flushDraft();
-                if (!clientDisconnected && !res.writableEnded) res.write(`data: ${JSON.stringify({ content: delta.content })}\n\n`);
+                if (thinkSplitter) {
+                  // LM Studio: <think>…</think> bodies are reasoning; the rest
+                  // is content. Each part rides its existing SSE/draft path.
+                  emitThinkSplit(thinkSplitter.push(delta.content));
+                } else {
+                  fullContent += delta.content;
+                  ensureDraftRow();
+                  flushDraft();
+                  if (!clientDisconnected && !res.writableEnded) res.write(`data: ${JSON.stringify({ content: delta.content })}\n\n`);
+                }
               }
 
               if (delta?.tool_calls) {
@@ -1442,6 +1537,11 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
           streamHadRealError = true;
         }
       }
+
+      // Stream ended: drain anything still buffered in the <think> splitter
+      // (e.g. an unterminated <think> tail is reasoning) so persistence, the
+      // reasoning-tool-call fallback parser, and finalize see complete text.
+      if (thinkSplitter) emitThinkSplit(thinkSplitter.flush());
 
       const finishReason = lastFinishReason;
 

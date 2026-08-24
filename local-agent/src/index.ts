@@ -14,9 +14,10 @@ import { createFileOpsExecutor, type FileOpsExecutor } from './fileOpsExecutor.j
 import { createSendFileExecutor, type SendFileExecutor } from './sendFileExecutor.js';
 import { createReceiveFileExecutor, type ReceiveFileExecutor } from './receiveFileExecutor.js';
 import { createMcpExecutor, type McpExecutor } from './mcpExecutor.js';
+import { createHttpProxyExecutor, type HttpProxyExecutor } from './httpProxyExecutor.js';
 import { createShellDetector } from './shellDetection.js';
 
-const AGENT_VERSION = '1.0.0';
+const AGENT_VERSION = '1.1.0';
 const DEFAULT_BACKEND_URL = 'http://localhost:3001';
 const INITIAL_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 30_000;
@@ -172,6 +173,7 @@ function dispatch(
   sendFileExecutor: SendFileExecutor,
   receiveFileExecutor: ReceiveFileExecutor,
   mcpExecutor: McpExecutor,
+  httpProxyExecutor: HttpProxyExecutor,
   onHelloAck: (agentId: string) => void
 ): void {
   switch (message.type) {
@@ -216,6 +218,12 @@ function dispatch(
       break;
     case 'mcp_message':
       mcpExecutor.handleMcpMessage(message);
+      break;
+    case 'http_proxy_request':
+      httpProxyExecutor.handleHttpProxyRequest(message);
+      break;
+    case 'http_proxy_cancel':
+      httpProxyExecutor.handleHttpProxyCancel(message.requestId);
       break;
   }
 }
@@ -270,6 +278,9 @@ async function main(): Promise<void> {
   const mcpExecutor = createMcpExecutor({
     send: (message) => transportHandle?.send(message),
   });
+  const httpProxyExecutor = createHttpProxyExecutor({
+    send: (message) => transportHandle?.send(message),
+  });
 
   let backoffMs = INITIAL_BACKOFF_MS;
   console.log(`[local-agent] connecting to ${config.backendUrl} ...`);
@@ -283,9 +294,18 @@ async function main(): Promise<void> {
         platform: process.platform,
         shell,
         onMessage: (message) => {
-          dispatch(message, executor, fileOpsExecutor, sendFileExecutor, receiveFileExecutor, mcpExecutor, () => {
-            backoffMs = INITIAL_BACKOFF_MS;
-          });
+          dispatch(
+            message,
+            executor,
+            fileOpsExecutor,
+            sendFileExecutor,
+            receiveFileExecutor,
+            mcpExecutor,
+            httpProxyExecutor,
+            () => {
+              backoffMs = INITIAL_BACKOFF_MS;
+            }
+          );
         },
         onClose: (reason) => {
           console.log(`[local-agent] disconnected: ${reason}`);
@@ -293,10 +313,11 @@ async function main(): Promise<void> {
           // ARC-04: the backend has already given up on every pending
           // request tied to this now-dead connection (rejected on its own
           // side in registry.ts); don't let the matching child processes
-          // (commands AND MCP servers) keep running locally with nothing
-          // left to report back to.
+          // (commands AND MCP servers) or in-flight proxied HTTP requests
+          // keep running locally with nothing left to report back to.
           executor.handleDisconnect();
           mcpExecutor.handleDisconnect();
+          httpProxyExecutor.handleDisconnect();
           resolve();
         },
       });

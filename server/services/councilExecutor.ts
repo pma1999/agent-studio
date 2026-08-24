@@ -28,6 +28,7 @@ import {
 } from '../providers/index.js';
 import { injectDateTimeIntoCurrentTurn } from '../dateTimeContext.js';
 import { runCodexTurn } from '../codex/chat.js';
+import { lmstudioFetch } from '../providers/lmstudioTransport.js';
 
 const MEMBER_TIMEOUT_MS = 240000; // 4 minutes per member
 const SYNTHESIS_TIMEOUT_MS = 240000; // 4 minutes for synthesis
@@ -138,15 +139,35 @@ export class CouncilExecutor {
   } {
     const provider = getProviderForModel(modelId);
     const apiKey = this.getApiKey(provider.id);
-    if (!apiKey?.trim()) {
+    // LM Studio requests are valid WITHOUT a token (local server); every other
+    // provider requires its key.
+    if (!apiKey?.trim() && provider.id !== 'lmstudio') {
       throw new Error(`${provider.label} API key not configured`);
     }
     return {
       url: provider.chatCompletionsUrl,
-      headers: provider.buildHeaders(apiKey),
+      headers: provider.buildHeaders(apiKey || ''),
       upstreamModel: toUpstreamModelId(modelId),
       provider,
     };
+  }
+
+  /**
+   * Upstream chat-completions seam for member/synthesizer/comparison calls:
+   * LM Studio rides its transport service (`lmstudioFetch` — settings-resolved
+   * base URL + direct/relay auto-select); every other provider keeps plain
+   * fetch against the static config URL.
+   */
+  private async fetchUpstream(
+    userId: string | undefined,
+    ep: ReturnType<CouncilExecutor['resolveEndpoint']>,
+    init: { method: 'POST'; headers: Record<string, string>; body: string; signal?: AbortSignal | null },
+  ): Promise<Response> {
+    if (ep.provider.id === 'lmstudio') {
+      if (!userId) throw new Error('LM Studio requires a user context');
+      return lmstudioFetch(userId, '/v1/chat/completions', init);
+    }
+    return fetch(ep.url, init);
   }
 
   async execute(options: CouncilExecutionOptions): Promise<CouncilResult> {
@@ -416,7 +437,7 @@ export class CouncilExecutor {
         throw new Error('Execution cancelled');
       }
 
-      const response = await fetch(ep.url, {
+      const response = await this.fetchUpstream(options.userId, ep, {
         method: 'POST',
         headers,
         body: JSON.stringify(requestBody),
@@ -708,7 +729,7 @@ export class CouncilExecutor {
       successfulResults
     );
 
-    const response = await fetch(ep.url, {
+    const response = await this.fetchUpstream(options.userId, ep, {
       method: 'POST',
       headers,
       body: JSON.stringify(requestBody),
@@ -894,7 +915,7 @@ export class CouncilExecutor {
       setTimeout(() => reject(new Error('Comparison extraction timeout')), COMPARISON_EXTRACTION_TIMEOUT_MS);
     });
 
-    const fetchPromise = fetch(ep.url, {
+    const fetchPromise = this.fetchUpstream(userId, ep, {
       method: 'POST',
       headers: ep.headers,
       body: JSON.stringify({

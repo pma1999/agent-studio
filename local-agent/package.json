@@ -11,7 +11,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/local-agent/src/index.js",
     "dev": "tsx src/index.ts",
-    "test": "tsx src/commandExecutor.test.ts && tsx src/fileOpsExecutor.test.ts && tsx src/sendFileExecutor.test.ts && tsx src/receiveFileExecutor.test.ts && tsx src/mcpExecutor.test.ts"
+    "test": "tsx src/commandExecutor.test.ts && tsx src/fileOpsExecutor.test.ts && tsx src/sendFileExecutor.test.ts && tsx src/receiveFileExecutor.test.ts && tsx src/mcpExecutor.test.ts && tsx src/httpProxyExecutor.test.ts && tsx src/transport.test.ts"
   },
   "dependencies": {
     "cross-spawn": "^7.0.6",

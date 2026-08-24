@@ -120,6 +120,22 @@ export const AgentToBackendMessageSchema = z.discriminatedUnion('type', [
     channelId: z.string(),
     exitCode: z.number().int().nullable(),
   }).strict(),
+  // Hand-mirrored by local-agent/src/transport.ts (global-constraints.md §5).
+  z.object({
+    type: z.literal('http_proxy_chunk'),
+    requestId: z.string(),
+    seq: z.number().int().nonnegative(),
+    text: z.string(),
+  }).strict(),
+  z.object({
+    type: z.literal('http_proxy_response'),
+    requestId: z.string(),
+    ok: z.boolean(),
+    status: z.number(),
+    contentType: z.string().optional(),
+    totalBytes: z.number().optional(),
+    error: z.string().optional(),
+  }).strict(),
 ]);
 
 export const BackendToAgentMessageSchema = z.discriminatedUnion('type', [
@@ -201,6 +217,17 @@ export const BackendToAgentMessageSchema = z.discriminatedUnion('type', [
     channelId: z.string(),
     payload: z.unknown(),
   }).strict(),
+  // Hand-mirrored by local-agent/src/transport.ts (global-constraints.md §5).
+  z.object({
+    type: z.literal('http_proxy_request'),
+    requestId: z.string(),
+    url: z.string(),
+    method: z.enum(['GET', 'POST']),
+    headers: z.record(z.string(), z.string()),
+    body: z.string().nullable(),
+    timeoutMs: z.number().int().positive(),
+  }).strict(),
+  z.object({ type: z.literal('http_proxy_cancel'), requestId: z.string() }).strict(),
 ]);
 
 export type AgentToBackendMessage = z.infer<typeof AgentToBackendMessageSchema>;

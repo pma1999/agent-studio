@@ -7,6 +7,10 @@ import {
   CODEX_DIRECT_GROUP,
   CODEX_ACCENT,
   isCodexModel,
+  LMSTUDIO_PREFIX,
+  LMSTUDIO_GROUP,
+  LMSTUDIO_ACCENT,
+  isLmStudioModel,
 } from './providers';
 
 export const FAVORITES_STORAGE_KEY = 'agent-studio:favorite-models';
@@ -19,6 +23,8 @@ export function getModelAuthor(id: string): string {
   if (isDeepSeekDirectModel(id)) return DEEPSEEK_DIRECT_GROUP;
   // ChatGPT (Codex) models (`codex:...`) group under their own label.
   if (isCodexModel(id)) return CODEX_DIRECT_GROUP;
+  // LM Studio local models (`lmstudio:...`) group under their own label.
+  if (isLmStudioModel(id)) return LMSTUDIO_GROUP;
   const slash = id.indexOf('/');
   return slash > 0 ? id.substring(0, slash) : 'other';
 }
@@ -27,6 +33,7 @@ export function getModelAuthor(id: string): string {
 export function formatModelId(modelId: string): string {
   if (modelId.startsWith(DEEPSEEK_PREFIX)) return modelId.slice(DEEPSEEK_PREFIX.length);
   if (modelId.startsWith(CODEX_PREFIX)) return modelId.slice(CODEX_PREFIX.length);
+  if (modelId.startsWith(LMSTUDIO_PREFIX)) return modelId.slice(LMSTUDIO_PREFIX.length);
   const parts = modelId.split('/');
   if (parts.length > 1) return parts[parts.length - 1];
   return modelId;
@@ -41,6 +48,7 @@ const AUTHOR_DISPLAY_NAMES: Record<string, string> = {
   deepseek: 'DeepSeek',
   [DEEPSEEK_DIRECT_GROUP]: 'DeepSeek · Direct',
   [CODEX_DIRECT_GROUP]: 'ChatGPT · Codex',
+  [LMSTUDIO_GROUP]: 'LM Studio · Local',
   microsoft: 'Microsoft',
   amazon: 'Amazon',
   cohere: 'Cohere',
@@ -62,6 +70,7 @@ const AUTHOR_COLORS: Record<string, string> = {
   deepseek: '#4f46e5',
   [DEEPSEEK_DIRECT_GROUP]: DEEPSEEK_ACCENT,
   [CODEX_DIRECT_GROUP]: CODEX_ACCENT,
+  [LMSTUDIO_GROUP]: LMSTUDIO_ACCENT,
   microsoft: '#00a4ef',
   amazon: '#ff9900',
   cohere: '#ff6b6b',
@@ -85,6 +94,8 @@ const PROVIDER_META: Record<string, ProviderMeta> = {
   openai: { name: 'OpenAI', color: '#7ab88f', iconName: 'sparkles', tier: 'premium' },
   google: { name: 'Google', color: '#8ba4d4', iconName: 'zap', tier: 'premium' },
   [DEEPSEEK_DIRECT_GROUP]: { name: 'DeepSeek · Direct', color: DEEPSEEK_ACCENT, iconName: 'brain', tier: 'premium' },
+  // Local models are free and their context can be unknown (0) — grouped as Economy.
+  [LMSTUDIO_GROUP]: { name: 'LM Studio · Local', color: LMSTUDIO_ACCENT, iconName: 'zap', tier: 'economy' },
   'meta-llama': { name: 'Meta', color: '#a78bfa', iconName: 'eye', tier: 'standard' },
   mistralai: { name: 'Mistral', color: '#f59e0b', iconName: 'zap', tier: 'standard' },
   cohere: { name: 'Cohere', color: '#ec4899', iconName: 'brain', tier: 'standard' },
@@ -134,6 +145,7 @@ export function formatContext(length: number): string {
 export const PROVIDER_PRIORITY = [
   DEEPSEEK_DIRECT_GROUP,
   CODEX_DIRECT_GROUP,
+  LMSTUDIO_GROUP,
   'openai',
   'anthropic',
   'google',

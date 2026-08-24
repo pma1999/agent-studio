@@ -25,6 +25,8 @@ type PendingRequest = {
   resolve: (result: any) => void;
   reject: (error: { error: string }) => void;
   onOutputChunk: (chunk: { stream: 'stdout' | 'stderr'; text: string }) => void;
+  onProxyChunk?: (text: string) => void;
+  cancelOnTimeout?: BackendToAgentMessage;
 };
 
 const connections = new Map<string, AgentConnection>();
@@ -61,7 +63,7 @@ function startTimeout(requestId: string, pending: PendingRequest): NodeJS.Timeou
     pendingRequests.delete(requestId);
     pending.reject({ error: 'local agent command timed out' });
     if (pending.connection.isConnected()) {
-      pending.connection.send({ type: 'command_cancel', requestId });
+      pending.connection.send(pending.cancelOnTimeout ?? { type: 'command_cancel', requestId });
     }
   }, pending.timeoutMs);
 }
@@ -87,6 +89,19 @@ function handleMessage(userId: string, connection: AgentConnection, message: Age
 
   if (message.type === 'command_output_chunk') {
     pending.onOutputChunk({ stream: message.stream, text: message.text });
+    return;
+  }
+
+  if (message.type === 'http_proxy_chunk') {
+    pending.onProxyChunk?.(message.text);
+    return;
+  }
+
+  if (message.type === 'http_proxy_response') {
+    clearTimeout(pending.timer);
+    pendingRequests.delete(message.requestId);
+    const { type: _type, requestId: _requestId, ...result } = message;
+    pending.resolve(result);
     return;
   }
 
@@ -236,4 +251,64 @@ export function cancelCommandRequest(userId: string, requestId: string): void {
   const pending = pendingRequests.get(requestId);
   if (!pending || pending.userId !== userId || !pending.connection.isConnected()) return;
   pending.connection.send({ type: 'command_cancel', requestId });
+}
+
+export type HttpProxyResult = {
+  ok: boolean;
+  status: number;
+  contentType?: string;
+  totalBytes?: number;
+  error?: string;
+};
+
+export function sendHttpProxyRequest(
+  userId: string,
+  requestId: string,
+  req: { url: string; method: 'GET' | 'POST'; headers: Record<string, string>; body: string | null; timeoutMs: number },
+  onResponseChunk: (text: string) => void,
+): Promise<HttpProxyResult> {
+  const connection = getAgentConnection(userId);
+  if (!connection) {
+    return Promise.reject({ error: 'local agent is not connected' });
+  }
+  if (pendingRequests.has(requestId)) {
+    return Promise.reject({ error: 'duplicate local agent request id' });
+  }
+
+  return new Promise<HttpProxyResult>((resolve, reject) => {
+    const pending: PendingRequest = {
+      userId,
+      connection,
+      timeoutMs: req.timeoutMs,
+      timer: undefined as unknown as NodeJS.Timeout,
+      resolve,
+      reject,
+      onOutputChunk: () => {},
+      onProxyChunk: onResponseChunk,
+      cancelOnTimeout: { type: 'http_proxy_cancel', requestId },
+    };
+    pending.timer = startTimeout(requestId, pending);
+    pendingRequests.set(requestId, pending);
+    try {
+      connection.send({
+        type: 'http_proxy_request',
+        requestId,
+        url: req.url,
+        method: req.method,
+        headers: req.headers,
+        body: req.body,
+        timeoutMs: req.timeoutMs,
+      });
+    } catch {
+      clearTimeout(pending.timer);
+      pendingRequests.delete(requestId);
+      reject({ error: 'local agent disconnected mid-command' });
+    }
+  });
+}
+
+export function cancelHttpProxyRequest(userId: string, requestId: string): void {
+  const pending = pendingRequests.get(requestId);
+  if (!pending || pending.userId !== userId || !pending.connection.isConnected()) return;
+  pending.connection.send({ type: 'http_proxy_cancel', requestId });
 }

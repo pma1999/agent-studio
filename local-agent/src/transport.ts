@@ -113,7 +113,19 @@ export type AgentToBackendMessage =
       error?: string;
     }
   | { type: 'mcp_message'; channelId: string; payload: unknown }
-  | { type: 'mcp_exited'; channelId: string; exitCode: number | null };
+  | { type: 'mcp_exited'; channelId: string; exitCode: number | null }
+  // Hand-mirrored from `server/agentRelay/protocol.ts` (global-constraints.md
+  // §5) — same sync obligation as every member above.
+  | { type: 'http_proxy_chunk'; requestId: string; seq: number; text: string }
+  | {
+      type: 'http_proxy_response';
+      requestId: string;
+      ok: boolean;
+      status: number;
+      contentType?: string;
+      totalBytes?: number;
+      error?: string;
+    };
 
 export type BackendToAgentMessage =
   | { type: 'hello_ack'; agentId: string }
@@ -149,7 +161,19 @@ export type BackendToAgentMessage =
       config: { command: string; args?: string[]; env?: Record<string, string>; cwd?: string };
     }
   | { type: 'mcp_stop_request'; requestId: string; channelId: string }
-  | { type: 'mcp_message'; channelId: string; payload: unknown };
+  | { type: 'mcp_message'; channelId: string; payload: unknown }
+  // Hand-mirrored from `server/agentRelay/protocol.ts` (global-constraints.md
+  // §5) — same sync obligation as every member above.
+  | {
+      type: 'http_proxy_request';
+      requestId: string;
+      url: string;
+      method: 'GET' | 'POST';
+      headers: Record<string, string>;
+      body: string | null;
+      timeoutMs: number;
+    }
+  | { type: 'http_proxy_cancel'; requestId: string };
 
 export type CommandRequestMessage = Extract<BackendToAgentMessage, { type: 'command_request' }>;
 export type ReadFileRequestMessage = Extract<BackendToAgentMessage, { type: 'read_file_request' }>;
@@ -162,6 +186,8 @@ export type ReceiveFileRequestMessage = Extract<BackendToAgentMessage, { type: '
 export type MCPStartRequestMessage = Extract<BackendToAgentMessage, { type: 'mcp_start_request' }>;
 export type MCPStopRequestMessage = Extract<BackendToAgentMessage, { type: 'mcp_stop_request' }>;
 export type MCPMessageMessage = Extract<BackendToAgentMessage, { type: 'mcp_message' }>;
+export type HttpProxyRequestMessage = Extract<BackendToAgentMessage, { type: 'http_proxy_request' }>;
+export type HttpProxyCancelMessage = Extract<BackendToAgentMessage, { type: 'http_proxy_cancel' }>;
 
 /** Matches the 20s heartbeat / 60s backend-timeout pair fixed in `global-constraints.md`. */
 export const HEARTBEAT_INTERVAL_MS = 20_000;
@@ -173,6 +199,15 @@ export const HEARTBEAT_INTERVAL_MS = 20_000;
  * authoritative validator for what it accepts from us, and we only need to
  * defend ourselves against a malformed/unexpected frame here.
  */
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.values(value).every((v) => typeof v === 'string')
+  );
+}
+
 export function parseBackendMessage(raw: string): BackendToAgentMessage | null {
   let json: unknown;
   try {
@@ -350,6 +385,33 @@ export function parseBackendMessage(raw: string): BackendToAgentMessage | null {
         return { type: 'mcp_message', channelId: message.channelId, payload: message.payload };
       }
       return null;
+    case 'http_proxy_request': {
+      if (
+        typeof message.requestId === 'string' &&
+        typeof message.url === 'string' &&
+        (message.method === 'GET' || message.method === 'POST') &&
+        isStringRecord(message.headers) &&
+        (message.body === undefined || message.body === null || typeof message.body === 'string') &&
+        typeof message.timeoutMs === 'number' &&
+        Number.isFinite(message.timeoutMs) &&
+        message.timeoutMs > 0
+      ) {
+        return {
+          type: 'http_proxy_request',
+          requestId: message.requestId,
+          url: message.url,
+          method: message.method,
+          headers: message.headers,
+          body: message.body === undefined ? null : message.body,
+          timeoutMs: message.timeoutMs,
+        };
+      }
+      return null;
+    }
+    case 'http_proxy_cancel':
+      return typeof message.requestId === 'string'
+        ? { type: 'http_proxy_cancel', requestId: message.requestId }
+        : null;
     default:
       return null;
   }
