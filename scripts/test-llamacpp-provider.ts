@@ -16,13 +16,22 @@
  *    mmproj tolerated input; case-insensitive matching; summed sizeBytes;
  *    mtp_capable via case-insensitive 'mtp' in name;
  * 6. legacy lmstudio guard + frozen message string;
- * 7. sampling pin constant (§6 top_p = 0.8);
+ * 7. §3 Increment 2 presets + sampling row: canonical value-exactness, schema
+ *    reject matrix (unknown preset id/knob keys, bounds), sampling defaults +
+ *    repair-to-canonical equality, resolution-order-v2 merge unit
+ *    (override > preset > global), argv regression for all three canonical
+ *    presets over an MTP-capable and a plain fixture name;
  * 8. think splitter copy sanity (tag split across deltas).
  */
 import assert from 'node:assert/strict';
 import {
+  LLAMACPP_ACTIVE_PRESET_DEFAULT,
+  LLAMACPP_CANONICAL_PRESETS,
   LLAMACPP_DEFAULT_KNOBS,
-  LLAMACPP_SAMPLING_TOP_P,
+  LLAMACPP_PRESET_IDS,
+  LLAMACPP_PRESETS_ROW_SCHEMA,
+  LLAMACPP_SAMPLING_DEFAULTS,
+  LLAMACPP_SAMPLING_ROW_SCHEMA,
   REMOVED_LMSTUDIO_MESSAGE,
   buildLlamaServerArgv,
   collapseShardEntries,
@@ -502,11 +511,134 @@ ok('REMOVED_LMSTUDIO_MESSAGE matches the frozen §1 rejection text verbatim', ()
 });
 
 // ---------------------------------------------------------------------------
-// 7. Sampling pin (§6)
+// 7. §3 Increment 2 presets + sampling row (canonical values are FROZEN)
 // ---------------------------------------------------------------------------
 
-ok('LLAMACPP_SAMPLING_TOP_P pins top_p at 0.8 (§6 Unsloth non-thinking recommendation)', () => {
-  assert.equal(LLAMACPP_SAMPLING_TOP_P, 0.8);
+ok('LLAMACPP_CANONICAL_PRESETS matches the §3 Increment 2 literals EXACTLY', () => {
+  assert.deepEqual(
+    { ...LLAMACPP_CANONICAL_PRESETS },
+    {
+      rapido: { reasoning_budget: 1024, mtp: 2 }, // MTP ON
+      equilibrado: { reasoning_budget: 2048, mtp: 0 }, // MTP OFF
+      profundo: { reasoning_budget: 4096, mtp: 0 }, // MTP OFF
+    },
+  );
+  assert.equal(LLAMACPP_ACTIVE_PRESET_DEFAULT, 'equilibrado');
+  assert.deepEqual([...LLAMACPP_PRESET_IDS], ['rapido', 'equilibrado', 'profundo']);
+});
+
+ok('preset/sampling canonical constants are frozen', () => {
+  assert.equal(Object.isFrozen(LLAMACPP_CANONICAL_PRESETS), true);
+  for (const id of LLAMACPP_PRESET_IDS) {
+    assert.equal(Object.isFrozen(LLAMACPP_CANONICAL_PRESETS[id]), true, `slot ${id} frozen`);
+  }
+  assert.equal(Object.isFrozen(LLAMACPP_SAMPLING_DEFAULTS), true);
+});
+
+ok('LLAMACPP_PRESETS_ROW_SCHEMA accepts strict partial knob bags in every slot', () => {
+  const okRow = LLAMACPP_PRESETS_ROW_SCHEMA.safeParse({
+    rapido: { reasoning_budget: -1 }, // unlimited affordance maps to -1
+    equilibrado: {},
+    profundo: { ctx: 4096, cache_type_k: 'q4_0' },
+  });
+  assert.equal(okRow.success, true);
+});
+
+ok('LLAMACPP_PRESETS_ROW_SCHEMA rejects unknown preset ids, unknown knobs, out-of-bounds knobs, extra roots', () => {
+  const base = () => ({ rapido: {}, equilibrado: {}, profundo: {} });
+  const cases: Array<[string, unknown]> = [
+    ['unknown preset id key', { ...base(), veloz: {} }],
+    ['unknown knob key inside a preset', { ...base(), rapido: { bogus_knob: 1 } }],
+    ['reasoning_budget < -1', { ...base(), equilibrado: { reasoning_budget: -2 } }],
+    ['mtp > 5', { ...base(), profundo: { mtp: 6 } }],
+    ['extra root key', { ...base(), extraRoot: {} }],
+  ];
+  for (const [name, row] of cases) {
+    const parsed = LLAMACPP_PRESETS_ROW_SCHEMA.safeParse(row);
+    assert.equal(parsed.success, false, `expected reject: ${name}`);
+  }
+});
+
+ok('LLAMACPP_SAMPLING_DEFAULTS matches the §3 Increment 2 literals EXACTLY', () => {
+  assert.deepEqual(
+    { ...LLAMACPP_SAMPLING_DEFAULTS },
+    { temp: 0.6, top_p: 0.95, top_k: 20, min_p: 0, repeat_penalty: 1 },
+  );
+});
+
+ok('LLAMACPP_SAMPLING_ROW_SCHEMA bounds reject matrix + canonical equality', () => {
+  const canonical = { temp: 0.6, top_p: 0.95, top_k: 20, min_p: 0, repeat_penalty: 1 };
+  assert.equal(LLAMACPP_SAMPLING_ROW_SCHEMA.safeParse(canonical).success, true);
+  const rejects: Array<[string, unknown]> = [
+    ['temp above 2', { ...canonical, temp: 2.01 }],
+    ['temp below 0', { ...canonical, temp: -0.01 }],
+    ['top_p above 1', { ...canonical, top_p: 1.01 }],
+    ['top_p below 0', { ...canonical, top_p: -0.01 }],
+    ['top_k above 128', { ...canonical, top_k: 129 }],
+    ['top_k non-integer', { ...canonical, top_k: 20.5 }],
+    ['min_p above 1', { ...canonical, min_p: 1.01 }],
+    ['repeat_penalty above 2', { ...canonical, repeat_penalty: 2.01 }],
+    ['unknown key', { ...canonical, temperature: 0.6 }], // wire name must NOT leak into the row
+  ];
+  for (const [name, row] of rejects) {
+    const parsed = LLAMACPP_SAMPLING_ROW_SCHEMA.safeParse(row);
+    assert.equal(parsed.success, false, `expected reject: ${name}`);
+  }
+});
+
+ok('resolution order v2 unit: override beats preset beats global knob-by-knob', () => {
+  const globalLayer = { threads: 4, ctx: 4096, mtp: 3 }; // llamacpp_load_defaults partial
+  const presetLayer = { ...LLAMACPP_CANONICAL_PRESETS.rapido }; // {reasoning_budget:1024, mtp:2}
+  const modelOverride = { ctx: 16384, reasoning_budget: 512 }; // per-model partial
+  const merged = mergeKnobLayers({ ...LLAMACPP_DEFAULT_KNOBS }, globalLayer, presetLayer, modelOverride);
+  // canonical defaults untouched by every layer:
+  assert.equal(merged.n_cpu_moe, 35);
+  assert.equal(merged.cache_type_k, 'q8_0');
+  assert.equal(merged.device, 'cuda');
+  // global beats default:
+  assert.equal(merged.threads, 4);
+  // preset beats global (rapido.mtp=2 over the global mtp=3 AND default mtp=2):
+  assert.equal(merged.mtp, 2);
+  // override beats preset beats default on reasoning_budget:
+  assert.equal(merged.reasoning_budget, 512, 'model override beats preset');
+  // override beats preset beats global on ctx:
+  assert.equal(merged.ctx, 16384);
+});
+
+ok('argv regression: three canonical presets over MTP-capable and plain fixture names', () => {
+  const fixtures = [
+    { name: 'Tiny-MTP', path: 'D:\\m\\Tiny-MTP.gguf', mtpCapable: true },
+    { name: 'Plain-Model', path: 'D:\\m\\Plain-Model.gguf', mtpCapable: false },
+  ];
+  const expectedBudgets: Record<string, number> = {
+    rapido: 1024,
+    equilibrado: 2048,
+    profundo: 4096,
+  };
+  for (const preset of LLAMACPP_PRESET_IDS) {
+    const knobs = mergeKnobLayers({ ...LLAMACPP_DEFAULT_KNOBS }, { ...LLAMACPP_CANONICAL_PRESETS[preset] });
+    for (const fixture of fixtures) {
+      const { args } = buildLlamaServerArgv({
+        modelPath: fixture.path,
+        modelKey: fixture.name,
+        port: 8712,
+        knobs,
+        mtpCapable: fixture.mtpCapable,
+      });
+      const budgetAt = args.indexOf('--reasoning-budget');
+      assert.notEqual(budgetAt, -1, `${preset}/${fixture.name}: budget flag present`);
+      assert.equal(args[budgetAt + 1], String(expectedBudgets[preset]), `${preset} budget renders exactly`);
+      const emitsSpec = args.includes('--spec-type');
+      if (preset === 'rapido' && fixture.mtpCapable) {
+        // rapido: mtp=2, parallel_slots stays 1 ⇒ spec pair ONLY when capable.
+        assert.equal(emitsSpec, true, `rapido/${fixture.name}: spec pair emitted`);
+        assert.equal(args[args.indexOf('--spec-type') + 1], 'draft-mtp');
+        assert.equal(args[args.indexOf('--spec-draft-n-max') + 1], '2');
+      } else {
+        assert.equal(emitsSpec, false, `${preset}/${fixture.name}: no spec pair`);
+      }
+    }
+  }
 });
 
 // ---------------------------------------------------------------------------

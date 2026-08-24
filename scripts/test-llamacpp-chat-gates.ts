@@ -10,10 +10,14 @@
  *   of providers/index.ts, chat.ts and councilExecutor.ts stay byte-stable
  *   across the task-3 edits (global-constraints.md §9).
  *
+ *   PRE assertions (--phase=pre only) — the OLD §6 sampling pin (Increment 1
+ *   baseline): green on the pristine tree, gone once the §10 seam lands.
+ *
  *   SEAM assertions (--phase=post or default) — each enumerated global-
- *   constraints.md §6 touchpoint exists post-edit, the old lmstudio identifiers
- *   are gone from the three consumers, and the pure registry exports behave
- *   per §1 (D8 legacy guard included).
+ *   constraints.md §6 touchpoint exists post-edit, the Increment 2 sampling
+ *   seam (shared resolveLlamacppSampling in chat.ts AND councilExecutor) is
+ *   present, LLAMACPP_SAMPLING_TOP_P is absent, and the pure registry exports
+ *   behave per §1 (D8 legacy guard included).
  *
  * Usage:
  *   npx tsx scripts/test-llamacpp-chat-gates.ts --phase=pre   # baseline on the PRISTINE tree
@@ -181,11 +185,22 @@ function seamChecks(): void {
   ok('(C3) apiUrl override builds the resolved loopback endpoint', () => {
     assert.match(chatSource, /apiUrl = `http:\/\/127\.0\.0\.1:\$\{llamacppConfig\.port\}\/v1\/chat\/completions`;/);
   });
-  ok('(C4) top_p pinned to LLAMACPP_SAMPLING_TOP_P behind the llamacpp gate', () => {
+  ok('(C4) llamacpp branch injects the resolved llamacpp_sampling row via the shared §10 resolver', () => {
+    assert.match(chatSource, /const s = resolveLlamacppSampling\(userId\);/);
     assert.match(
       chatSource,
-      /if \(isLlamacppModel\(effectiveModel\)\) \{\s*(?:\/\/[^\n]*\n\s*)*requestBody\.top_p = LLAMACPP_SAMPLING_TOP_P;/,
+      /requestBody\.temperature = s\.temp;\s*\n\s*requestBody\.top_p = s\.top_p;\s*\n\s*requestBody\.top_k = s\.top_k;\s*\n\s*requestBody\.min_p = s\.min_p;\s*\n\s*requestBody\.repeat_penalty = s\.repeat_penalty;/,
     );
+    // The seam must sit INSIDE the llamacpp-only branch, after the generic
+    // `temperature: agent.temperature` literal stays for every other provider.
+    assert.match(chatSource, /temperature: agent\.temperature,/);
+    const genericAt = chatSource.indexOf('temperature: agent.temperature,');
+    const seamAt = chatSource.indexOf('resolveLlamacppSampling(userId)');
+    assert.ok(seamAt > genericAt, 'sampling seam must come after the generic request-body literal');
+  });
+  ok('(C4b) OLD pin deleted: LLAMACPP_SAMPLING_TOP_P and top_p=0.8 are gone from chat.ts', () => {
+    assert.doesNotMatch(chatSource, /LLAMACPP_SAMPLING_TOP_P/);
+    assert.doesNotMatch(chatSource, /requestBody\.top_p = 0\.8/);
   });
   ok('(C5) stream_options include_usage + chat_template_kwargs extras present', () => {
     assert.match(chatSource, /requestBody\.stream_options = \{ include_usage: true \};/);
@@ -261,6 +276,14 @@ function seamChecks(): void {
     const fetchAt = councilSource.indexOf('return llamacppFetch(');
     assert.ok(gateAt > armAt, 'capability gate must sit inside the llamacpp arm');
     assert.ok(fetchAt > gateAt, 'capability gate must precede the llamacppFetch call');
+  });
+  ok('(M6) council member AND synthesis bodies sample via the SAME shared §10 resolver', () => {
+    const uses = councilSource.match(/resolveLlamacppSampling\(options\.userId\)/g) ?? [];
+    assert.ok(uses.length >= 2, `expected >=2 shared-resolver uses (member + synthesis), found ${uses.length}`);
+  });
+  ok('(M7) non-llamacpp council arms KEEP their fixed temp-0.7 body shape', () => {
+    const fixed = councilSource.match(/temperature: 0\.7,/g) ?? [];
+    assert.ok(fixed.length >= 2, `expected >=2 fixed-temperature literals preserved, found ${fixed.length}`);
   });
 
   // ---- chatCouncil.ts route-layer pre-flight (FF-T3-02, R8 consumer) --------
@@ -343,7 +366,10 @@ async function dynamicSmoke(): Promise<void> {
   } = await import('../server/providers/index.js');
   const {
     createThinkStreamSplitter,
-    LLAMACPP_SAMPLING_TOP_P,
+    LLAMACPP_ACTIVE_PRESET_DEFAULT,
+    LLAMACPP_CANONICAL_PRESETS,
+    LLAMACPP_PRESET_IDS,
+    LLAMACPP_SAMPLING_DEFAULTS,
     REMOVED_LMSTUDIO_MESSAGE,
   } = await import('../server/providers/llamacpp.js');
 
@@ -368,12 +394,25 @@ async function dynamicSmoke(): Promise<void> {
     assert.equal(getProviderConfig('llamacpp').label, 'llama.cpp (Local)');
     assert.equal(getProviderConfig('lmstudio').label, 'LM Studio (removed)');
   });
-  ok('(D6) frozen constants: legacy message + sampling pin', () => {
+  ok('(D6) frozen constants: legacy message + §3 canonical presets/sampling row', () => {
     assert.equal(
       REMOVED_LMSTUDIO_MESSAGE,
       'This conversation uses the removed LM Studio provider (lmstudio:<id>). Pick an llamacpp: model in the model selector.',
     );
-    assert.equal(LLAMACPP_SAMPLING_TOP_P, 0.8);
+    assert.deepEqual([...LLAMACPP_PRESET_IDS], ['rapido', 'equilibrado', 'profundo']);
+    assert.equal(LLAMACPP_ACTIVE_PRESET_DEFAULT, 'equilibrado');
+    assert.deepEqual(
+      { ...LLAMACPP_CANONICAL_PRESETS },
+      {
+        rapido: { reasoning_budget: 1024, mtp: 2 },
+        equilibrado: { reasoning_budget: 2048, mtp: 0 },
+        profundo: { reasoning_budget: 4096, mtp: 0 },
+      },
+    );
+    assert.deepEqual(
+      { ...LLAMACPP_SAMPLING_DEFAULTS },
+      { temp: 0.6, top_p: 0.95, top_k: 20, min_p: 0, repeat_penalty: 1 },
+    );
   });
   ok('(D7) think splitter still behaves (copied pure module)', () => {
     const splitter = createThinkStreamSplitter();
@@ -384,8 +423,29 @@ async function dynamicSmoke(): Promise<void> {
   });
 }
 
+// ===========================================================================
+// PRE-phase — the OLD §6 seams on the PRISTINE tree (green BEFORE the
+// Increment 2 chat.ts/councilExecutor edits land). Runs ONLY with --phase=pre.
+// ===========================================================================
+function preChecks(): void {
+  ok('(C4-PRE) OLD top_p pin present behind the llamacpp gate (pristine tree)', () => {
+    assert.match(
+      chatSource,
+      /if \(isLlamacppModel\(effectiveModel\)\) \{\s*(?:\/\/[^\n]*\n\s*)*requestBody\.top_p = LLAMACPP_SAMPLING_TOP_P;/,
+    );
+  });
+  ok('(C4-PRE2) chat.ts still imports LLAMACPP_SAMPLING_TOP_P (pristine tree)', () => {
+    assert.match(chatSource, /LLAMACPP_SAMPLING_TOP_P/);
+  });
+  ok('(C4-PRE3) councilExecutor has NO shared-sampling resolver yet (pristine tree)', () => {
+    assert.doesNotMatch(councilSource, /resolveLlamacppSampling/);
+  });
+}
+
 stabilityChecks();
-if (phase !== 'pre') {
+if (phase === 'pre') {
+  preChecks();
+} else {
   seamChecks();
   await dynamicSmoke();
 }

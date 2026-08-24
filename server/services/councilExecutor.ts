@@ -30,7 +30,8 @@ import { injectDateTimeIntoCurrentTurn } from '../dateTimeContext.js';
 import { runCodexTurn } from '../codex/chat.js';
 import { getAgentCapabilities } from '../agentRelay/registry.js';
 import { isLegacyLmStudioModel, REMOVED_LMSTUDIO_MESSAGE } from '../providers/llamacpp.js';
-import { llamacppFetch, LLAMACPP_CAPABILITY_ERROR } from '../providers/llamacppTransport.js';
+
+import { llamacppFetch, LLAMACPP_CAPABILITY_ERROR, resolveLlamacppSampling } from '../providers/llamacppTransport.js';
 
 const MEMBER_TIMEOUT_MS = 240000; // 4 minutes per member
 const SYNTHESIS_TIMEOUT_MS = 240000; // 4 minutes for synthesis
@@ -414,6 +415,17 @@ export class CouncilExecutor {
       max_tokens: 4096,
       stream: true,
     };
+    // §10: council members share the chat sampling resolver — the fixed
+    // temp 0.7 above is superseded for llamacpp arms by the persisted
+    // llamacpp_sampling row (single source, no asymmetric branch).
+    if (ep.provider.id === 'llamacpp' && options.userId) {
+      const s = resolveLlamacppSampling(options.userId);
+      requestBody.temperature = s.temp;
+      requestBody.top_p = s.top_p;
+      requestBody.top_k = s.top_k;
+      requestBody.min_p = s.min_p;
+      requestBody.repeat_penalty = s.repeat_penalty;
+    }
     const providerRouting: ProviderRoutingConfig = ep.provider.supportsProviderRouting
       ? resolveProviderRouting(parseProviderRoutingConfig(options.memberProviderRouting?.[modelId]))
       : { mode: 'auto' };
@@ -726,6 +738,16 @@ export class CouncilExecutor {
       max_tokens: 4096,
       stream: true,
     };
+    // §10: the synthesizer arm rides the SAME shared sampling resolver when it
+    // targets an llamacpp model (fixed temp 0.7 stays for every other arm).
+    if (ep.provider.id === 'llamacpp' && options.userId) {
+      const s = resolveLlamacppSampling(options.userId);
+      requestBody.temperature = s.temp;
+      requestBody.top_p = s.top_p;
+      requestBody.top_k = s.top_k;
+      requestBody.min_p = s.min_p;
+      requestBody.repeat_penalty = s.repeat_penalty;
+    }
     if (ep.provider.supportsProviderRouting) {
       const providerPreference = buildOpenRouterProviderPreference(providerRouting);
       if (providerPreference) {

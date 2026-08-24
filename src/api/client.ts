@@ -732,6 +732,8 @@ export const deepseekApi = {
 // llama.cpp (local provider via the paired local agent) — response types
 // pinned field-for-field to plans/llamacpp-local-provider/global-constraints.md
 // §5. Do not invent fields; consumers must tolerate their absence.
+import type { LlamaCppKnobOverrides } from '../utils/llamacppKnobs';
+
 export interface LlamaCppModel extends OpenRouterModel {
   /** Absolute path of the representative (first-shard) .gguf file. */
   path: string;
@@ -757,6 +759,8 @@ export interface LlamaCppStatus {
   lastExitCode: number | null;
   argv: string[] | null;
   mtpActive: boolean;
+  /** §5 Increment 2: running child's argv differs from what persisted settings would spawn now. */
+  pendingRestart: boolean;
 }
 
 /** §5 start envelope — resolves only after the /health wait (≥120 s budget). */
@@ -774,9 +778,30 @@ export interface LlamaCppStopResult {
   status: 'stopped' | 'not-running';
 }
 
+/** §3 Increment 2 preset ids (order drives the Settings card order). */
+export type LlamaCppPresetId = 'rapido' | 'equilibrado' | 'profundo';
+
+/** §3 Increment 2 sampling row — request-body extras; never touches argv. */
+export interface LlamaCppSampling {
+  temp: number;
+  top_p: number;
+  top_k: number;
+  min_p: number;
+  repeat_penalty: number;
+}
+
+/** Persisted `llamacpp_presets` row — one partial knob-bag slot per preset id. */
+export type LlamaCppPresetsRow = Record<LlamaCppPresetId, LlamaCppKnobOverrides>;
+
 export interface LlamaCppConfigPayload {
   defaults?: object;
   overrides?: Record<string, object>;
+  /** §5 Increment 2 sections: each provided section is validated independently
+   * with KEY-LEVEL 400 detail (e.g. `sampling.top_p: …`); at least one section
+   * is required server-side. */
+  presets?: Partial<LlamaCppPresetsRow>;
+  activePreset?: LlamaCppPresetId;
+  sampling?: Partial<LlamaCppSampling>;
 }
 
 /** §5 logs envelope — text never exceeds maxBytes. */

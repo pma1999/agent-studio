@@ -38,6 +38,7 @@ const { registerAgentConnection, unregisterAgentConnection, getAgentCapabilities
   '../server/agentRelay/registry.js'
 );
 const {
+  computePendingRestart,
   ensureLlamacppRunning,
   getLlamacppStatus,
   getLastLaunchArgs,
@@ -47,13 +48,17 @@ const {
   probeLlamacpp,
   PROBE_CACHE_TTL_MS,
   resolveLlamacppConfig,
+  resolveLlamacppSampling,
   runLlamacppIdleSweep,
   stopLlamacpp,
 } = await import('../server/providers/llamacppTransport.js');
 const {
   buildLlamaServerArgv,
   collapseShardEntries,
+  LLAMACPP_ACTIVE_PRESET_DEFAULT,
+  LLAMACPP_CANONICAL_PRESETS,
   LLAMACPP_DEFAULT_KNOBS,
+  LLAMACPP_SAMPLING_DEFAULTS,
   mergeKnobLayers,
 } = await import('../server/providers/llamacpp.js');
 type AgentToBackendMessage = import('../server/agentRelay/protocol.js').AgentToBackendMessage;
@@ -403,6 +408,92 @@ try {
     setEnv('LLAMACPP_MODELS_DIR', undefined);
     setEnv('LLAMACPP_PORT', undefined);
     setEnv('LLAMACPP_IDLE_UNLOAD_MINUTES', undefined);
+  }
+
+  // -------------------------------------------------------------------------
+  console.log('1b. §3 Increment 2 resolver v2: presets row, active pointer, sampling row');
+  {
+    // (a) Absent rows resolve to the CANONICAL values silently (fresh user).
+    {
+      const userId = 't2-presets-fresh';
+      insertUser(userId);
+      let config: ReturnType<typeof resolveLlamacppConfig> | null = null;
+      let sampling: unknown = null;
+      const warnings = captureWarnings(() => {
+        config = resolveLlamacppConfig(userId);
+        sampling = resolveLlamacppSampling(userId);
+      });
+      assert.deepEqual(config!.presets, LLAMACPP_CANONICAL_PRESETS, 'absent presets row ⇒ canonical');
+      assert.equal(config!.activePreset, LLAMACPP_ACTIVE_PRESET_DEFAULT, 'absent pointer ⇒ equilibrado');
+      assert.deepEqual(config!.sampling, LLAMACPP_SAMPLING_DEFAULTS, 'absent sampling row ⇒ canonical');
+      assert.deepEqual(sampling, LLAMACPP_SAMPLING_DEFAULTS);
+      assert.deepEqual(warnings, [], 'fresh user resolves with NO repair warnings');
+    }
+
+    // (b) Stored rows are honored as-stored (partials pass through), exactly
+    // as the config route persists them (CANONICAL ⊕ provided ⇒ all 3 slots).
+    {
+      const userId = 't2-presets-honored';
+      insertUser(userId);
+      insertSetting(
+        userId,
+        'llamacpp_presets',
+        JSON.stringify({ rapido: { reasoning_budget: -1 }, equilibrado: {}, profundo: { ctx: 4096 } }),
+      );
+      insertSetting(userId, 'llamacpp_active_preset', 'profundo');
+      insertSetting(
+        userId,
+        'llamacpp_sampling',
+        JSON.stringify({ temp: 0.7, top_p: 0.9, top_k: 40, min_p: 0.05, repeat_penalty: 1.1 }),
+      );
+      const config = resolveLlamacppConfig(userId);
+      assert.deepEqual(config.presets.rapido, { reasoning_budget: -1 }, 'stored partial exposed as-stored');
+      assert.deepEqual(config.presets.equilibrado, {}, 'untouched slot stays empty (missing keys fall to lower layer)');
+      assert.deepEqual(config.presets.profundo, { ctx: 4096 });
+      assert.equal(config.activePreset, 'profundo');
+      assert.deepEqual(config.sampling, { temp: 0.7, top_p: 0.9, top_k: 40, min_p: 0.05, repeat_penalty: 1.1 });
+      assert.deepEqual(resolveLlamacppSampling(userId), config.sampling, 'shared resolver reads the SAME row');
+    }
+
+    // (c) Corrupt/invalid rows repair to canonical + warn; invalid pointer
+    // falls back to equilibrado + warn.
+    {
+      const userId = 't2-presets-corrupt';
+      insertUser(userId);
+      insertSetting(userId, 'llamacpp_presets', '{not-json');
+      let config: ReturnType<typeof resolveLlamacppConfig> | undefined;
+      let warnings = captureWarnings(() => {
+        config = resolveLlamacppConfig(userId);
+      });
+      assert.deepEqual(config!.presets, LLAMACPP_CANONICAL_PRESETS, 'corrupt presets row ⇒ canonical');
+      assert.ok(warnings.some((w) => w.includes('llamacpp_presets')), warnings.join(' | '));
+
+      updateSetting(userId, 'llamacpp_presets', JSON.stringify({ rapido: { mtp: 9 }, equilibrado: {}, profundo: {} }));
+      warnings = captureWarnings(() => {
+        config = resolveLlamacppConfig(userId);
+      });
+      assert.deepEqual(config!.presets, LLAMACPP_CANONICAL_PRESETS, 'schema-invalid slot ⇒ whole row canonical');
+      assert.ok(warnings.some((w) => w.includes('llamacpp_presets')), warnings.join(' | '));
+
+      insertSetting(userId, 'llamacpp_active_preset', 'veloz');
+      warnings = captureWarnings(() => {
+        config = resolveLlamacppConfig(userId);
+      });
+      assert.equal(config!.activePreset, 'equilibrado', 'invalid pointer ⇒ default');
+      assert.ok(warnings.some((w) => w.includes('llamacpp_active_preset')), warnings.join(' | '));
+
+      insertSetting(userId, 'llamacpp_sampling', '"just a string"');
+      warnings = captureWarnings(() => {
+        config = resolveLlamacppConfig(userId);
+      });
+      assert.deepEqual(config!.sampling, LLAMACPP_SAMPLING_DEFAULTS, 'corrupt sampling row ⇒ canonical');
+      assert.ok(warnings.some((w) => w.includes('llamacpp_sampling')), warnings.join(' | '));
+
+      warnings = captureWarnings(() => {
+        assert.deepEqual(resolveLlamacppSampling(userId), LLAMACPP_SAMPLING_DEFAULTS);
+      });
+      assert.ok(warnings.some((w) => w.includes('llamacpp_sampling')), 'shared sampler warns on corrupt row too');
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -796,7 +887,8 @@ try {
       };
 
     try {
-      // (c) STARTED: spawn frame carries the fully merged argv; usage stamped.
+      // (c) STARTED: spawn frame carries the fully merged argv (resolution
+      // order v2 incl. the ACTIVE PRESET layer); usage stamped.
       {
         const userId = await makeModelUser('t2-ensure-started', { threads: 6 });
         const conn = connect(userId, {
@@ -804,8 +896,11 @@ try {
           onLlamacpp: standardLlamacppResponder(() => conn),
         });
 
+        // v2 stack: canonical ⊕ global row ⊕ ACTIVE PRESET (default pointer =
+        // equilibrado ⇒ mtp:0/reasoning_budget:2048) ⊕ model override ⊕ request.
         const expectedKnobs = mergeKnobLayers(
           LLAMACPP_DEFAULT_KNOBS,
+          LLAMACPP_CANONICAL_PRESETS.equilibrado, // active preset layer (default pointer)
           { threads: 6 },                    // global load-defaults row
           { gpu_layers: '20' },              // per-model override (set below)
           { ctx: 2048 },                     // request-level override
@@ -824,7 +919,7 @@ try {
         assert.equal(outcome.running, true, outcome.error);
         assert.equal(outcome.pid, 4242);
         assert.equal(outcome.port, fakeServer.port);
-        assert.deepEqual(outcome.argv, expectedArgv, 'spawn argv = request > model > global > default');
+        assert.deepEqual(outcome.argv, expectedArgv, 'spawn argv = request > model > PRESET > global > default');
 
         const spawns = llamacppSent(conn, 'llamacpp_spawn');
         assert.equal(spawns.length, 1);
@@ -832,7 +927,8 @@ try {
         assert.equal(spawns[0].host, '127.0.0.1');
         assert.equal(spawns[0].port, fakeServer.port);
         assert.deepEqual(spawns[0].args, expectedArgv);
-        assert.equal(expectedArgv.includes('--spec-type'), true, 'MTP-capable file ⇒ spec pair present');
+        assert.equal(expectedArgv.includes('--spec-type'), false, 'equilibrado mtp=0 ⇒ NO spec pair even for a capable file');
+        assert.equal(expectedArgv[expectedArgv.indexOf('--reasoning-budget') + 1], '2048', 'preset budget reaches argv');
         assert.equal(expectedArgv[expectedArgv.indexOf('--threads') + 1], '6');
 
         assert.deepEqual(getLastLaunchArgs(userId), { argv: expectedArgv, modelKey: 'Tiny-MTP' });
@@ -1040,6 +1136,217 @@ try {
       }
     } finally {
       fakeServer.close();
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  console.log('5b. §3 v2: preset layer reaches argv; §5 amendment: pendingRestart table');
+  {
+    const EXE2 = 'C:\\bins\\llama-server.exe';
+    const MODELS_DIR2 = 'D:\\models';
+    const ENTRIES2 = [
+      { path: `${MODELS_DIR2}\\Tiny-MTP.gguf`, name: 'Tiny-MTP.gguf', sizeBytes: 1234 },
+      { path: `${MODELS_DIR2}\\Plain.gguf`, name: 'Plain.gguf', sizeBytes: 10 },
+    ];
+    const COLLAPSED2 = collapseShardEntries(ENTRIES2);
+    const tiny2 = COLLAPSED2.find((e) => e.key === 'Tiny-MTP')!;
+    assert.equal(tiny2.mtpCapable, true);
+
+    const fakeServer2 = await startFakeLlamaServer({ initialReady: true });
+    /** Fresh user with rapido as the ACTIVE preset (canonical mtp:2/budget 1024). */
+    const makePresetUser = async (name: string): Promise<string> => {
+      insertUser(name);
+      insertSetting(name, 'llamacpp_exe_path', EXE2);
+      insertSetting(name, 'llamacpp_models_dir', MODELS_DIR2);
+      insertSetting(name, 'llamacpp_port', String(fakeServer2.port));
+      insertSetting(
+        name,
+        'llamacpp_presets',
+        JSON.stringify({
+          rapido: { ...LLAMACPP_CANONICAL_PRESETS.rapido },
+          equilibrado: { ...LLAMACPP_CANONICAL_PRESETS.equilibrado },
+          profundo: { ...LLAMACPP_CANONICAL_PRESETS.profundo },
+        }),
+      );
+      insertSetting(name, 'llamacpp_active_preset', 'rapido');
+      return name;
+    };
+    /** Captures spawn argv into `sink`; answers scan/status/spawn/stop deterministically. */
+    const captureResponder = (
+      getConnection: () => ScriptedAgentConnection,
+      sink: { argv: string[] },
+      agentState: { running: boolean },
+    ) =>
+    (message: LlamacppFrame): void => {
+      const conn = getConnection();
+      if (message.type === 'llamacpp_scan_request') {
+        conn.receive({
+          type: 'llamacpp_scan_response',
+          requestId: String(message.requestId),
+          ok: true,
+          entries: ENTRIES2,
+          truncated: false,
+        });
+        return;
+      }
+      if (message.type === 'llamacpp_status_request') {
+        conn.receive({
+          type: 'llamacpp_status_response',
+          requestId: String(message.requestId),
+          ...(agentState.running && sink.argv.length > 0
+            ? { running: true, pid: 4711, args: sink.argv, port: fakeServer2.port }
+            : { running: false, pid: null, args: null, port: null }),
+          lastExitCode: null,
+        });
+        return;
+      }
+      if (message.type === 'llamacpp_spawn') {
+        sink.argv = (message as unknown as { args: string[] }).args;
+        agentState.running = true;
+        conn.receive({ type: 'llamacpp_spawn_response', requestId: String(message.requestId), ok: true, pid: 4711 });
+        return;
+      }
+      if (message.type === 'llamacpp_stop') {
+        agentState.running = false;
+        conn.receive({ type: 'llamacpp_stop_response', requestId: String(message.requestId), ok: true, forced: false });
+        return;
+      }
+      conn.receive({
+        type: 'llamacpp_logs_response',
+        requestId: String(message.requestId),
+        ok: true,
+        text: '',
+        truncated: false,
+      });
+    };
+
+    try {
+      // (a) Spawn args carry the ACTIVE PRESET layer: rapido over the
+      // MTP-capable fixture emits the spec pair with budget 1024.
+      {
+        const sink = { argv: [] as string[] };
+        const userId = await makePresetUser('t2-preset-spawn');
+        const conn = connect(userId, {
+          capabilities: ['llamacpp'],
+          onLlamacpp: captureResponder(() => conn, sink, { running: false }),
+        });
+        const outcome = await ensureLlamacppRunning(userId, 'Tiny-MTP');
+        assert.equal(outcome.mode, 'started', outcome.error);
+        assert.equal(sink.argv[sink.argv.indexOf('--reasoning-budget') + 1], '1024', 'rapido budget reaches argv');
+        assert.equal(sink.argv[sink.argv.indexOf('--spec-type') + 1], 'draft-mtp', 'capable + rapido mtp=2 + parallel=1 ⇒ spec pair');
+        assert.equal(sink.argv[sink.argv.indexOf('--spec-draft-n-max') + 1], '2');
+        conn.close();
+      }
+
+      // (b) Per-model override beats the preset (v2 order), plain file stays
+      // MTP-gated off.
+      {
+        const sink = { argv: [] as string[] };
+        const userId = await makePresetUser('t2-preset-override');
+        insertSetting(userId, 'llamacpp_model_overrides', JSON.stringify({ Plain: { reasoning_budget: 77 } }));
+        const conn = connect(userId, {
+          capabilities: ['llamacpp'],
+          onLlamacpp: captureResponder(() => conn, sink, { running: false }),
+        });
+        const outcome = await ensureLlamacppRunning(userId, 'Plain');
+        assert.equal(outcome.mode, 'started', outcome.error);
+        assert.equal(sink.argv[sink.argv.indexOf('--reasoning-budget') + 1], '77', 'override beats preset');
+        assert.equal(sink.argv.includes('--spec-type'), false, 'non-capable basename ⇒ no spec pair even under rapido');
+        conn.close();
+      }
+
+      // (c) pendingRestart truth table (§5 Increment 2 amendment).
+      {
+        const sink = { argv: [] as string[] };
+        const agentState = { running: false };
+        const userId = await makePresetUser('t2-pendingrestart');
+        const conn = connect(userId, {
+          capabilities: ['llamacpp'],
+          onLlamacpp: captureResponder(() => conn, sink, agentState),
+        });
+
+        const outcome = await ensureLlamacppRunning(userId, 'Tiny-MTP');
+        assert.equal(outcome.mode, 'started', outcome.error);
+        const spawned = getLastLaunchArgs(userId)?.argv ?? [];
+        assert.ok(spawned.length > 0);
+
+        // No drift ⇒ false.
+        let status = await getLlamacppStatus(userId);
+        assert.equal(status.running, true);
+        assert.deepEqual(status.argv, spawned);
+        assert.equal(status.pendingRestart, false, 'spawned argv matches the persisted candidate ⇒ false');
+
+        // Knob edit while running (global row) ⇒ true.
+        insertSetting(userId, 'llamacpp_load_defaults', JSON.stringify({ threads: 5 }));
+        status = await getLlamacppStatus(userId);
+        assert.equal(status.pendingRestart, true, 'knob edit while running ⇒ true');
+
+        // Model-override edit (per-model persisted layer) ⇒ true.
+        updateSetting(userId, 'llamacpp_load_defaults', '');
+        insertSetting(userId, 'llamacpp_model_overrides', JSON.stringify({ 'Tiny-MTP': { gpu_layers: '20' } }));
+        status = await getLlamacppStatus(userId);
+        assert.equal(status.pendingRestart, true, 'per-model override edit ⇒ true');
+
+        // Back to the persisted stack ⇒ false. Request-level overrides are NOT
+        // an input anywhere in this computation — they do not persist, so the
+        // candidate always reflects defaults ⊕ preset ⊕ model override only.
+        updateSetting(userId, 'llamacpp_model_overrides', '');
+        status = await getLlamacppStatus(userId);
+        assert.equal(status.pendingRestart, false, 'restored persisted stack ⇒ false');
+
+        const config = resolveLlamacppConfig(userId);
+        // Honest R-pendingrestart-fp bias: a child started with ad-hoc REQUEST
+        // overrides carries argv the persisted-only candidate can never match.
+        const withRequestOverride = buildLlamaServerArgv({
+          modelPath: tiny2.path,
+          modelKey: 'Tiny-MTP',
+          port: config.port,
+          knobs: mergeKnobLayers(config.knobs, config.presets[config.activePreset], { ctx: 2048 }),
+          mtpCapable: tiny2.mtpCapable,
+        }).args;
+        assert.equal(
+          computePendingRestart({ running: true, runningArgs: withRequestOverride, config }),
+          true,
+          'ad-hoc request-override argv vs persisted candidate ⇒ honest true (documented bias)',
+        );
+
+        // Honest corrupt-repair bias: argv spawned under a customized preset
+        // row differs from the candidate once the row repairs to canonical.
+        const customRowKnobs = mergeKnobLayers(config.knobs, { ...config.presets.rapido, ctx: 999 });
+        const customRowArgv = buildLlamaServerArgv({
+          modelPath: tiny2.path,
+          modelKey: 'Tiny-MTP',
+          port: config.port,
+          knobs: customRowKnobs,
+          mtpCapable: tiny2.mtpCapable,
+        }).args;
+        assert.notDeepEqual(customRowArgv, spawned);
+        assert.equal(
+          computePendingRestart({ running: true, runningArgs: customRowArgv, config }),
+          true,
+          'corrupt-row repair shifted the candidate ⇒ honest true (documented bias)',
+        );
+
+        // Pure boundaries: not-running / null / empty argv ⇒ false.
+        assert.equal(computePendingRestart({ running: false, runningArgs: spawned, config }), false);
+        assert.equal(computePendingRestart({ running: true, runningArgs: null, config }), false);
+        assert.equal(computePendingRestart({ running: true, runningArgs: [], config }), false);
+
+        // Integration boundary: an agent reporting NOT running ⇒ false.
+        const idleSink = { argv: [] as string[] };
+        const idleUser = await makePresetUser('t2-pendingrestart-idle');
+        const idleConn = connect(idleUser, {
+          capabilities: ['llamacpp'],
+          onLlamacpp: captureResponder(() => idleConn, idleSink, { running: false }),
+        });
+        const idleStatus = await getLlamacppStatus(idleUser);
+        assert.equal(idleStatus.running, false);
+        assert.equal(idleStatus.pendingRestart, false, 'not running ⇒ false regardless of rows');
+        idleConn.close();
+        conn.close();
+      }
+    } finally {
+      fakeServer2.close();
     }
   }
 

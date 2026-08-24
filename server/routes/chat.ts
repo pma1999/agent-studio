@@ -38,7 +38,6 @@ import {
 import {
   createThinkStreamSplitter,
   isLegacyLmStudioModel,
-  LLAMACPP_SAMPLING_TOP_P,
   REMOVED_LMSTUDIO_MESSAGE,
   type ThinkSplitResult,
 } from '../providers/llamacpp.js';
@@ -46,6 +45,7 @@ import {
   ensureLlamacppRunning,
   llamacppFetch,
   resolveLlamacppConfig,
+  resolveLlamacppSampling,
 } from '../providers/llamacppTransport.js';
 import { runCodexTurn } from '../codex/chat.js';
 import { CodexUnavailableError } from '../codex/instanceManager.js';
@@ -723,8 +723,11 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     let apiUrl = provider.chatCompletionsUrl;
 
     let headers: Record<string, string> = provider.buildHeaders(apiKey);
+    // ONE hoisted resolveLlamacppConfig(userId) per request, shared by the
+    // apiUrl block below and the sampling seam further down.
+    let llamacppConfig: ReturnType<typeof resolveLlamacppConfig> | null = null;
     if (isLlamacppModel(effectiveModel)) {
-      const llamacppConfig = resolveLlamacppConfig(userId);
+      llamacppConfig = resolveLlamacppConfig(userId);
       apiUrl = `http://127.0.0.1:${llamacppConfig.port}/v1/chat/completions`;
       headers = provider.buildHeaders('');
     }
@@ -738,10 +741,17 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       max_tokens: agent.max_tokens,
       stream: true,
     };
-    if (isLlamacppModel(effectiveModel)) {
-      // Local-model sampling default (§6): pin top_p (Unsloth non-thinking
-      // rec); the agent's temperature override surface is untouched.
-      requestBody.top_p = LLAMACPP_SAMPLING_TOP_P;
+    if (isLlamacppModel(effectiveModel) && llamacppConfig) {
+      // Increment 2 (§6/§10): the resolved llamacpp_sampling row replaces the
+      // old top_p pin. `temp`→`temperature` is the ONLY name mapping; the row
+      // wins over agent.temperature for llamacpp (shared with councilExecutor
+      // through the SAME resolveLlamacppSampling resolver).
+      const s = resolveLlamacppSampling(userId);
+      requestBody.temperature = s.temp;
+      requestBody.top_p = s.top_p;
+      requestBody.top_k = s.top_k;
+      requestBody.min_p = s.min_p;
+      requestBody.repeat_penalty = s.repeat_penalty;
     }
     if (openRouterProviderPreference) {
       requestBody.provider = openRouterProviderPreference;

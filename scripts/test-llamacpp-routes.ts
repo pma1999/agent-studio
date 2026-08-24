@@ -1,11 +1,13 @@
 /**
  * OFFLINE acceptance harness for the llama.cpp model routes (task 3):
  *   GET  /api/models/llamacpp            (catalog, 30 s/user cache, fail-soft 503)
- *   GET  /api/models/llamacpp/status     (never-throw §5 payload)
+ *   GET  /api/models/llamacpp/status     (never-throw §5 payload + pendingRestart)
  *   POST /api/models/llamacpp/start      ({model, overrides?})
  *   POST /api/models/llamacpp/stop       (FROZEN envelope)
- *   GET  /api/models/llamacpp/config     (effective config view)
- *   POST /api/models/llamacpp/config     (zod-validated persistence)
+ *   GET  /api/models/llamacpp/config     (effective config view incl. §3 v2
+ *                                         presets/activePreset/sampling)
+ *   POST /api/models/llamacpp/config     (zod-validated persistence with
+ *                                         key-level errors; CANONICAL ⊕ presets)
  *   GET  /api/models/llamacpp/logs       (bounded tail, fail-soft)
  *
  * No real llama-server and no real local-agent binary are required: scenarios
@@ -31,12 +33,16 @@ process.env.JWT_SECRET = 'test-secret';
 process.env.LLAMACPP_MODELS_DIR = 'C:\\models';
 
 const express = (await import('express')).default;
-const { migrate } = await import('../server/db.js');
+const { default: db, migrate } = await import('../server/db.js');
 const { registerAgentConnection, unregisterAgentConnection } = await import(
   '../server/agentRelay/registry.js'
 );
 const modelsRouter = (await import('../server/routes/models.js')).default;
-const { LLAMACPP_CAPABILITY_ERROR } = await import('../server/providers/llamacppTransport.js');
+const {
+  LLAMACPP_CAPABILITY_ERROR,
+  resolveLlamacppConfig,
+} = await import('../server/providers/llamacppTransport.js');
+const { buildLlamaServerArgv, mergeKnobLayers } = await import('../server/providers/llamacpp.js');
 
 type AgentToBackendMessage = import('../server/agentRelay/protocol.js').AgentToBackendMessage;
 type BackendToAgentMessage = import('../server/agentRelay/protocol.js').BackendToAgentMessage;
@@ -53,6 +59,17 @@ await migrate();
 
 const USER_A = '00000000-0000-4000-8000-00000000000a';
 const USER_B = '00000000-0000-4000-8000-00000000000b';
+
+/** Direct settings-row manipulation for pendingRestart drift scenarios. */
+function insertSettingRow(userId: string, key: string, value: string): void {
+  db.prepare(
+    'INSERT INTO settings (user_id, key, value) VALUES (?, ?, ?) '
+    + 'ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value',
+  ).run(userId, key, value);
+}
+function updateSettingRow(userId: string, key: string, value: string): void {
+  db.prepare('UPDATE settings SET value = ? WHERE user_id = ? AND key = ?').run(value, userId, key);
+}
 
 /** Scripted agent answering ONLY llamacpp_* frames via queueMicrotask. */
 class ScriptedConnection implements AgentConnection {
@@ -247,6 +264,7 @@ try {
         lastExitCode: null,
         argv: null,
         mtpActive: false,
+        pendingRestart: false,
       });
     });
   }
@@ -347,9 +365,9 @@ try {
   // ---------------------------------------------------------------------
   {
     const r = await call('POST', '/llamacpp/config', { user: USER_A, body: {} });
-    ok('config with neither section -> 400', () => {
+    ok('config with no section -> 400 (all five sections named)', () => {
       assert.equal(r.status, 400);
-      assert.match(String(r.json?.error), /defaults|overrides/);
+      assert.match(String(r.json?.error), /defaults.*overrides.*presets.*activePreset.*sampling/s);
     });
   }
   {
@@ -389,6 +407,162 @@ try {
       assert.equal(r.json.defaults.threads, 8); // untouched canonical value survives
       assert.deepEqual(r.json.overrides, { 'Qwen3-Test': { mtp: 0 } });
     });
+  }
+
+  // ---------------------------------------------------------------------
+  // Section 6b: Increment 2 config sections — presets/activePreset/sampling
+  // ---------------------------------------------------------------------
+  {
+    const r = await call('POST', '/llamacpp/config', {
+      user: USER_A,
+      body: { presets: { rapido: { reasoning_budget: -1 } }, activePreset: 'profundo' },
+    });
+    ok('config persists presets (CANONICAL ⊕ provided) + activePreset -> 200', () => {
+      assert.equal(r.status, 200);
+      assert.deepEqual(r.json, { ok: true });
+    });
+
+    const read = await call('GET', '/llamacpp/config', { user: USER_A });
+    ok('config GET returns presets/activePreset/sampling with canonical fill', () => {
+      assert.equal(read.status, 200);
+      assert.deepEqual(
+        read.json.presets,
+        {
+          rapido: { reasoning_budget: -1, mtp: 2 }, // provided ⊕ canonical slot values
+          equilibrado: { reasoning_budget: 2048, mtp: 0 },
+          profundo: { reasoning_budget: 4096, mtp: 0 },
+        },
+      );
+      assert.equal(read.json.activePreset, 'profundo');
+      assert.deepEqual(
+        read.json.sampling,
+        { temp: 0.6, top_p: 0.95, top_k: 20, min_p: 0, repeat_penalty: 1 },
+      );
+    });
+  }
+  {
+    const r = await call('POST', '/llamacpp/config', {
+      user: USER_A,
+      body: { sampling: { temp: 0.7, top_p: 0.9, top_k: 40, min_p: 0.05, repeat_penalty: 1.1 } },
+    });
+    ok('config persists the sampling row verbatim and GET reflects it', () => {
+      assert.equal(r.status, 200);
+      assert.deepEqual(r.json, { ok: true });
+    });
+
+    const read = await call('GET', '/llamacpp/config', { user: USER_A });
+    assert.deepEqual(
+      read.json.sampling,
+      { temp: 0.7, top_p: 0.9, top_k: 40, min_p: 0.05, repeat_penalty: 1.1 },
+      'sampling row round-trips verbatim',
+    );
+    ok('sampling row survives a re-read (persisted, not derived)', () => {
+      assert.deepEqual(
+        read.json.sampling,
+        { temp: 0.7, top_p: 0.9, top_k: 40, min_p: 0.05, repeat_penalty: 1.1 },
+      );
+    });
+  }
+  for (const [name, body, pattern] of [
+    // Unknown knob keys surface inside the message on zod v4 strict objects:
+    // "presets.rapido.(root): Unrecognized key: \"bogus\"".
+    ['unknown knob key inside a preset', { presets: { rapido: { bogus: 1 }, equilibrado: {}, profundo: {} } }, /presets\.rapido[^\n]*bogus/],
+    ['out-of-bounds preset knob', { presets: { rapido: { mtp: 9 }, equilibrado: {}, profundo: {} } }, /presets\.rapido\.mtp/],
+    ['unknown preset id', { presets: { rapido: {}, equilibrado: {}, profundo: {}, veloz: {} } }, /presets\.veloz/],
+    ['out-of-bounds sampling knob', { sampling: { temp: 5 } }, /sampling\.temp/],
+    ['wire-name leak into sampling row', { sampling: { temperature: 0.6 } }, /sampling\.temperature|sampling\./],
+  ] as Array<[string, unknown, RegExp]>) {
+    const r = await call('POST', '/llamacpp/config', { user: USER_A, body });
+    ok(`config rejects ${name} -> 400 with key-level detail`, () => {
+      assert.equal(r.status, 400);
+      assert.match(String(r.json?.error), pattern);
+    });
+  }
+  {
+    const r = await call('POST', '/llamacpp/config', { user: USER_A, body: { activePreset: 'veloz' } });
+    ok('config rejects an unknown activePreset id -> 400 naming activePreset', () => {
+      assert.equal(r.status, 400);
+      assert.match(String(r.json?.error), /activePreset/);
+    });
+    const r2 = await call('POST', '/llamacpp/config', { user: USER_A, body: { activePreset: 7 } });
+    ok('config rejects a non-string activePreset -> 400 naming activePreset', () => {
+      assert.equal(r2.status, 400);
+      assert.match(String(r2.json?.error), /activePreset/);
+    });
+    const read = await call('GET', '/llamacpp/config', { user: USER_A });
+    ok('rejected writes left the stored pointer untouched (still profundo)', () => {
+      assert.equal(read.json.activePreset, 'profundo');
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // Section 6c: status payload carries computed pendingRestart
+  // ---------------------------------------------------------------------
+  {
+    responderOpts = { runningPid: null };
+    const r = await call('GET', '/llamacpp/status', { user: USER_A });
+    ok('status (not running) exposes pendingRestart:false after mtpActive', () => {
+      assert.equal(r.status, 200);
+      assert.equal(r.json?.running, false);
+      assert.equal(typeof r.json?.pendingRestart, 'boolean');
+      assert.equal(r.json.pendingRestart, false);
+      // §5 amendment field order contract: pendingRestart appended AFTER mtpActive.
+      const keys = Object.keys(r.json);
+      assert.ok(keys.indexOf('pendingRestart') > keys.indexOf('mtpActive'), 'pendingRestart comes after mtpActive');
+    });
+  }
+  {
+    // Running child reporting argv that EXACTLY matches what the persisted
+    // settings would spawn now ⇒ pendingRestart false; then a persisted knob
+    // edit flips it to true without any agent interaction.
+    const config = resolveLlamacppConfig(USER_A);
+    const knobs = mergeKnobLayers(
+      config.knobs,
+      config.presets[config.activePreset],
+      config.overrides['Qwen3-Test'],
+    );
+    const runningArgs = buildLlamaServerArgv({
+      modelPath: 'C:\\models\\Qwen3-Test.gguf',
+      modelKey: 'Qwen3-Test',
+      port: 8712,
+      knobs,
+      mtpCapable: false,
+    }).args;
+    let overrideStatus: Record<string, unknown> | null = { running: true, pid: 900, args: runningArgs, port: 8712 };
+    connection!.responder = (request) => {
+      if (overrideStatus && request.type === 'llamacpp_status_request') {
+        return { type: 'llamacpp_status_response' as const, requestId: request.requestId, lastExitCode: null, ...overrideStatus };
+      }
+      return makeResponder(responderOpts)(request);
+    };
+    const r1 = await call('GET', '/llamacpp/status', { user: USER_A });
+    ok('status (running, no drift) computes pendingRestart:false from persisted rows', () => {
+      assert.equal(r1.status, 200);
+      assert.equal(r1.json.running, true);
+      assert.deepEqual(r1.json.argv, runningArgs);
+      assert.equal(r1.json.pendingRestart, false);
+    });
+
+    const originalRow = db
+      .prepare('SELECT value FROM settings WHERE user_id = ? AND key = ?')
+      .get(USER_A, 'llamacpp_load_defaults') as { value: string } | undefined;
+    const originalDefaults = originalRow?.value ?? null;
+    insertSettingRow(USER_A, 'llamacpp_load_defaults', JSON.stringify({ threads: 6 }));
+    const r2 = await call('GET', '/llamacpp/status', { user: USER_A });
+    ok('status flips pendingRestart:true after a persisted knob edit while running', () => {
+      assert.equal(r2.json.pendingRestart, true);
+    });
+    // Restore EXACTLY the pre-edit persisted stack.
+    if (originalDefaults === null) {
+      db.prepare('DELETE FROM settings WHERE user_id = ? AND key = ?').run(USER_A, 'llamacpp_load_defaults');
+    } else {
+      updateSettingRow(USER_A, 'llamacpp_load_defaults', originalDefaults);
+    }
+    const r3 = await call('GET', '/llamacpp/status', { user: USER_A });
+    ok('status returns to pendingRestart:false once settings match the child again', () => {
+      assert.equal(r3.json.pendingRestart, false);
+    });
+    overrideStatus = null;
   }
 
   // ---------------------------------------------------------------------

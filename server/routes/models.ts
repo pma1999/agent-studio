@@ -6,10 +6,16 @@ import { getSettingValue } from './settings.js';
 import { normalizeOpenRouterEndpoints } from '../providerRouting.js';
 import { DEEPSEEK_BASE_URL, DEEPSEEK_CATALOG, LLAMACPP_PREFIX } from '../providers/index.js';
 import {
+  LLAMACPP_ACTIVE_PRESET_SCHEMA,
+  LLAMACPP_CANONICAL_PRESETS,
   LLAMACPP_DEFAULT_KNOBS,
   LLAMACPP_MODEL_OVERRIDES_ROW_SCHEMA,
+  LLAMACPP_PRESET_IDS,
+  LLAMACPP_SAMPLING_ROW_SCHEMA,
+  KNOB_OVERRIDE_SCHEMA,
   mergeKnobLayers,
   parseKnobs,
+  type LlamacppPresetId,
 } from '../providers/llamacpp.js';
 import {
   ensureLlamacppRunning,
@@ -316,6 +322,7 @@ router.get('/llamacpp/status', async (req: AuthRequest, res: Response) => {
       lastExitCode: null,
       argv: null,
       mtpActive: false,
+      pendingRestart: false,
     });
   }
 });
@@ -404,7 +411,7 @@ router.post('/llamacpp/stop', async (req: AuthRequest, res: Response) => {
 });
 
 // GET /api/models/llamacpp/config — effective config view (resolved scalars +
-// validated knob rows) for the settings UI/diagnostics.
+// validated knob/preset/sampling rows) for the settings UI/diagnostics.
 router.get('/llamacpp/config', async (req: AuthRequest, res: Response) => {
   const userId = llamacppGate(req, res);
   if (!userId) return;
@@ -418,6 +425,9 @@ router.get('/llamacpp/config', async (req: AuthRequest, res: Response) => {
       idleUnloadMinutes: config.idleUnloadMinutes,
       defaults: config.knobs,
       overrides: config.overrides,
+      presets: config.presets,
+      activePreset: config.activePreset,
+      sampling: config.sampling,
     });
   } catch (err) {
     console.error('Error reading llama.cpp config:', err);
@@ -427,20 +437,41 @@ router.get('/llamacpp/config', async (req: AuthRequest, res: Response) => {
 
 // POST /api/models/llamacpp/config — zod-validated persistence with key-level
 // errors; each provided section replaces its whole settings row (omitted
-// sections are untouched).
+// sections are untouched). Presets persist as CANONICAL ⊕ provided so the
+// stored row always parses standalone (§3 Increment 2 discipline).
 router.post('/llamacpp/config', async (req: AuthRequest, res: Response) => {
   const userId = llamacppGate(req, res);
   if (!userId) return;
   try {
-    const body = (req.body ?? {}) as { defaults?: unknown; overrides?: unknown };
-    if (body.defaults === undefined && body.overrides === undefined) {
-      return res.status(400).json({ error: 'Provide at least one of: defaults, overrides' });
+    const body = (req.body ?? {}) as {
+      defaults?: unknown;
+      overrides?: unknown;
+      presets?: unknown;
+      activePreset?: unknown;
+      sampling?: unknown;
+    };
+    if (
+      body.defaults === undefined
+      && body.overrides === undefined
+      && body.presets === undefined
+      && body.activePreset === undefined
+      && body.sampling === undefined
+    ) {
+      return res.status(400).json({
+        error: 'Provide at least one of: defaults, overrides, presets, activePreset, sampling',
+      });
     }
     if (body.defaults !== undefined && (typeof body.defaults !== 'object' || body.defaults === null || Array.isArray(body.defaults))) {
       return res.status(400).json({ error: 'defaults must be an object when provided' });
     }
     if (body.overrides !== undefined && (typeof body.overrides !== 'object' || body.overrides === null || Array.isArray(body.overrides))) {
       return res.status(400).json({ error: 'overrides must be an object keyed by model name when provided' });
+    }
+    if (body.presets !== undefined && (typeof body.presets !== 'object' || body.presets === null || Array.isArray(body.presets))) {
+      return res.status(400).json({ error: 'presets must be an object when provided' });
+    }
+    if (body.sampling !== undefined && (typeof body.sampling !== 'object' || body.sampling === null || Array.isArray(body.sampling))) {
+      return res.status(400).json({ error: 'sampling must be an object when provided' });
     }
 
     let defaultsRow: string | null = null;
@@ -463,9 +494,61 @@ router.post('/llamacpp/config', async (req: AuthRequest, res: Response) => {
       }
       overridesRow = JSON.stringify(parsed.data);
     }
+    let presetsRow: string | null = null;
+    if (body.presets !== undefined) {
+      // Per-slot CANONICAL ⊕ provided (§3: omitted keys keep their canonical
+      // value), so single-preset saves work and the stored row always parses
+      // standalone. Unknown slot ids and bad knob bags reject key-level.
+      const provided = body.presets as Record<string, unknown>;
+      const mergedSlots: Record<LlamacppPresetId, Record<string, unknown>> = {
+        rapido: { ...LLAMACPP_CANONICAL_PRESETS.rapido },
+        equilibrado: { ...LLAMACPP_CANONICAL_PRESETS.equilibrado },
+        profundo: { ...LLAMACPP_CANONICAL_PRESETS.profundo },
+      };
+      let presetsError: string | null = null;
+      for (const [slotId, slotValue] of Object.entries(provided)) {
+        const idCheck = LLAMACPP_ACTIVE_PRESET_SCHEMA.safeParse(slotId);
+        if (!idCheck.success) {
+          presetsError = `presets.${slotId}: Unknown preset id (must be one of ${LLAMACPP_PRESET_IDS.join(', ')})`;
+          break;
+        }
+        const slotCheck = KNOB_OVERRIDE_SCHEMA.safeParse(slotValue);
+        if (!slotCheck.success) {
+          const issue = slotCheck.error.issues[0];
+          const where = issue && issue.path.length > 0 ? issue.path.join('.') : '(root)';
+          presetsError = `presets.${slotId}.${where}: ${issue?.message ?? 'schema mismatch'}`;
+          break;
+        }
+        mergedSlots[idCheck.data] = { ...mergedSlots[idCheck.data], ...slotCheck.data };
+      }
+      if (presetsError !== null) return res.status(400).json({ error: presetsError });
+      presetsRow = JSON.stringify(mergedSlots);
+    }
+    let activePresetRow: string | null = null;
+    if (body.activePreset !== undefined) {
+      const parsed = LLAMACPP_ACTIVE_PRESET_SCHEMA.safeParse(body.activePreset);
+      if (!parsed.success) {
+        const issue = parsed.error.issues[0];
+        return res.status(400).json({ error: `activePreset: ${issue?.message ?? 'must be one of rapido, equilibrado, profundo'}` });
+      }
+      activePresetRow = parsed.data;
+    }
+    let samplingRow: string | null = null;
+    if (body.sampling !== undefined) {
+      const parsed = LLAMACPP_SAMPLING_ROW_SCHEMA.safeParse(body.sampling);
+      if (!parsed.success) {
+        const issue = parsed.error.issues[0];
+        const where = issue && issue.path.length > 0 ? issue.path.join('.') : '(root)';
+        return res.status(400).json({ error: `sampling.${where}: ${issue?.message ?? 'schema mismatch'}` });
+      }
+      samplingRow = JSON.stringify(parsed.data); // validated row verbatim
+    }
 
     if (defaultsRow !== null) upsertSetting(userId, 'llamacpp_load_defaults', defaultsRow);
     if (overridesRow !== null) upsertSetting(userId, 'llamacpp_model_overrides', overridesRow);
+    if (presetsRow !== null) upsertSetting(userId, 'llamacpp_presets', presetsRow);
+    if (activePresetRow !== null) upsertSetting(userId, 'llamacpp_active_preset', activePresetRow);
+    if (samplingRow !== null) upsertSetting(userId, 'llamacpp_sampling', samplingRow);
     return res.json({ ok: true });
   } catch (err) {
     console.error('Error saving llama.cpp config:', err);

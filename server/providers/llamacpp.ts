@@ -2,11 +2,12 @@
  * llama.cpp local provider — PURE domain module.
  *
  * Holds every provider quirk that can be decided offline: the canonical knob
- * bag + zod validation, the single source of launch truth (argv builder),
- * shard-aware GGUF model discovery math, the legacy LM Studio guard, the §6
- * sampling pin and the `<think>` stream splitter. This file imports NOTHING
- * from db/settings/network except zod, so it stays unit-testable without a
- * database or HTTP stack (same discipline as server/providers/lmstudio.ts).
+ * bag + zod validation, the preset slots + sampling row schemas, the single
+ * source of launch truth (argv builder), shard-aware GGUF model discovery
+ * math, the legacy LM Studio guard and the `<think>` stream splitter. This
+ * file imports NOTHING from db/settings/network except zod, so it stays
+ * unit-testable without a database or HTTP stack (same discipline as
+ * server/providers/lmstudio.ts).
  *
  * User-scoped settings resolution, process lifecycle and transport selection
  * live in llamacppTransport.ts, not here.
@@ -94,7 +95,8 @@ const GPU_LAYERS_SCHEMA = z
     "gpu_layers must be 'all', 'auto', or a positive integer as a string",
   );
 
-const KNOB_OVERRIDE_SCHEMA = z  .object({
+export const KNOB_OVERRIDE_SCHEMA = z
+  .object({
     n_cpu_moe: intSchema(0),
     threads: intSchema(1),
     threads_batch: intSchema(1),
@@ -121,6 +123,77 @@ export type KnobsParseResult =
  * `Record<modelKey, Partial<knobBag>>` with every entry strictly validated.
  */
 export const LLAMACPP_MODEL_OVERRIDES_ROW_SCHEMA = z.record(z.string(), KNOB_OVERRIDE_SCHEMA);
+
+// ---------------------------------------------------------------------------
+// Presets + sampling row (global-constraints.md §3 Increment 2 amendment)
+// ---------------------------------------------------------------------------
+
+/** The three editable preset slots, in canonical order. */
+export const LLAMACPP_PRESET_IDS = ['rapido', 'equilibrado', 'profundo'] as const;
+
+export type LlamacppPresetId = (typeof LLAMACPP_PRESET_IDS)[number];
+
+/** Shape of the persisted/read-back `llamacpp_presets` JSON row. */
+export interface LlamacppPresetsRow {
+  rapido: LlamacppKnobOverrides;
+  equilibrado: LlamacppKnobOverrides;
+  profundo: LlamacppKnobOverrides;
+}
+
+/** The §3 Increment 2 canonical presets — EXACT values, do not tune here. */
+export const LLAMACPP_CANONICAL_PRESETS: LlamacppPresetsRow = Object.freeze({
+  rapido: Object.freeze({ reasoning_budget: 1024, mtp: 2 }), // MTP ON (draft-mtp, n-max 2)
+  equilibrado: Object.freeze({ reasoning_budget: 2048, mtp: 0 }), // MTP OFF
+  profundo: Object.freeze({ reasoning_budget: 4096, mtp: 0 }), // MTP OFF
+});
+
+/**
+ * Whole-row schema for the `llamacpp_presets` settings JSON: exactly the three
+ * named slots, each a strict `Partial<knobBag>` (any knob key is legal for
+ * future-proofing; unknown keys rejected).
+ */
+export const LLAMACPP_PRESETS_ROW_SCHEMA = z
+  .object({
+    rapido: KNOB_OVERRIDE_SCHEMA,
+    equilibrado: KNOB_OVERRIDE_SCHEMA,
+    profundo: KNOB_OVERRIDE_SCHEMA,
+  })
+  .strict();
+
+/** Default active-preset pointer when nothing (or something invalid) is stored. */
+export const LLAMACPP_ACTIVE_PRESET_DEFAULT: LlamacppPresetId = 'equilibrado';
+
+/** Scalar schema for `llamacpp_active_preset`; must be one of the three ids. */
+export const LLAMACPP_ACTIVE_PRESET_SCHEMA = z.enum(LLAMACPP_PRESET_IDS);
+
+/** Sampling knobs injected into chat/council request bodies (§6/§10). */
+export interface LlamacppSampling {
+  temp: number;
+  top_p: number;
+  top_k: number;
+  min_p: number;
+  repeat_penalty: number;
+}
+
+/** The §3 Increment 2 canonical sampling row — EXACT values, do not tune here. */
+export const LLAMACPP_SAMPLING_DEFAULTS: LlamacppSampling = Object.freeze({
+  temp: 0.6,
+  top_p: 0.95,
+  top_k: 20,
+  min_p: 0,
+  repeat_penalty: 1,
+});
+
+/** Whole-row schema for the `llamacpp_sampling` settings JSON (strict bounds). */
+export const LLAMACPP_SAMPLING_ROW_SCHEMA = z
+  .object({
+    temp: z.number().min(0).max(2),
+    top_p: z.number().min(0).max(1),
+    top_k: intSchema(0, 128),
+    min_p: z.number().min(0).max(1),
+    repeat_penalty: z.number().min(0).max(2),
+  })
+  .strict();
 
 /**
  * Validates one knob layer (the full canonical bag or any partial). Unknown
@@ -336,11 +409,13 @@ export const REMOVED_LMSTUDIO_MESSAGE =
   'This conversation uses the removed LM Studio provider (lmstudio:<id>). Pick an llamacpp: model in the model selector.';
 
 // ---------------------------------------------------------------------------
-// Sampling pin (global-constraints.md §6)
+// Sampling row (global-constraints.md §3/§6 Increment 2 amendment)
+//
+// The former §6 hard-coded pin (`LLAMACPP_SAMPLING_TOP_P = 0.8`) is DELETED:
+// sampling now lives in the persisted `llamacpp_sampling` settings row and is
+// injected into request bodies through the shared resolveLlamacppSampling()
+// resolver (llamacppTransport.ts) by BOTH chat.ts and councilExecutor.ts.
 // ---------------------------------------------------------------------------
-
-/** Unsloth non-thinking recommendation for Qwen3.6-class models; temperature stays agent-owned. */
-export const LLAMACPP_SAMPLING_TOP_P = 0.8;
 
 // ---------------------------------------------------------------------------
 // <think>…</think> stream splitting (copied from server/providers/lmstudio.ts)

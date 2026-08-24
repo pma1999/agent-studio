@@ -3,8 +3,9 @@
  * everything llama-server-related (global-constraints.md §7/§8).
  *
  * Responsibilities:
- * - per-user settings resolution (setting > env > default) incl. the knob bag
- *   and per-model override JSON rows (zod-repaired, corrupt ⇒ defaults+warn);
+ * - per-user settings resolution (setting > env > default) incl. the knob
+ *   bag, per-model override rows, preset slots, active-preset pointer and
+ *   sampling row (zod-repaired, corrupt ⇒ defaults+warn);
  * - reachability probe + transport auto-select (direct `/health` vs
  *   local-agent relay), cached ~10 s per user unless forced (§7);
  * - `fetch`-compatible llamacppFetch() over EITHER transport, with usage
@@ -36,8 +37,14 @@ import {
 import { buildEffectiveAllowlist, isRelayUrlAllowed } from '../agentRelay/httpProxyAllowlist.js';
 import { getSettingValue } from '../routes/settings.js';
 import {
+  LLAMACPP_ACTIVE_PRESET_DEFAULT,
+  LLAMACPP_ACTIVE_PRESET_SCHEMA,
+  LLAMACPP_CANONICAL_PRESETS,
   LLAMACPP_DEFAULT_KNOBS,
   LLAMACPP_MODEL_OVERRIDES_ROW_SCHEMA,
+  LLAMACPP_PRESETS_ROW_SCHEMA,
+  LLAMACPP_SAMPLING_DEFAULTS,
+  LLAMACPP_SAMPLING_ROW_SCHEMA,
   buildLlamaServerArgv,
   collapseShardEntries,
   mergeKnobLayers,
@@ -45,6 +52,9 @@ import {
   type LlamacppKnobs,
   type LlamacppKnobOverrides,
   type LlamacppModelEntry,
+  type LlamacppPresetId,
+  type LlamacppPresetsRow,
+  type LlamacppSampling,
 } from './llamacpp.js';
 
 // ---------------------------------------------------------------------------
@@ -97,6 +107,16 @@ export interface LlamacppResolvedConfig {
   knobs: LlamacppKnobs;
   /** Validated `llamacpp_model_overrides` rows (invalid entries dropped). */
   overrides: Record<string, LlamacppKnobOverrides>;
+  /**
+   * Validated `llamacpp_presets` slots as STORED (partials; missing keys fall
+   * through to the lower merge layer). Absent/corrupt rows ⇒ the §3 canonical
+   * presets (corrupt additionally warns).
+   */
+  presets: LlamacppPresetsRow;
+  /** Resolved active-preset pointer (invalid stored value ⇒ 'equilibrado' + warn). */
+  activePreset: LlamacppPresetId;
+  /** Resolved `llamacpp_sampling` row (corrupt ⇒ canonical defaults + warn). */
+  sampling: LlamacppSampling;
 }
 
 function readSetting(userId: string, key: string): string {
@@ -132,6 +152,67 @@ function parseJsonRow(raw: string): unknown {
 
 function warnOnce(message: string): void {
   console.warn(`[llamacppTransport] ${message}`);
+}
+
+/**
+ * Resolves the `llamacpp_presets` row (§3 Increment 2). Absent row ⇒ the
+ * canonical presets silently (nothing stored yet); corrupt/invalid row ⇒
+ * canonical + warn, never throws. Validated slots are exposed AS STORED —
+ * missing keys fall through to the lower merge layer at spawn time.
+ */
+function resolvePresetsRow(userId: string): LlamacppPresetsRow {
+  const raw = parseJsonRow(readSetting(userId, 'llamacpp_presets'));
+  if (raw === null) return structuredCanonicalPresets();
+  if (raw === undefined) {
+    warnOnce('corrupt llamacpp_presets setting ignored; using canonical presets.');
+    return structuredCanonicalPresets();
+  }
+  const parsed = LLAMACPP_PRESETS_ROW_SCHEMA.safeParse(raw);
+  if (parsed.success) return parsed.data;
+  const issue = parsed.error.issues[0];
+  warnOnce(
+    `invalid llamacpp_presets ignored (${issue ? `${issue.path.join('.') || '(root)'}: ${issue.message}` : 'schema mismatch'}); using canonical presets.`,
+  );
+  return structuredCanonicalPresets();
+}
+
+function structuredCanonicalPresets(): LlamacppPresetsRow {
+  return {
+    rapido: { ...LLAMACPP_CANONICAL_PRESETS.rapido },
+    equilibrado: { ...LLAMACPP_CANONICAL_PRESETS.equilibrado },
+    profundo: { ...LLAMACPP_CANONICAL_PRESETS.profundo },
+  };
+}
+
+/** Resolves the `llamacpp_active_preset` scalar; invalid ⇒ 'equilibrado' + warn. */
+function resolveActivePreset(userId: string): LlamacppPresetId {
+  const raw = readSetting(userId, 'llamacpp_active_preset');
+  if (!raw) return LLAMACPP_ACTIVE_PRESET_DEFAULT;
+  const parsed = LLAMACPP_ACTIVE_PRESET_SCHEMA.safeParse(raw);
+  if (parsed.success) return parsed.data;
+  warnOnce(`invalid llamacpp_active_preset "${raw}" ignored; using "${LLAMACPP_ACTIVE_PRESET_DEFAULT}".`);
+  return LLAMACPP_ACTIVE_PRESET_DEFAULT;
+}
+
+/**
+ * Resolves the `llamacpp_sampling` row (§3 Increment 2). Absent row ⇒ the
+ * canonical defaults silently; corrupt/invalid row ⇒ canonical + warn,
+ * never throws. INDEPENDENT of presets (identical across all three by spec).
+ */
+function resolveSamplingRow(userId: string): LlamacppSampling {
+  const raw = parseJsonRow(readSetting(userId, 'llamacpp_sampling'));
+  if (raw === null) return { ...LLAMACPP_SAMPLING_DEFAULTS };
+  if (raw === undefined) {
+    warnOnce('corrupt llamacpp_sampling setting ignored; using canonical sampling defaults.');
+    return { ...LLAMACPP_SAMPLING_DEFAULTS };
+  }
+  const parsed = LLAMACPP_SAMPLING_ROW_SCHEMA.safeParse(raw);
+  if (parsed.success) return parsed.data;
+  const issue = parsed.error.issues[0];
+  warnOnce(
+    `invalid llamacpp_sampling ignored (${issue ? `${issue.path.join('.') || '(root)'}: ${issue.message}` : 'schema mismatch'}); using canonical sampling defaults.`,
+  );
+  return { ...LLAMACPP_SAMPLING_DEFAULTS };
 }
 
 export function resolveLlamacppConfig(userId: string): LlamacppResolvedConfig {
@@ -182,7 +263,23 @@ export function resolveLlamacppConfig(userId: string): LlamacppResolvedConfig {
     }
   }
 
-  return { exePath, modelsDir, port, idleUnloadMinutes, knobs, overrides };
+  // §3 Increment 2 rows: preset slots, the active pointer and the independent
+  // sampling row — same fail-soft repair discipline, never throw.
+  const presets = resolvePresetsRow(userId);
+  const activePreset = resolveActivePreset(userId);
+  const sampling = resolveSamplingRow(userId);
+
+  return { exePath, modelsDir, port, idleUnloadMinutes, knobs, overrides, presets, activePreset, sampling };
+}
+
+/**
+ * §10 shared sampling resolver — the SINGLE source consumed by chat.ts AND
+ * councilExecutor.ts alike. Returns the persisted `llamacpp_sampling` row
+ * (corrupt ⇒ canonical defaults + warn); no asymmetric per-consumer branch is
+ * permitted.
+ */
+export function resolveLlamacppSampling(userId: string): LlamacppSampling {
+  return resolveSamplingRow(userId);
 }
 
 // ---------------------------------------------------------------------------
@@ -816,6 +913,44 @@ function mtpActiveInArgs(args: string[] | null | undefined): boolean {
   return index >= 0 && args[index + 1] === 'draft-mtp';
 }
 
+/**
+ * §5 Increment 2 amendment — computed `pendingRestart`: true iff the child is
+ * running AND the argv `ensureLlamacppRunning` would spawn NOW differs from
+ * the running child's actual args. The candidate is derived from PERSISTED
+ * settings ONLY (defaults ⊕ active preset ⊕ per-model override; request-level
+ * overrides are excluded because they are not persisted) over the running
+ * args' own --model/--alias values, the resolved port, and an mtpCapable flag
+ * read from the model path's BASENAME split on BOTH '/' and '\' (paths
+ * originate on the agent host OS). No agent scan frame is issued.
+ *
+ * Accepted bias (R-pendingrestart-fp): a start issued with ad-hoc request
+ * overrides, or a corrupt-row repair, makes candidate ≠ spawned argv and the
+ * chip reads TRUE until the next persisted-settings spawn — honest by design.
+ * Argv-only comparison: an exe-path/models-dir change while running does NOT
+ * raise the chip; /status's exePath field stays the truth surface there.
+ */
+export function computePendingRestart(opts: {
+  running: boolean;
+  runningArgs: string[] | null;
+  config: LlamacppResolvedConfig;
+}): boolean {
+  if (!opts.running) return false;
+  const runningArgs = opts.runningArgs;
+  if (!runningArgs || runningArgs.length === 0) return false;
+  const modelPath = valueAfterFlag(runningArgs, '--model');
+  const modelKey = valueAfterFlag(runningArgs, '--alias');
+  if (!modelPath || !modelKey) return false; // unknown argv ⇒ false
+  const basename = modelPath.split(/[/\\]/).pop() ?? '';
+  const mtpCapable = /mtp/i.test(basename);
+  const knobs = mergeKnobLayers(
+    opts.config.knobs,
+    opts.config.presets[opts.config.activePreset],
+    opts.config.overrides[modelKey],
+  );
+  const candidate = buildLlamaServerArgv({ modelPath, modelKey, port: opts.config.port, knobs, mtpCapable }).args;
+  return candidate.length !== runningArgs.length || candidate.some((arg, index) => arg !== runningArgs[index]);
+}
+
 function syncTrackedFromStatus(userId: string, status: AgentStatusPayload): TrackedChild {
   const previous = trackedChildren.get(userId);
   const child: TrackedChild = {
@@ -851,6 +986,7 @@ function statusPayloadFromTracked(
   lastExitCode: number | null;
   argv: string[] | null;
   mtpActive: boolean;
+  pendingRestart: boolean;
 } {
   const tracked = trackedChildren.get(userId);
   return {
@@ -867,6 +1003,11 @@ function statusPayloadFromTracked(
     lastExitCode: tracked?.lastExitCode ?? null,
     argv: tracked?.argv ?? null,
     mtpActive: mtpActiveInArgs(tracked?.argv),
+    pendingRestart: computePendingRestart({
+      running: tracked?.running ?? false,
+      runningArgs: tracked?.argv ?? null,
+      config: resolveLlamacppConfig(userId),
+    }),
   };
 }
 
@@ -884,6 +1025,7 @@ export interface LlamacppStatusPayload {
   lastExitCode: number | null;
   argv: string[] | null;
   mtpActive: boolean;
+  pendingRestart: boolean;
 }
 
 /**
@@ -924,6 +1066,11 @@ export async function getLlamacppStatus(userId: string): Promise<LlamacppStatusP
       lastExitCode: status.lastExitCode ?? null,
       argv: status.args ?? null,
       mtpActive: mtpActiveInArgs(status.args),
+      pendingRestart: computePendingRestart({
+        running: status.running,
+        runningArgs: status.args ?? null,
+        config: resolveLlamacppConfig(userId),
+      }),
     };
   } catch {
     // Status frame lost (timeout/disconnect race): tracked state is the best answer.
@@ -1027,8 +1174,15 @@ export async function ensureLlamacppRunning(
       return failed(`Model "${modelKey}" was not found in the scanned llama.cpp models directory.`);
     }
 
-    // Precedence request > model > global > default (§5 start route contract).
-    const knobs = mergeKnobLayers(config.knobs, config.overrides[modelKey], opts.overrides);
+    // Resolution order v2 (§3 Increment 2): request > model override >
+    // ACTIVE PRESET > global load-defaults > canonical default. The preset
+    // layer reaches argv exclusively through the merged knob bag (§4).
+    const knobs = mergeKnobLayers(
+      config.knobs,
+      config.presets[config.activePreset],
+      config.overrides[modelKey],
+      opts.overrides,
+    );
     const { args } = buildLlamaServerArgv({
       modelPath: entry.path,
       modelKey,

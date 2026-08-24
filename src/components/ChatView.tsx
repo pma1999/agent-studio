@@ -21,7 +21,7 @@ import { ConversationToolsSelector } from './ConversationToolsSelector';
 import { ConversationSkillsSelector } from './ConversationSkillsSelector';
 import { conversationsApi, skillsApi, agentPairingApi, agentUploadsApi, settingsApi } from '../api/client';
 import { isLlamaCppModel, stripLlamaCppPrefix } from '../utils/providers';
-import { effectiveReasoningBudget } from '../utils/llamacppKnobs';
+import { effectiveReasoningBudgetV2, LLAMACPP_PRESET_META, overridesForKey, parseLlamaCppActivePreset, parseLlamaCppPresetsRow } from '../utils/llamacppKnobs';
 import { PremiumMentionInput } from './ui/PremiumMentionInput';
 import { Sheet } from './ui/Sheet';
 import { ConversationTokenSummary, StreamingTokenCounter } from './TokenCounter';
@@ -386,29 +386,49 @@ export function ChatView() {
   const reasoningActive = effectiveReasoning.enabled;
   const currentEffort = effectiveReasoning.effort || 'medium';
 
-  // D5 honesty: when the chat runs on a llama.cpp model whose persisted launch
-  // config pins reasoning_budget = 0, per-chat thinking cannot produce tokens.
-  // Read the two settings rows fail-soft and surface the cap on the toggle.
+  // D5 honesty (Increment 2): when the chat runs on a llama.cpp model, the
+  // persisted launch config at resolution v2 (defaults ⊕ active preset ⊕ model
+  // override) decides whether per-chat thinking can produce tokens and how far
+  // it can go. Read the FOUR settings rows fail-soft and surface the result on
+  // the toggle; -1 (unlimited) renders no hint at all.
   const chatModelId = effectiveConversationModel ?? defaultModelForChat;
   const chatModelIsLlamaCpp = isLlamaCppModel(chatModelId);
   const chatModelKey = chatModelIsLlamaCpp ? stripLlamaCppPrefix(chatModelId) : null;
-  const [llamacppBudgetCapped, setLlamacppBudgetCapped] = useState(false);
+  const [llamacppBudgetHint, setLlamacppBudgetHint] = useState<{ budget: number; source: string } | null>(null);
   useEffect(() => {
     if (!chatModelIsLlamaCpp) {
-      setLlamacppBudgetCapped(false);
+      setLlamacppBudgetHint(null);
       return;
     }
     let cancelled = false;
     Promise.all([
       settingsApi.get('llamacpp_load_defaults'),
+      settingsApi.get('llamacpp_presets'),
+      settingsApi.get('llamacpp_active_preset'),
       settingsApi.get('llamacpp_model_overrides'),
-    ]).then(([defaultsRow, overridesRow]) => {
+    ]).then(([defaultsRow, presetsRow, activePresetRow, overridesRow]) => {
       if (cancelled) return;
-      setLlamacppBudgetCapped(
-        effectiveReasoningBudget(defaultsRow.value, overridesRow.value, chatModelKey) === 0
+      const activeId = parseLlamaCppActivePreset(activePresetRow.value);
+      const presetLayer = parseLlamaCppPresetsRow(presetsRow.value)[activeId];
+      const budget = effectiveReasoningBudgetV2(
+        defaultsRow.value,
+        presetsRow.value,
+        activePresetRow.value,
+        overridesRow.value,
+        chatModelKey,
       );
+      // Winning layer for the hint copy: model override > active preset > global defaults.
+      const overrideSupplied =
+        chatModelKey != null &&
+        overridesForKey(overridesRow.value, chatModelKey).reasoning_budget !== undefined;
+      const source = overrideSupplied
+        ? 'model override'
+        : presetLayer.reasoning_budget !== undefined
+          ? `preset ${LLAMACPP_PRESET_META.find((m) => m.id === activeId)?.label ?? activeId}`
+          : 'global defaults';
+      setLlamacppBudgetHint({ budget, source });
     }).catch(() => {
-      if (!cancelled) setLlamacppBudgetCapped(false);
+      if (!cancelled) setLlamacppBudgetHint(null);
     });
     return () => { cancelled = true; };
   }, [chatModelIsLlamaCpp, chatModelKey]);
@@ -1302,8 +1322,10 @@ export function ChatView() {
                               ) : null)}
                             </div>
 
-                            {/* D5: launch config caps thinking for this provider */}
-                            {chatModelIsLlamaCpp && llamacppBudgetCapped && (
+                            {/* D5 (Increment 2): launch config caps thinking for this provider.
+                                budget === 0 ⇒ fully disabled warning; budget > 0 + reasoning on ⇒
+                                neutral cap line; budget < 0 (unlimited) ⇒ render nothing. */}
+                            {chatModelIsLlamaCpp && llamacppBudgetHint?.budget === 0 && (
                               <div style={{
                                 marginTop: '8px',
                                 padding: '6px 8px',
@@ -1314,7 +1336,24 @@ export function ChatView() {
                                 color: 'var(--state-warning)',
                                 lineHeight: 1.4,
                               }}>
-                                Thinking is capped by the launch config (reasoning_budget = 0).
+                                Thinking is fully disabled by the launch config (reasoning_budget = 0).
+                              </div>
+                            )}
+                            {chatModelIsLlamaCpp &&
+                              llamacppBudgetHint != null &&
+                              llamacppBudgetHint.budget > 0 &&
+                              reasoningActive && (
+                              <div style={{
+                                marginTop: '8px',
+                                padding: '6px 8px',
+                                background: 'var(--bg-base)',
+                                border: '1px solid var(--border)',
+                                borderRadius: 'var(--radius-sm)',
+                                fontSize: '0.625rem',
+                                color: 'var(--text-muted)',
+                                lineHeight: 1.4,
+                              }}>
+                                Thinking capped at {llamacppBudgetHint.budget} tokens ({llamacppBudgetHint.source}).
                               </div>
                             )}
                           </div>

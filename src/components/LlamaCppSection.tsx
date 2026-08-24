@@ -1,20 +1,39 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { CheckCircle, AlertCircle, Loader2, RefreshCw, Play, Square, Terminal, ScrollText } from 'lucide-react';
+import { CheckCircle, AlertCircle, ChevronDown, ChevronUp, Loader2, RefreshCw, Play, Square, Terminal, ScrollText } from 'lucide-react';
 import { AlertTriangle } from 'lucide-react';
-import { settingsApi, modelsApi, llamacppApi, type LlamaCppModel, type LlamaCppStatus } from '../api/client';
+import {
+  settingsApi,
+  modelsApi,
+  llamacppApi,
+  type LlamaCppModel,
+  type LlamaCppPresetId,
+  type LlamaCppPresetsRow,
+  type LlamaCppSampling,
+  type LlamaCppStatus,
+} from '../api/client';
 import { LLAMACPP_ACCENT, LLAMACPP_STATUS_CHANGED_EVENT } from '../utils/providers';
 import { useLlamaCppModels } from '../hooks/useLlamaCppModels';
 import {
+  LLAMACPP_ACTIVE_PRESET_DEFAULT,
   LLAMACPP_CACHE_TYPES,
+  LLAMACPP_CANONICAL_PRESETS,
   LLAMACPP_IDLE_UNLOAD_DEFAULT,
   LLAMACPP_KNOB_DEFAULTS,
   LLAMACPP_LOGS_MAX_BYTES,
   LLAMACPP_PORT_DEFAULT,
+  LLAMACPP_PRESET_META,
+  LLAMACPP_SAMPLING_BOUNDS,
+  LLAMACPP_SAMPLING_DEFAULTS,
   deriveLaunchRows,
   formatArgvLine,
+  formatReasoningBudget,
   mergeKnobLayers,
+  parseLlamaCppActivePreset,
   parseLlamaCppJsonRow,
+  parseLlamaCppPresetsRow,
+  parseLlamaCppSamplingRow,
   phaseFromStatus,
+  samplingValidationError,
   type LlamaCppKnobBag,
   type LlamaCppKnobKey,
   type LlamaCppKnobOverrides,
@@ -23,13 +42,17 @@ import { Input } from './ui/Input';
 import { Button } from './ui/Button';
 
 // llama.cpp (local provider) settings keys — global-constraints §3 scalars +
-// §5 JSON knob rows. None are sensitive (loopback bind, no API key).
+// §5 JSON knob rows + §3 Increment 2 preset/sampling rows. None are sensitive
+// (loopback bind, no API key).
 const KEY_EXE_PATH = 'llamacpp_exe_path';
 const KEY_MODELS_DIR = 'llamacpp_models_dir';
 const KEY_PORT = 'llamacpp_port';
 const KEY_IDLE_MINUTES = 'llamacpp_idle_unload_minutes';
 const KEY_LOAD_DEFAULTS = 'llamacpp_load_defaults';
 const KEY_MODEL_OVERRIDES = 'llamacpp_model_overrides';
+const KEY_PRESETS = 'llamacpp_presets';
+const KEY_ACTIVE_PRESET = 'llamacpp_active_preset';
+const KEY_SAMPLING = 'llamacpp_sampling';
 
 /** Persisted overrides record: modelKey → partial knob bag (§3). */
 type OverridesRecord = Record<string, LlamaCppKnobOverrides>;
@@ -49,6 +72,15 @@ const NUM_KNOBS: Array<{ key: NumKnobKey; label: string; min: number; max?: numb
 ];
 
 const REASONING_BUDGET_OPTIONS = [-1, 0, 512, 1024, 2048, 4096, 8192];
+
+/** Sampling editor fields — labels pinned by the task brief. */
+const SAMPLING_FIELDS: Array<{ key: keyof LlamaCppSampling; label: string }> = [
+  { key: 'temp', label: 'Temperatura' },
+  { key: 'top_p', label: 'top_p' },
+  { key: 'top_k', label: 'top_k' },
+  { key: 'min_p', label: 'min_p' },
+  { key: 'repeat_penalty', label: 'repeat_penalty' },
+];
 
 function knobGridStyle(): React.CSSProperties {
   return {
@@ -82,6 +114,17 @@ export function LlamaCppSection() {
   const [knobsSaving, setKnobsSaving] = useState(false);
   const [knobsNotice, setKnobsNotice] = useState<Notice | null>(null);
 
+  // --- Presets & sampling (§3 Increment 2 rows via POST /config) ----------
+  const [presets, setPresets] = useState<LlamaCppPresetsRow>(() => parseLlamaCppPresetsRow(null));
+  const [activePreset, setActivePreset] = useState<LlamaCppPresetId>(LLAMACPP_ACTIVE_PRESET_DEFAULT);
+  const [expandedPreset, setExpandedPreset] = useState<LlamaCppPresetId | null>(null);
+  const [presetsSaving, setPresetsSaving] = useState(false);
+  const [presetsNotice, setPresetsNotice] = useState<Notice | null>(null);
+  const [sampling, setSampling] = useState<LlamaCppSampling>({ ...LLAMACPP_SAMPLING_DEFAULTS });
+  const [samplingErrors, setSamplingErrors] = useState<Partial<Record<keyof LlamaCppSampling, string>>>({});
+  const [samplingSaving, setSamplingSaving] = useState(false);
+  const [samplingNotice, setSamplingNotice] = useState<Notice | null>(null);
+
   // --- Status / start / stop / logs ---------------------------------------
   const [status, setStatus] = useState<LlamaCppStatus | null>(null);
   const [testing, setTesting] = useState(false);
@@ -92,6 +135,7 @@ export function LlamaCppSection() {
   const [startNotice, setStartNotice] = useState<Notice | null>(null);
   const [stopping, setStopping] = useState(false);
   const [stopNotice, setStopNotice] = useState<Notice | null>(null);
+  const [applyingRestart, setApplyingRestart] = useState(false);
   const [logs, setLogs] = useState<{ text: string; truncated: boolean } | null>(null);
   const [logsLoading, setLogsLoading] = useState(false);
   const [logsError, setLogsError] = useState<string | null>(null);
@@ -127,7 +171,10 @@ export function LlamaCppSection() {
       settingsApi.get(KEY_IDLE_MINUTES),
       settingsApi.get(KEY_LOAD_DEFAULTS),
       settingsApi.get(KEY_MODEL_OVERRIDES),
-    ]).then(([exe, dir, port, idle, defaultsRaw, overridesRaw]) => {
+      settingsApi.get(KEY_PRESETS),
+      settingsApi.get(KEY_ACTIVE_PRESET),
+      settingsApi.get(KEY_SAMPLING),
+    ]).then(([exe, dir, port, idle, defaultsRaw, overridesRaw, presetsRaw, activePresetRaw, samplingRaw]) => {
       if (cancelled) return;
       setExePath(exe.value ?? '');
       setExePathSaved(exe.value ?? '');
@@ -147,6 +194,10 @@ export function LlamaCppSection() {
       setIdleMinutesSaved(normIdle);
       setDefaults(parseLlamaCppJsonRow(defaultsRaw.value, { ...LLAMACPP_KNOB_DEFAULTS }));
       setOverrides(parseLlamaCppJsonRow<OverridesRecord>(overridesRaw.value, {}));
+      setPresets(parseLlamaCppPresetsRow(presetsRaw.value));
+      setActivePreset(parseLlamaCppActivePreset(activePresetRaw.value));
+      setSampling(parseLlamaCppSamplingRow(samplingRaw.value));
+      setSamplingErrors({});
     }).catch(() => {});
     void refreshStatus();
     return () => { cancelled = true; };
@@ -256,6 +307,88 @@ export function LlamaCppSection() {
     }
   };
 
+  // --- Presets & sampling saves (§5 Increment 2: each POST /config section is
+  // validated independently; key-level 400 detail arrives in error.message) --
+  const selectPreset = async (id: LlamaCppPresetId) => {
+    if (id === activePreset || presetsSaving) return;
+    const previous = activePreset;
+    setActivePreset(id); // optimistic
+    setPresetsNotice(null);
+    try {
+      await llamacppApi.config({ activePreset: id });
+      if (!mountedRef.current) return;
+      fireStatusChanged();
+      void refreshStatus(); // pendingRestart may change while a model runs
+    } catch (err) {
+      if (!mountedRef.current) return;
+      setActivePreset(previous);
+      setPresetsNotice({
+        ok: false,
+        text: err instanceof Error ? err.message : 'Failed to set the active preset',
+      });
+    }
+  };
+
+  const savePresets = async () => {
+    if (presetsSaving) return;
+    setPresetsSaving(true);
+    setPresetsNotice(null);
+    try {
+      await llamacppApi.config({ presets });
+      if (!mountedRef.current) return;
+      setPresetsNotice({ ok: true, text: 'Presets saved — applies on the next start.' });
+      fireStatusChanged();
+      void refreshStatus();
+    } catch (err) {
+      if (!mountedRef.current) return;
+      setPresetsNotice({
+        ok: false,
+        text: err instanceof Error ? err.message : 'Failed to save the presets',
+      });
+    } finally {
+      if (mountedRef.current) setPresetsSaving(false);
+    }
+  };
+
+  const updatePresetSlot = useCallback(
+    (id: LlamaCppPresetId, key: 'reasoning_budget' | 'mtp', value: number) => {
+      setPresets((prev) => ({ ...prev, [id]: { ...prev[id], [key]: value } }));
+    },
+    [],
+  );
+
+  // Local bounds first (§3 zod bounds); a server 400 with key-level detail
+  // (e.g. "sampling.top_p: …") is mapped onto the offending field inline.
+  const saveSampling = async () => {
+    const errors: Partial<Record<keyof LlamaCppSampling, string>> = {};
+    for (const field of SAMPLING_FIELDS) {
+      const invalid = samplingValidationError(field.key, sampling[field.key]);
+      if (invalid) errors[field.key] = invalid;
+    }
+    setSamplingErrors(errors);
+    if (Object.keys(errors).length > 0 || samplingSaving) return;
+    setSamplingSaving(true);
+    setSamplingNotice(null);
+    try {
+      await llamacppApi.config({ sampling });
+      if (!mountedRef.current) return;
+      setSamplingNotice({ ok: true, text: 'Sampling settings saved — applies on the next start.' });
+      fireStatusChanged();
+      void refreshStatus();
+    } catch (err) {
+      if (!mountedRef.current) return;
+      const message = err instanceof Error ? err.message : 'Failed to save the sampling settings';
+      const keyMatch = /sampling\.(\w+)/.exec(message);
+      const keyed = keyMatch && keyMatch[1] in LLAMACPP_SAMPLING_BOUNDS
+        ? (keyMatch[1] as keyof LlamaCppSampling)
+        : null;
+      if (keyed) setSamplingErrors({ [keyed]: message });
+      else setSamplingNotice({ ok: false, text: message });
+    } finally {
+      if (mountedRef.current) setSamplingSaving(false);
+    }
+  };
+
   const updateDefault = useCallback((key: LlamaCppKnobKey, value: LlamaCppKnobBag[LlamaCppKnobKey]) => {
     setDefaults((prev) => ({ ...prev, [key]: value }) as LlamaCppKnobBag);
   }, []);
@@ -292,26 +425,27 @@ export function LlamaCppSection() {
   // --- Start / Stop --------------------------------------------------------
   const effectiveStartKey = startKey || status?.modelKey || catalog[0]?.id.replace(/^[^:]*:/, '') || '';
 
-  const handleStart = async () => {
-    if (starting || !effectiveStartKey) return;
+  const handleStart = async (keyArg?: string) => {
+    const targetKey = keyArg ?? effectiveStartKey;
+    if (starting || !targetKey) return;
     setStarting(true);
     setStartNotice(null);
     try {
-      const res = await llamacppApi.start(effectiveStartKey);
+      const res = await llamacppApi.start(targetKey);
       if (!mountedRef.current) return;
       // Merge launch truth into local status so the preview renders instantly.
       setStatus((prev) => ({
         ...(prev ?? {
           agentConnected: true, capabilitySupported: true, running: false, pid: null,
           modelPath: null, modelKey: null, port: null, transport: null, healthy: null,
-          startedAt: null, lastExitCode: null, argv: null, mtpActive: false,
+          startedAt: null, lastExitCode: null, argv: null, mtpActive: false, pendingRestart: false,
         }),
         running: true,
         healthy: true,
         pid: res.pid,
         port: res.port,
         argv: res.argv,
-        modelKey: effectiveStartKey,
+        modelKey: targetKey,
       }));
       setStartNotice({ ok: true, text: `llama-server ready (pid ${res.pid}, port ${res.port}, waited ${(res.waitedMs / 1000).toFixed(1)}s).` });
       fireStatusChanged();
@@ -338,6 +472,21 @@ export function LlamaCppSection() {
       setStopNotice({ ok: false, text: err instanceof Error ? err.message : 'Failed to stop llama-server' });
     } finally {
       setStopping(false);
+    }
+  };
+
+  // pendingRestart applier (§5 Increment 2): reuses the EXISTING stop→start
+  // flows for the CURRENT model key — no auto-restart anywhere.
+  const handleRestartApply = async () => {
+    const key = status?.modelKey;
+    if (starting || stopping || applyingRestart || !key) return;
+    setApplyingRestart(true);
+    try {
+      await handleStop();
+      await handleStart(key);
+      await refreshStatus();
+    } finally {
+      if (mountedRef.current) setApplyingRestart(false);
     }
   };
 
@@ -389,8 +538,10 @@ export function LlamaCppSection() {
       modelKey: previewKey,
       mtpCapable: previewMtpCapable,
       mtpActive: status?.mtpActive ?? null,
+      preset: presets[activePreset] ?? {},
+      presetId: activePreset,
     }),
-    [defaults, overrides, previewKey, previewMtpCapable, status?.mtpActive]
+    [defaults, overrides, previewKey, previewMtpCapable, status?.mtpActive, presets, activePreset]
   );
 
   const overrideKeys = useMemo(
@@ -674,6 +825,34 @@ export function LlamaCppSection() {
             <Square size={13} />
             Stop model
           </Button>
+          {status?.running && status.pendingRestart && !starting && !stopping && (
+            <span style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '8px',
+              padding: '4px 6px 4px 10px',
+              background: 'rgba(245, 158, 11, 0.08)',
+              border: '1px solid rgba(245, 158, 11, 0.2)',
+              borderRadius: 'var(--radius-sm)',
+              fontSize: '0.75rem',
+              color: 'var(--state-warning)',
+              fontWeight: 600,
+            }}>
+              <AlertTriangle size={13} />
+              Reiniciar para aplicar cambios
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => void handleRestartApply()}
+                loading={applyingRestart}
+                disabled={starting || stopping || applyingRestart || status.modelKey == null}
+                aria-label="Restart model to apply changes"
+              >
+                <RefreshCw size={13} />
+                Reiniciar ahora
+              </Button>
+            </span>
+          )}
         </div>
 
         <div aria-live="polite">
@@ -777,6 +956,231 @@ export function LlamaCppSection() {
               </span>
             </div>
           ))}
+        </div>
+      </div>
+
+      {/* Presets (§3 Increment 2): three editable cards + active pointer.
+          Titles/usage copy pinned EXACTLY by §10; clicking a card persists the
+          pointer immediately via POST /config { activePreset }. */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+        <span style={{
+          fontSize: '0.6875rem', fontWeight: 600, color: 'var(--text-muted)',
+          textTransform: 'uppercase', letterSpacing: '0.05em',
+        }}>
+          Presets
+        </span>
+        <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', lineHeight: 1.5 }}>
+          Pick how much thinking budget each profile gets. Click a card to make it active —
+          the choice applies on the next start. Expand a card to edit its own knobs.
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(230px, 1fr))', gap: '10px' }}>
+          {LLAMACPP_PRESET_META.map((meta) => {
+            const slot = presets[meta.id] ?? {};
+            const budget = typeof slot.reasoning_budget === 'number' ? slot.reasoning_budget : 0;
+            const mtp = typeof slot.mtp === 'number' ? slot.mtp : 0;
+            const unlimited = budget === -1;
+            const isActive = activePreset === meta.id;
+            const isExpanded = expandedPreset === meta.id;
+            return (
+              <div
+                key={meta.id}
+                role="button"
+                tabIndex={0}
+                onClick={() => void selectPreset(meta.id)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    void selectPreset(meta.id);
+                  }
+                }}
+                aria-pressed={isActive}
+                aria-label={`${meta.label} preset`}
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '6px',
+                  padding: '10px 12px',
+                  borderRadius: 'var(--radius-sm)',
+                  border: `1px solid ${isActive ? LLAMACPP_ACCENT : 'var(--border)'}`,
+                  background: isActive ? `${LLAMACPP_ACCENT}12` : 'var(--bg-elevated)',
+                  boxShadow: isActive ? `0 0 0 1px ${LLAMACPP_ACCENT}40` : 'none',
+                  cursor: 'pointer',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span style={{
+                    fontWeight: 600,
+                    fontSize: '0.8125rem',
+                    letterSpacing: '0.04em',
+                    color: isActive ? LLAMACPP_ACCENT : 'var(--text-primary)',
+                  }}>
+                    {meta.label}
+                  </span>
+                  {isActive && (
+                    <span style={{
+                      fontSize: '0.5625rem', padding: '1px 5px',
+                      background: `${LLAMACPP_ACCENT}18`, color: LLAMACPP_ACCENT,
+                      borderRadius: '4px', fontWeight: 600,
+                      textTransform: 'uppercase', letterSpacing: '0.04em',
+                    }}>
+                      Active
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setExpandedPreset(isExpanded ? null : meta.id);
+                    }}
+                    aria-expanded={isExpanded}
+                    aria-label={isExpanded ? `Collapse ${meta.label} editor` : `Expand ${meta.label} editor`}
+                    style={{
+                      marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer',
+                      color: 'var(--text-muted)', padding: '2px', display: 'flex', alignItems: 'center',
+                    }}
+                  >
+                    {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                  </button>
+                </div>
+                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', lineHeight: 1.4 }}>
+                  {meta.usage}
+                </div>
+                <div style={{
+                  fontFamily: 'var(--font-mono)', fontSize: '0.6875rem',
+                  color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '6px',
+                }}>
+                  <span>budget {formatReasoningBudget(budget)}</span>
+                  <span>·</span>
+                  <span>MTP {mtp > 0 ? 'on' : 'off'}</span>
+                </div>
+                {isExpanded && (
+                  <div
+                    style={{
+                      display: 'flex', flexDirection: 'column', gap: '8px',
+                      paddingTop: '8px', borderTop: '1px solid var(--border)', cursor: 'default',
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <Input
+                      label="Reasoning budget"
+                      type="number"
+                      min={0}
+                      step={1}
+                      disabled={unlimited}
+                      value={String(unlimited ? '' : budget)}
+                      placeholder={unlimited ? '∞ ilimitado' : undefined}
+                      onChange={(e) => {
+                        const n = Number(e.target.value);
+                        if (Number.isFinite(n) && Number.isInteger(n) && n >= 0) {
+                          updatePresetSlot(meta.id, 'reasoning_budget', n);
+                        }
+                      }}
+                      style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8125rem' }}
+                    />
+                    <label style={{
+                      display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer',
+                      fontSize: '0.75rem', color: 'var(--text-primary)',
+                    }}>
+                      <input
+                        type="checkbox"
+                        checked={unlimited}
+                        onChange={(e) =>
+                          updatePresetSlot(meta.id, 'reasoning_budget', e.target.checked ? -1 : LLAMACPP_CANONICAL_PRESETS[meta.id].reasoning_budget ?? 0)}
+                        style={{ width: '15px', height: '15px', accentColor: 'var(--accent)' }}
+                        aria-label={`Unlimited reasoning budget for ${meta.label}`}
+                      />
+                      <span>∞ ilimitado ({formatReasoningBudget(-1)})</span>
+                    </label>
+                    <div>
+                      <label className="form-field-label">MTP draft tokens</label>
+                      <select
+                        value={String(mtp)}
+                        onChange={(e) => updatePresetSlot(meta.id, 'mtp', Number(e.target.value))}
+                        aria-label={`MTP draft tokens for ${meta.label}`}
+                        style={{
+                          width: '100%',
+                          padding: '7px 10px',
+                          borderRadius: 'var(--radius-sm)',
+                          border: '1px solid var(--border)',
+                          background: 'var(--bg-surface)',
+                          color: 'var(--text-primary)',
+                          fontFamily: 'var(--font-mono)',
+                          fontSize: '0.8125rem',
+                        }}
+                      >
+                        <option value="0">Off (0)</option>
+                        <option value="2">On (2)</option>
+                      </select>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+          <Button variant="primary" size="sm" onClick={() => void savePresets()} loading={presetsSaving}>
+            Guardar presets
+          </Button>
+          {presetsNotice && (
+            <span style={{ fontSize: '0.75rem', color: presetsNotice.ok ? 'var(--success)' : 'var(--error)', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              {presetsNotice.ok ? <CheckCircle size={12} /> : <AlertTriangle size={12} />}
+              {presetsNotice.text}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Sampling row editor (§3 Increment 2) — independent of presets; rides
+          the request body on every llamacpp call (chat and council alike). */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+        <span style={{
+          fontSize: '0.6875rem', fontWeight: 600, color: 'var(--text-muted)',
+          textTransform: 'uppercase', letterSpacing: '0.05em',
+        }}>
+          Sampling
+        </span>
+        <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', lineHeight: 1.5 }}>
+          Sampler values injected into every llama.cpp request — shared by all presets.
+          Applies on the next start.
+        </div>
+        <div style={knobGridStyle()}>
+          {SAMPLING_FIELDS.map(({ key, label }) => (
+            <Input
+              key={key}
+              label={label}
+              type="number"
+              min={LLAMACPP_SAMPLING_BOUNDS[key].min}
+              max={LLAMACPP_SAMPLING_BOUNDS[key].max}
+              step={LLAMACPP_SAMPLING_BOUNDS[key].integer ? 1 : 0.01}
+              error={samplingErrors[key]}
+              value={String(sampling[key])}
+              onChange={(e) => {
+                const n = Number(e.target.value);
+                if (!Number.isFinite(n)) return; // half-typed numbers are ignored
+                setSampling((prev) => ({ ...prev, [key]: n }));
+                setSamplingErrors((prev) => {
+                  const next = { ...prev };
+                  const invalid = samplingValidationError(key, n);
+                  if (invalid) next[key] = invalid;
+                  else delete next[key];
+                  return next;
+                });
+              }}
+              style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8125rem' }}
+            />
+          ))}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+          <Button variant="primary" size="sm" onClick={() => void saveSampling()} loading={samplingSaving}>
+            Save sampling
+          </Button>
+          {samplingNotice && (
+            <span style={{ fontSize: '0.75rem', color: samplingNotice.ok ? 'var(--success)' : 'var(--error)', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              {samplingNotice.ok ? <CheckCircle size={12} /> : <AlertTriangle size={12} />}
+              {samplingNotice.text}
+            </span>
+          )}
         </div>
       </div>
 
