@@ -194,6 +194,12 @@ export interface LlamacppSampling {
   top_k: number;
   min_p: number;
   repeat_penalty: number;
+  /**
+   * §10 Increment 2d — OPTIONAL request-body sampler (bounds −2..2, any step,
+   * integer NOT required). Deliberately ABSENT from LLAMACPP_SAMPLING_DEFAULTS:
+   * absent = omitted from the request body entirely (never serialized as 0).
+   */
+  presence_penalty?: number;
 }
 
 /** The §3 Increment 2 canonical sampling row — EXACT values, do not tune here. */
@@ -213,8 +219,44 @@ export const LLAMACPP_SAMPLING_ROW_SCHEMA = z
     top_k: intSchema(0, 128),
     min_p: z.number().min(0).max(1),
     repeat_penalty: z.number().min(0).max(2),
+    // §10 Increment 2d — OPTIONAL; absent keys are simply not parsed out
+    // (absent = omitted from the request body, NOT a stored 0).
+    presence_penalty: z.number().min(-2).max(2).optional(),
   })
   .strict();
+
+/** Per-model sampling override layer: any subset of the sampling row (strict). */
+export const LLAMACPP_SAMPLING_OVERRIDE_SCHEMA = LLAMACPP_SAMPLING_ROW_SCHEMA.partial();
+
+/** Shape of one `llamacpp_model_sampling` entry (§10 Increment 2d). */
+export type LlamacppSamplingOverride = Partial<LlamacppSampling>;
+
+/**
+ * Whole-row schema for the `llamacpp_model_sampling` settings JSON (§10
+ * Increment 2d): `Record<modelKey, Partial<samplingRow>>` with every entry
+ * strictly validated (unknown keys rejected).
+ */
+export const LLAMACPP_MODEL_SAMPLING_ROW_SCHEMA = z.record(z.string(), LLAMACPP_SAMPLING_OVERRIDE_SCHEMA);
+
+/**
+ * Sampling resolution v3 merge (§10 Increment 2d): global row ⊕ model layers.
+ * Later non-undefined keys win; keys absent from every layer — including the
+ * OPTIONAL `presence_penalty` — stay absent from the result (the request-body
+ * injection sites forward exactly what is present).
+ */
+export function mergeSamplingLayers(
+  base: LlamacppSampling,
+  ...layers: Array<Partial<LlamacppSampling> | undefined | null>
+): LlamacppSampling {
+  const merged: LlamacppSampling = { ...base };
+  for (const layer of layers) {
+    if (!layer) continue;
+    for (const [key, value] of Object.entries(layer)) {
+      if (value !== undefined) (merged as unknown as Record<string, unknown>)[key] = value;
+    }
+  }
+  return merged;
+}
 
 /**
  * Validates one knob layer (the full canonical bag or any partial). Unknown
@@ -444,12 +486,16 @@ export const REMOVED_LMSTUDIO_MESSAGE =
   'This conversation uses the removed LM Studio provider (lmstudio:<id>). Pick an llamacpp: model in the model selector.';
 
 // ---------------------------------------------------------------------------
-// Sampling row (global-constraints.md §3/§6 Increment 2 amendment)
+// Sampling row (global-constraints.md §3/§6 Increment 2 + §10 Increment 2d)
 //
 // The former §6 hard-coded pin (`LLAMACPP_SAMPLING_TOP_P = 0.8`) is DELETED:
-// sampling now lives in the persisted `llamacpp_sampling` settings row and is
-// injected into request bodies through the shared resolveLlamacppSampling()
-// resolver (llamacppTransport.ts) by BOTH chat.ts and councilExecutor.ts.
+// sampling lives in the persisted `llamacpp_sampling` settings row and reaches
+// request bodies through resolveLlamacppSamplingForModel(userId, modelKey) in
+// llamacppTransport.ts — resolution v3 = global row ⊕
+// `llamacpp_model_sampling[modelKey]` — consumed by BOTH chat.ts and
+// councilExecutor.ts (single source, two consumers). presence_penalty is the
+// OPTIONAL emit-when-set member: absent from every layer ⇒ omitted from the
+// request body.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------

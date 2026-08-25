@@ -31,7 +31,7 @@ import { runCodexTurn } from '../codex/chat.js';
 import { getAgentCapabilities } from '../agentRelay/registry.js';
 import { isLegacyLmStudioModel, REMOVED_LMSTUDIO_MESSAGE } from '../providers/llamacpp.js';
 
-import { llamacppFetch, LLAMACPP_CAPABILITY_ERROR, resolveLlamacppSampling } from '../providers/llamacppTransport.js';
+import { llamacppFetch, LLAMACPP_CAPABILITY_ERROR, resolveLlamacppSamplingForModel } from '../providers/llamacppTransport.js';
 
 const MEMBER_TIMEOUT_MS = 240000; // 4 minutes per member
 const SYNTHESIS_TIMEOUT_MS = 240000; // 4 minutes for synthesis
@@ -415,16 +415,20 @@ export class CouncilExecutor {
       max_tokens: 4096,
       stream: true,
     };
-    // §10: council members share the chat sampling resolver — the fixed
-    // temp 0.7 above is superseded for llamacpp arms by the persisted
-    // llamacpp_sampling row (single source, no asymmetric branch).
+    // §10 (+ Increment 2d): council members share the chat sampling resolver —
+    // the fixed temp 0.7 above is superseded for llamacpp arms by resolution
+    // v3 (global row ⊕ per-model sampling for THIS upstream key; single
+    // source, no asymmetric branch). presence_penalty rides ONLY when set.
     if (ep.provider.id === 'llamacpp' && options.userId) {
-      const s = resolveLlamacppSampling(options.userId);
+      const s = resolveLlamacppSamplingForModel(options.userId, ep.upstreamModel);
       requestBody.temperature = s.temp;
       requestBody.top_p = s.top_p;
       requestBody.top_k = s.top_k;
       requestBody.min_p = s.min_p;
       requestBody.repeat_penalty = s.repeat_penalty;
+      if (s.presence_penalty !== undefined) {
+        requestBody.presence_penalty = s.presence_penalty;
+      }
     }
     const providerRouting: ProviderRoutingConfig = ep.provider.supportsProviderRouting
       ? resolveProviderRouting(parseProviderRoutingConfig(options.memberProviderRouting?.[modelId]))
@@ -738,15 +742,19 @@ export class CouncilExecutor {
       max_tokens: 4096,
       stream: true,
     };
-    // §10: the synthesizer arm rides the SAME shared sampling resolver when it
-    // targets an llamacpp model (fixed temp 0.7 stays for every other arm).
+    // §10 (+ Increment 2d): the synthesizer arm rides the SAME ForModel
+    // sampling resolver family when it targets an llamacpp model (fixed
+    // temp 0.7 stays for every other arm; presence_penalty ONLY when set).
     if (ep.provider.id === 'llamacpp' && options.userId) {
-      const s = resolveLlamacppSampling(options.userId);
+      const s = resolveLlamacppSamplingForModel(options.userId, ep.upstreamModel);
       requestBody.temperature = s.temp;
       requestBody.top_p = s.top_p;
       requestBody.top_k = s.top_k;
       requestBody.min_p = s.min_p;
       requestBody.repeat_penalty = s.repeat_penalty;
+      if (s.presence_penalty !== undefined) {
+        requestBody.presence_penalty = s.presence_penalty;
+      }
     }
     if (ep.provider.supportsProviderRouting) {
       const providerPreference = buildOpenRouterProviderPreference(providerRouting);

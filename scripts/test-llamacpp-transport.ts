@@ -5,6 +5,10 @@
  * Sections:
  *  1. resolveLlamacppConfig precedence per key (default < env < setting),
  *     corrupt JSON knob/override rows repair to defaults + console.warn;
+ *  1b. §3 Increment 2 resolver v2: presets row, active pointer, sampling row;
+ *  1c. §10 Increment 2d resolver v3: `llamacpp_model_sampling` row (absent ⇒
+ *      {} silently, corrupt ⇒ {} + warn) and resolveLlamacppSamplingForModel
+ *      precedence (global ⊕ model[key]; omitted-vs-present presence_penalty);
  *  2. probe direct-vs-relay-vs-unreachable selection incl. the capability
  *     gate, allowlist blocking, and the ~10 s cache (hit / force / expiry);
  *  3. llamacppFetch usage stamping ONLY for POST /v1/chat/completions with a
@@ -52,7 +56,7 @@ const {
   probeLlamacpp,
   PROBE_CACHE_TTL_MS,
   resolveLlamacppConfig,
-  resolveLlamacppSampling,
+  resolveLlamacppSamplingForModel,
   runLlamacppIdleSweep,
   stopLlamacpp,
 } = await import('../server/providers/llamacppTransport.js');
@@ -425,7 +429,7 @@ try {
       let sampling: unknown = null;
       const warnings = captureWarnings(() => {
         config = resolveLlamacppConfig(userId);
-        sampling = resolveLlamacppSampling(userId);
+        sampling = resolveLlamacppSamplingForModel(userId, null);
       });
       assert.deepEqual(config!.presets, LLAMACPP_CANONICAL_PRESETS, 'absent presets row ⇒ canonical');
       assert.equal(config!.activePreset, LLAMACPP_ACTIVE_PRESET_DEFAULT, 'absent pointer ⇒ equilibrado');
@@ -456,7 +460,11 @@ try {
       assert.deepEqual(config.presets.profundo, { ctx: 4096 });
       assert.equal(config.activePreset, 'profundo');
       assert.deepEqual(config.sampling, { temp: 0.7, top_p: 0.9, top_k: 40, min_p: 0.05, repeat_penalty: 1.1 });
-      assert.deepEqual(resolveLlamacppSampling(userId), config.sampling, 'shared resolver reads the SAME row');
+      assert.deepEqual(
+        resolveLlamacppSamplingForModel(userId, 'Any-Key'),
+        config.sampling,
+        'shared ForModel resolver reads the SAME row (no model layer stored ⇒ global verbatim)',
+      );
     }
 
     // (c) Corrupt/invalid rows repair to canonical + warn; invalid pointer
@@ -494,9 +502,112 @@ try {
       assert.ok(warnings.some((w) => w.includes('llamacpp_sampling')), warnings.join(' | '));
 
       warnings = captureWarnings(() => {
-        assert.deepEqual(resolveLlamacppSampling(userId), LLAMACPP_SAMPLING_DEFAULTS);
+        assert.deepEqual(resolveLlamacppSamplingForModel(userId, null), LLAMACPP_SAMPLING_DEFAULTS);
       });
       assert.ok(warnings.some((w) => w.includes('llamacpp_sampling')), 'shared sampler warns on corrupt row too');
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  console.log('1c. §10 Increment 2d resolver v3: llamacpp_model_sampling row');
+  {
+    // (a) Absent row ⇒ {} SILENTLY; ForModel resolves to the global row verbatim.
+    {
+      const userId = 't2-modelsampling-fresh';
+      insertUser(userId);
+      insertSetting(
+        userId,
+        'llamacpp_sampling',
+        JSON.stringify({ temp: 0.7, top_p: 0.9, top_k: 40, min_p: 0.05, repeat_penalty: 1.1 }),
+      );
+      let config: ReturnType<typeof resolveLlamacppConfig> | null = null;
+      let resolved: unknown = null;
+      const warnings = captureWarnings(() => {
+        config = resolveLlamacppConfig(userId);
+        resolved = resolveLlamacppSamplingForModel(userId, 'Tuned-Model');
+      });
+      assert.deepEqual(config!.modelSampling, {}, 'absent model-sampling row ⇒ {} silently');
+      assert.deepEqual(warnings, [], 'fresh user resolves with NO repair warnings');
+      assert.deepEqual(
+        resolved,
+        { temp: 0.7, top_p: 0.9, top_k: 40, min_p: 0.05, repeat_penalty: 1.1 },
+        'model without a stored layer ⇒ global sampling row verbatim',
+      );
+    }
+
+    // (b) Stored partials honored AS STORED; ForModel = global ⊕ model[key];
+    // other model keys are unaffected; omitted-vs-present presence_penalty.
+    {
+      const userId = 't2-modelsampling-honored';
+      insertUser(userId);
+      insertSetting(
+        userId,
+        'llamacpp_sampling',
+        JSON.stringify({ temp: 0.7, top_p: 0.9, top_k: 40, min_p: 0.05, repeat_penalty: 1.1 }),
+      );
+      insertSetting(userId, 'llamacpp_model_sampling', JSON.stringify({
+        'Tuned-Model': { temp: 1.0, presence_penalty: 1.5 },
+        'Half-Tuned': { top_k: 80 },
+      }));
+      const config = resolveLlamacppConfig(userId);
+      assert.deepEqual(
+        config.modelSampling,
+        { 'Tuned-Model': { temp: 1.0, presence_penalty: 1.5 }, 'Half-Tuned': { top_k: 80 } },
+        'validated model-sampling row exposed AS STORED',
+      );
+
+      const tuned = resolveLlamacppSamplingForModel(userId, 'Tuned-Model');
+      assert.deepEqual(
+        { ...tuned },
+        { temp: 1.0, top_p: 0.9, top_k: 40, min_p: 0.05, repeat_penalty: 1.1, presence_penalty: 1.5 },
+        'model layer wins per-key; unset keys inherit the global row; presence_penalty PRESENT when set',
+      );
+      assert.deepEqual(Object.keys(tuned).sort(),
+        ['min_p', 'presence_penalty', 'repeat_penalty', 'temp', 'top_k', 'top_p'],
+        'present presence_penalty is part of the resolved row the injection seams forward');
+
+      const half = resolveLlamacppSamplingForModel(userId, 'Half-Tuned');
+      assert.deepEqual({ ...half },
+        { temp: 0.7, top_p: 0.9, top_k: 80, min_p: 0.05, repeat_penalty: 1.1 });
+      assert.equal('presence_penalty' in half, false,
+        'omitted-vs-present: presence_penalty key ABSENT when no layer sets it (never sent)');
+      assert.deepEqual(
+        { ...resolveLlamacppSamplingForModel(userId, 'Unknown-Key') },
+        { ...resolveLlamacppSamplingForModel(userId, null) },
+        'key without a stored layer == global resolution (null key tolerated)',
+      );
+    }
+
+    // (c) Corrupt / schema-invalid rows repair to {} + warn (§10 discipline).
+    {
+      const userId = 't2-modelsampling-corrupt';
+      insertUser(userId);
+      insertSetting(userId, 'llamacpp_model_sampling', '{not-json');
+      let config: ReturnType<typeof resolveLlamacppConfig> | undefined;
+      let warnings = captureWarnings(() => {
+        config = resolveLlamacppConfig(userId);
+      });
+      assert.deepEqual(config!.modelSampling, {}, 'corrupt model-sampling row ⇒ {}');
+      assert.ok(warnings.some((w) => w.includes('llamacpp_model_sampling')), warnings.join(' | '));
+
+      updateSetting(userId, 'llamacpp_model_sampling', JSON.stringify({ Bad: { temp: 99 } }));
+      warnings = captureWarnings(() => {
+        config = resolveLlamacppConfig(userId);
+      });
+      assert.deepEqual(config!.modelSampling, {}, 'out-of-bounds entry ⇒ whole row {}');
+      assert.ok(warnings.some((w) => w.includes('llamacpp_model_sampling')), warnings.join(' | '));
+
+      updateSetting(userId, 'llamacpp_model_sampling', JSON.stringify({ Bad: { bogus_key: 1 } }));
+      warnings = captureWarnings(() => {
+        config = resolveLlamacppConfig(userId);
+      });
+      assert.deepEqual(config!.modelSampling, {}, 'unknown key inside an entry ⇒ whole row {}');
+
+      warnings = captureWarnings(() => {
+        assert.deepEqual(resolveLlamacppSamplingForModel(userId, 'Bad'), LLAMACPP_SAMPLING_DEFAULTS);
+      });
+      assert.ok(warnings.some((w) => w.includes('llamacpp_model_sampling')),
+        'ForModel resolver rides the SAME row resolver (warns through it too)');
     }
   }
 

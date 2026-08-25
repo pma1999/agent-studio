@@ -126,7 +126,17 @@ export const LLAMACPP_SAMPLING_BOUNDS: Record<keyof LlamaCppSampling, LlamaCppSa
     top_k: { min: 0, max: 128, integer: true },
     min_p: { min: 0, max: 1 },
     repeat_penalty: { min: 0, max: 2 },
+    // §10 Increment 2d — OPTIONAL emit-when-set member of the sampling stack.
+    presence_penalty: { min: -2, max: 2 },
   });
+
+/** One per-model sampling entry: any subset of the sampling row. */
+export type LlamaCppSamplingOverride = Partial<LlamaCppSampling>;
+
+/** All sampling keys in editor order (presence_penalty last — it is OPTIONAL). */
+export const LLAMACPP_SAMPLING_KEYS = Object.keys(
+  LLAMACPP_SAMPLING_BOUNDS,
+) as Array<keyof LlamaCppSampling>;
 
 /** Preset-card metadata — titles + usage copy pinned EXACTLY by §10 user spec. */
 export interface LlamaCppPresetMeta {
@@ -339,7 +349,8 @@ export function samplingValidationError(key: keyof LlamaCppSampling, value: numb
  * Parses the persisted `llamacpp_sampling` row fail-soft: missing keys take
  * their canonical value; ANY present-but-invalid key resolves the WHOLE row to
  * the canonical values (mirrors the server zod whole-row semantics — no
- * per-key salvage).
+ * per-key salvage). The OPTIONAL `presence_penalty` stays ABSENT unless a
+ * valid stored value supplies it.
  */
 export function parseLlamaCppSamplingRow(raw: string | null | undefined): LlamaCppSampling {
   const canonical = { ...LLAMACPP_SAMPLING_DEFAULTS };
@@ -350,13 +361,45 @@ export function parseLlamaCppSamplingRow(raw: string | null | undefined): LlamaC
     const row = { ...canonical };
     for (const key of Object.keys(LLAMACPP_SAMPLING_BOUNDS) as Array<keyof LlamaCppSampling>) {
       const value = parsed[key];
-      if (value === undefined) continue; // keep canonical
+      if (value === undefined) continue; // keep canonical / stay absent
       if (typeof value !== 'number' || samplingValidationError(key, value)) return canonical;
       row[key] = value;
     }
     return row;
   } catch {
     return canonical;
+  }
+}
+
+/**
+ * Parses the persisted `llamacpp_model_sampling` row fail-soft (§10 Increment
+ * 2d): a Record<modelKey, Partial<samplingRow>>. Unknown/mistyped entries and
+ * invalid values are dropped rather than trusted (the server validated at
+ * write time, so this only guards hand-edited rows); an absent or unparseable
+ * row yields {} — never throws.
+ */
+export function parseLlamaCppModelSamplingRow(
+  raw: string | null | undefined,
+): Record<string, LlamaCppSamplingOverride> {
+  const row: Record<string, LlamaCppSamplingOverride> = {};
+  if (!raw || !raw.trim()) return row;
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return row;
+    for (const [key, slot] of Object.entries(parsed)) {
+      if (!slot || typeof slot !== 'object' || Array.isArray(slot)) continue;
+      const clean: LlamaCppSamplingOverride = {};
+      for (const skey of Object.keys(LLAMACPP_SAMPLING_BOUNDS) as Array<keyof LlamaCppSampling>) {
+        const value = (slot as Record<string, unknown>)[skey];
+        if (value === undefined) continue; // blank = inherit global
+        if (typeof value !== 'number' || samplingValidationError(skey, value)) continue;
+        clean[skey] = value;
+      }
+      row[key] = clean;
+    }
+    return row;
+  } catch {
+    return row;
   }
 }
 

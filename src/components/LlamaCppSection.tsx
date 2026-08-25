@@ -32,6 +32,7 @@ import {
   mergeKnobLayers,
   parseLlamaCppActivePreset,
   parseLlamaCppJsonRow,
+  parseLlamaCppModelSamplingRow,
   parseLlamaCppPresetsRow,
   parseLlamaCppSamplingRow,
   phaseFromStatus,
@@ -40,6 +41,7 @@ import {
   type LlamaCppKnobKey,
   type LlamaCppKnobOverrides,
   type LlamaCppReasoningFormat,
+  type LlamaCppSamplingOverride,
 } from '../utils/llamacppKnobs';
 import { Input } from './ui/Input';
 import { Button } from './ui/Button';
@@ -56,9 +58,13 @@ const KEY_MODEL_OVERRIDES = 'llamacpp_model_overrides';
 const KEY_PRESETS = 'llamacpp_presets';
 const KEY_ACTIVE_PRESET = 'llamacpp_active_preset';
 const KEY_SAMPLING = 'llamacpp_sampling';
+const KEY_MODEL_SAMPLING = 'llamacpp_model_sampling';
 
 /** Persisted overrides record: modelKey → partial knob bag (§3). */
 type OverridesRecord = Record<string, LlamaCppKnobOverrides>;
+
+/** Persisted per-model sampling record: modelKey → partial sampling row (§10 2d). */
+type ModelSamplingRecord = Record<string, LlamaCppSamplingOverride>;
 
 interface Notice { ok: boolean; text: string }
 
@@ -93,6 +99,17 @@ const SAMPLING_FIELDS: Array<{ key: keyof LlamaCppSampling; label: string }> = [
   { key: 'top_k', label: 'top_k' },
   { key: 'min_p', label: 'min_p' },
   { key: 'repeat_penalty', label: 'repeat_penalty' },
+];
+
+/** §10 Increment 2d per-model editor fields — blank = inherit the global row
+ * (presence_penalty additionally omitted from the request body when unset). */
+const MODEL_SAMPLING_FIELDS: Array<{ key: keyof LlamaCppSampling; label: string }> = [
+  { key: 'temp', label: 'Temperatura' },
+  { key: 'top_p', label: 'top_p' },
+  { key: 'top_k', label: 'top_k' },
+  { key: 'min_p', label: 'min_p' },
+  { key: 'repeat_penalty', label: 'repeat_penalty' },
+  { key: 'presence_penalty', label: 'presence_penalty' },
 ];
 
 function knobGridStyle(): React.CSSProperties {
@@ -137,6 +154,12 @@ export function LlamaCppSection() {
   const [samplingErrors, setSamplingErrors] = useState<Partial<Record<keyof LlamaCppSampling, string>>>({});
   const [samplingSaving, setSamplingSaving] = useState(false);
   const [samplingNotice, setSamplingNotice] = useState<Notice | null>(null);
+  // --- Sampling por modelo (§10 Increment 2d row via POST /config) --------
+  const [modelSampling, setModelSampling] = useState<ModelSamplingRecord>({});
+  const [modelSamplingKey, setModelSamplingKey] = useState('');
+  const [modelSamplingErrors, setModelSamplingErrors] = useState<Record<string, Partial<Record<keyof LlamaCppSampling, string>>>>({});
+  const [modelSamplingSaving, setModelSamplingSaving] = useState(false);
+  const [modelSamplingNotice, setModelSamplingNotice] = useState<Notice | null>(null);
 
   // --- Status / start / stop / logs ---------------------------------------
   const [status, setStatus] = useState<LlamaCppStatus | null>(null);
@@ -187,7 +210,8 @@ export function LlamaCppSection() {
       settingsApi.get(KEY_PRESETS),
       settingsApi.get(KEY_ACTIVE_PRESET),
       settingsApi.get(KEY_SAMPLING),
-    ]).then(([exe, dir, port, idle, defaultsRaw, overridesRaw, presetsRaw, activePresetRaw, samplingRaw]) => {
+      settingsApi.get(KEY_MODEL_SAMPLING),
+    ]).then(([exe, dir, port, idle, defaultsRaw, overridesRaw, presetsRaw, activePresetRaw, samplingRaw, modelSamplingRaw]) => {
       if (cancelled) return;
       setExePath(exe.value ?? '');
       setExePathSaved(exe.value ?? '');
@@ -211,6 +235,7 @@ export function LlamaCppSection() {
       setActivePreset(parseLlamaCppActivePreset(activePresetRaw.value));
       setSampling(parseLlamaCppSamplingRow(samplingRaw.value));
       setSamplingErrors({});
+      setModelSampling(parseLlamaCppModelSamplingRow(modelSamplingRaw.value));
     }).catch(() => {});
     void refreshStatus();
     return () => { cancelled = true; };
@@ -375,15 +400,31 @@ export function LlamaCppSection() {
   const saveSampling = async () => {
     const errors: Partial<Record<keyof LlamaCppSampling, string>> = {};
     for (const field of SAMPLING_FIELDS) {
-      const invalid = samplingValidationError(field.key, sampling[field.key]);
+      const value = sampling[field.key];
+      if (value === undefined) continue; // OPTIONAL members validate only when set
+      const invalid = samplingValidationError(field.key, value);
       if (invalid) errors[field.key] = invalid;
+    }
+    if (sampling.presence_penalty !== undefined) {
+      const invalid = samplingValidationError('presence_penalty', sampling.presence_penalty);
+      if (invalid) errors.presence_penalty = invalid;
     }
     setSamplingErrors(errors);
     if (Object.keys(errors).length > 0 || samplingSaving) return;
     setSamplingSaving(true);
     setSamplingNotice(null);
     try {
-      await llamacppApi.config({ sampling });
+      // Explicit payload so an UNSET presence_penalty stays absent from the
+      // persisted row (absent = omitted from every request body).
+      const payload: LlamaCppSampling = {
+        temp: sampling.temp,
+        top_p: sampling.top_p,
+        top_k: sampling.top_k,
+        min_p: sampling.min_p,
+        repeat_penalty: sampling.repeat_penalty,
+      };
+      if (sampling.presence_penalty !== undefined) payload.presence_penalty = sampling.presence_penalty;
+      await llamacppApi.config({ sampling: payload });
       if (!mountedRef.current) return;
       setSamplingNotice({ ok: true, text: 'Sampling settings saved — applies on the next start.' });
       fireStatusChanged();
@@ -399,6 +440,116 @@ export function LlamaCppSection() {
       else setSamplingNotice({ ok: false, text: message });
     } finally {
       if (mountedRef.current) setSamplingSaving(false);
+    }
+  };
+
+  // §10 Increment 2d OPTIONAL global knob: blank input = UNSET — the key is
+  // deleted from the draft row so it never reaches the request body.
+  const updateOptionalSampling = useCallback((key: 'presence_penalty', raw: string) => {
+    setSampling((prev) => {
+      const next = { ...prev };
+      if (raw.trim() === '') {
+        delete next[key];
+        return next;
+      }
+      const n = Number(raw);
+      if (!Number.isFinite(n)) return prev; // half-typed numbers are ignored
+      next[key] = n;
+      return next;
+    });
+    setSamplingErrors((prev) => {
+      const n = Number(raw);
+      const next = { ...prev };
+      delete next[key];
+      const invalid = raw.trim() !== '' && Number.isFinite(n) ? samplingValidationError(key, n) : null;
+      if (invalid) next[key] = invalid;
+      return next;
+    });
+  }, []);
+
+  // --- Sampling por modelo (§10 Increment 2d): pick/add a modelKey → partial
+  // fields (blank = inherit), delete row, POST the modelSampling section ----
+  const updateModelSampling = useCallback((modelKey: string, field: keyof LlamaCppSampling, raw: string) => {
+    setModelSampling((prev) => {
+      const row: LlamaCppSamplingOverride = { ...(prev[modelKey] ?? {}) };
+      if (raw.trim() === '') {
+        delete row[field]; // blank ⇒ inherit the global sampling row again
+      } else {
+        const n = Number(raw);
+        if (!Number.isFinite(n)) return prev; // half-typed numbers are ignored
+        row[field] = n;
+      }
+      const next: ModelSamplingRecord = { ...prev };
+      if (Object.keys(row).length === 0) delete next[modelKey];
+      else next[modelKey] = row;
+      return next;
+    });
+    setModelSamplingErrors((prev) => {
+      if (!(modelKey in prev)) return prev;
+      const rowErrors = { ...prev[modelKey] };
+      delete rowErrors[field];
+      const next = { ...prev };
+      if (Object.keys(rowErrors).length === 0) delete next[modelKey];
+      else next[modelKey] = rowErrors;
+      return next;
+    });
+  }, []);
+
+  const removeModelSamplingRow = useCallback((modelKey: string) => {
+    setModelSampling((prev) => {
+      if (!(modelKey in prev)) return prev;
+      const next = { ...prev };
+      delete next[modelKey];
+      return next;
+    });
+    setModelSamplingErrors((prev) => {
+      if (!(modelKey in prev)) return prev;
+      const next = { ...prev };
+      delete next[modelKey];
+      return next;
+    });
+  }, []);
+
+  const saveModelSampling = async () => {
+    if (modelSamplingSaving) return;
+    // Local bounds first: every DEFINED value in every row must be in range.
+    const errors: Record<string, Partial<Record<keyof LlamaCppSampling, string>>> = {};
+    for (const [modelKey, row] of Object.entries(modelSampling)) {
+      for (const field of MODEL_SAMPLING_FIELDS) {
+        const value = row[field.key];
+        if (value === undefined) continue; // blank = inherit global
+        const invalid = samplingValidationError(field.key, value);
+        if (invalid) errors[modelKey] = { ...(errors[modelKey] ?? {}), [field.key]: invalid };
+      }
+    }
+    setModelSamplingErrors(errors);
+    if (Object.keys(errors).length > 0) return;
+    setModelSamplingSaving(true);
+    setModelSamplingNotice(null);
+    try {
+      await llamacppApi.config({ modelSampling });
+      if (!mountedRef.current) return;
+      setModelSamplingNotice({ ok: true, text: 'Sampling por modelo guardado — aplica en el próximo start.' });
+      fireStatusChanged();
+      void refreshStatus();
+    } catch (err) {
+      if (!mountedRef.current) return;
+      const message = err instanceof Error ? err.message : 'Failed to save the per-model sampling';
+      // Fail-soft key-level mapping: "modelSampling.<key>.<field>: …" lands on
+      // the offending input; anything else surfaces as the section notice.
+      const match = /^modelSampling\.([^.]+)(?:\.(\w+)):/.exec(message);
+      const errField = match?.[2];
+      if (match && errField && MODEL_SAMPLING_FIELDS.some((f) => f.key === errField)) {
+        const errKey = match[1];
+        setModelSamplingErrors((prev) => ({
+          ...prev,
+          [errKey]: { ...(prev[errKey] ?? {}), [errField]: message },
+        }));
+      } else {
+        setModelSamplingNotice({ ok: false, text: message });
+      }
+    } finally {
+      if (mountedRef.current) setModelSamplingSaving(false);
     }
   };
 
@@ -602,6 +753,16 @@ export function LlamaCppSection() {
     const v = mergedOverride[key];
     return v === undefined ? 'server default' : String(v);
   };
+
+  // §10 Increment 2d: per-model sampling keys (stored rows ∪ catalog), the
+  // active row, and the inherited (= global sampling) placeholder values.
+  const modelSamplingKeys = useMemo(
+    () => Array.from(new Set([...Object.keys(modelSampling), ...catalog.map((m) => m.id.replace(/^[^:]*:/, ''))])),
+    [modelSampling, catalog]
+  );
+  const activeModelSamplingRow: LlamaCppSamplingOverride = modelSamplingKey ? modelSampling[modelSamplingKey] ?? {} : {};
+  const inheritedSampling = (key: keyof LlamaCppSampling): string =>
+    sampling[key] !== undefined ? String(sampling[key]) : '—';
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
@@ -1223,6 +1384,19 @@ export function LlamaCppSection() {
               style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8125rem' }}
             />
           ))}
+          {/* §10 Increment 2d — OPTIONAL: blank = unset = never sent. */}
+          <Input
+            label="presence_penalty"
+            type="number"
+            min={LLAMACPP_SAMPLING_BOUNDS.presence_penalty.min}
+            max={LLAMACPP_SAMPLING_BOUNDS.presence_penalty.max}
+            step={0.01}
+            placeholder="(vacío = no se envía)"
+            error={samplingErrors.presence_penalty}
+            value={sampling.presence_penalty !== undefined ? String(sampling.presence_penalty) : ''}
+            onChange={(e) => updateOptionalSampling('presence_penalty', e.target.value)}
+            style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8125rem' }}
+          />
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
           <Button variant="primary" size="sm" onClick={() => void saveSampling()} loading={samplingSaving}>
@@ -1232,6 +1406,85 @@ export function LlamaCppSection() {
             <span style={{ fontSize: '0.75rem', color: samplingNotice.ok ? 'var(--success)' : 'var(--error)', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
               {samplingNotice.ok ? <CheckCircle size={12} /> : <AlertTriangle size={12} />}
               {samplingNotice.text}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Sampling por modelo (§10 Increment 2d) — compact per-key editor over
+          the llamacpp_model_sampling row; blank fields inherit the global
+          Sampling above and are omitted from the request body. */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+        <span style={{
+          fontSize: '0.6875rem', fontWeight: 600, color: 'var(--text-muted)',
+          textTransform: 'uppercase', letterSpacing: '0.05em',
+        }}>
+          Sampling por modelo
+        </span>
+        <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', lineHeight: 1.5 }}>
+          Ajusta el sampler de un modelo concreto (p. ej. temp 1.0 + presence_penalty 1.5 para un modelo
+          tuneado) sin tocar los valores del resto. Los campos vacíos heredan el Sampling global.
+        </div>
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+          <select
+            value={modelSamplingKey}
+            onChange={(e) => setModelSamplingKey(e.target.value)}
+            aria-label="Modelo para sampling por modelo"
+            style={{
+              flex: '1 1 260px',
+              maxWidth: '380px',
+              padding: '7px 10px',
+              borderRadius: 'var(--radius-sm)',
+              border: '1px solid var(--border)',
+              background: 'var(--bg-surface)',
+              color: 'var(--text-primary)',
+              fontFamily: 'var(--font-mono)',
+              fontSize: '0.8125rem',
+            }}
+          >
+            <option value="">Selecciona un modelo…</option>
+            {modelSamplingKeys.map((k) => (
+              <option key={k} value={k}>{k}{modelSampling[k] ? ' ●' : ''}</option>
+            ))}
+          </select>
+          {modelSamplingKey && modelSampling[modelSamplingKey] && (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => removeModelSamplingRow(modelSamplingKey)}
+              aria-label={`Eliminar sampling por modelo de ${modelSamplingKey}`}
+            >
+              Eliminar fila
+            </Button>
+          )}
+        </div>
+        {modelSamplingKey && (
+          <div style={knobGridStyle()}>
+            {MODEL_SAMPLING_FIELDS.map(({ key, label }) => (
+              <Input
+                key={key}
+                label={label}
+                type="number"
+                min={LLAMACPP_SAMPLING_BOUNDS[key].min}
+                max={LLAMACPP_SAMPLING_BOUNDS[key].max}
+                step={LLAMACPP_SAMPLING_BOUNDS[key].integer ? 1 : 0.01}
+                placeholder={`hereda: ${inheritedSampling(key)}`}
+                error={modelSamplingErrors[modelSamplingKey]?.[key]}
+                value={activeModelSamplingRow[key] !== undefined ? String(activeModelSamplingRow[key]) : ''}
+                onChange={(e) => updateModelSampling(modelSamplingKey, key, e.target.value)}
+                style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8125rem' }}
+              />
+            ))}
+          </div>
+        )}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+          <Button variant="primary" size="sm" onClick={() => void saveModelSampling()} loading={modelSamplingSaving}>
+            Guardar sampling por modelo
+          </Button>
+          {modelSamplingNotice && (
+            <span style={{ fontSize: '0.75rem', color: modelSamplingNotice.ok ? 'var(--success)' : 'var(--error)', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              {modelSamplingNotice.ok ? <CheckCircle size={12} /> : <AlertTriangle size={12} />}
+              {modelSamplingNotice.text}
             </span>
           )}
         </div>

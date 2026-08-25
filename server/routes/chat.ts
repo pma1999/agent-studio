@@ -45,7 +45,7 @@ import {
   ensureLlamacppRunning,
   llamacppFetch,
   resolveLlamacppConfig,
-  resolveLlamacppSampling,
+  resolveLlamacppSamplingForModel,
 } from '../providers/llamacppTransport.js';
 import { runCodexTurn } from '../codex/chat.js';
 import { CodexUnavailableError } from '../codex/instanceManager.js';
@@ -742,16 +742,22 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       stream: true,
     };
     if (isLlamacppModel(effectiveModel) && llamacppConfig) {
-      // Increment 2 (§6/§10): the resolved llamacpp_sampling row replaces the
-      // old top_p pin. `temp`→`temperature` is the ONLY name mapping; the row
-      // wins over agent.temperature for llamacpp (shared with councilExecutor
-      // through the SAME resolveLlamacppSampling resolver).
-      const s = resolveLlamacppSampling(userId);
+      // Increment 2 + 2d (§6/§10): resolution v3 — global llamacpp_sampling row
+      // ⊕ per-model sampling for THIS upstream key, through the SAME ForModel
+      // resolver councilExecutor uses (single source). The resolved row wins
+      // over agent.temperature for llamacpp; `temp`→`temperature` is the ONLY
+      // name mapping.
+      const s = resolveLlamacppSamplingForModel(userId, upstreamModel);
       requestBody.temperature = s.temp;
       requestBody.top_p = s.top_p;
       requestBody.top_k = s.top_k;
       requestBody.min_p = s.min_p;
       requestBody.repeat_penalty = s.repeat_penalty;
+      // OPTIONAL §10 Increment 2d knob: included ONLY when set — an absent key
+      // is omitted from the request body entirely (never sent as 0).
+      if (s.presence_penalty !== undefined) {
+        requestBody.presence_penalty = s.presence_penalty;
+      }
     }
     if (openRouterProviderPreference) {
       requestBody.provider = openRouterProviderPreference;

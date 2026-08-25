@@ -10,6 +10,7 @@ import {
   LLAMACPP_CANONICAL_PRESETS,
   LLAMACPP_DEFAULT_KNOBS,
   LLAMACPP_MODEL_OVERRIDES_ROW_SCHEMA,
+  LLAMACPP_MODEL_SAMPLING_ROW_SCHEMA,
   LLAMACPP_PRESET_IDS,
   LLAMACPP_SAMPLING_ROW_SCHEMA,
   KNOB_OVERRIDE_SCHEMA,
@@ -428,6 +429,9 @@ router.get('/llamacpp/config', async (req: AuthRequest, res: Response) => {
       presets: config.presets,
       activePreset: config.activePreset,
       sampling: config.sampling,
+      // §10 Increment 2d: resolved per-model sampling map (validated row
+      // AS STORED; absent/corrupt row ⇒ {}).
+      modelSampling: config.modelSampling,
     });
   } catch (err) {
     console.error('Error reading llama.cpp config:', err);
@@ -438,7 +442,8 @@ router.get('/llamacpp/config', async (req: AuthRequest, res: Response) => {
 // POST /api/models/llamacpp/config — zod-validated persistence with key-level
 // errors; each provided section replaces its whole settings row (omitted
 // sections are untouched). Presets persist as CANONICAL ⊕ provided so the
-// stored row always parses standalone (§3 Increment 2 discipline).
+// stored row always parses standalone (§3 Increment 2 discipline); the §10
+// Increment 2d `modelSampling` section persists VERBATIM after validation.
 router.post('/llamacpp/config', async (req: AuthRequest, res: Response) => {
   const userId = llamacppGate(req, res);
   if (!userId) return;
@@ -449,6 +454,7 @@ router.post('/llamacpp/config', async (req: AuthRequest, res: Response) => {
       presets?: unknown;
       activePreset?: unknown;
       sampling?: unknown;
+      modelSampling?: unknown;
     };
     if (
       body.defaults === undefined
@@ -456,9 +462,10 @@ router.post('/llamacpp/config', async (req: AuthRequest, res: Response) => {
       && body.presets === undefined
       && body.activePreset === undefined
       && body.sampling === undefined
+      && body.modelSampling === undefined
     ) {
       return res.status(400).json({
-        error: 'Provide at least one of: defaults, overrides, presets, activePreset, sampling',
+        error: 'Provide at least one of: defaults, overrides, presets, activePreset, sampling, modelSampling',
       });
     }
     if (body.defaults !== undefined && (typeof body.defaults !== 'object' || body.defaults === null || Array.isArray(body.defaults))) {
@@ -472,6 +479,9 @@ router.post('/llamacpp/config', async (req: AuthRequest, res: Response) => {
     }
     if (body.sampling !== undefined && (typeof body.sampling !== 'object' || body.sampling === null || Array.isArray(body.sampling))) {
       return res.status(400).json({ error: 'sampling must be an object when provided' });
+    }
+    if (body.modelSampling !== undefined && (typeof body.modelSampling !== 'object' || body.modelSampling === null || Array.isArray(body.modelSampling))) {
+      return res.status(400).json({ error: 'modelSampling must be an object keyed by model name when provided' });
     }
 
     let defaultsRow: string | null = null;
@@ -543,12 +553,26 @@ router.post('/llamacpp/config', async (req: AuthRequest, res: Response) => {
       }
       samplingRow = JSON.stringify(parsed.data); // validated row verbatim
     }
+    let modelSamplingRow: string | null = null;
+    if (body.modelSampling !== undefined) {
+      // §10 Increment 2d: Record<modelKey, Partial<samplingRow>> — every entry
+      // strictly validated with key-level detail (`modelSampling.<key>.temp: …`)
+      // and the whole validated row persisted VERBATIM.
+      const parsed = LLAMACPP_MODEL_SAMPLING_ROW_SCHEMA.safeParse(body.modelSampling);
+      if (!parsed.success) {
+        const issue = parsed.error.issues[0];
+        const where = issue && issue.path.length > 0 ? issue.path.join('.') : '(root)';
+        return res.status(400).json({ error: `modelSampling.${where}: ${issue?.message ?? 'schema mismatch'}` });
+      }
+      modelSamplingRow = JSON.stringify(parsed.data);
+    }
 
     if (defaultsRow !== null) upsertSetting(userId, 'llamacpp_load_defaults', defaultsRow);
     if (overridesRow !== null) upsertSetting(userId, 'llamacpp_model_overrides', overridesRow);
     if (presetsRow !== null) upsertSetting(userId, 'llamacpp_presets', presetsRow);
     if (activePresetRow !== null) upsertSetting(userId, 'llamacpp_active_preset', activePresetRow);
     if (samplingRow !== null) upsertSetting(userId, 'llamacpp_sampling', samplingRow);
+    if (modelSamplingRow !== null) upsertSetting(userId, 'llamacpp_model_sampling', modelSamplingRow);
     return res.json({ ok: true });
   } catch (err) {
     console.error('Error saving llama.cpp config:', err);

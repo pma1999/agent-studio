@@ -14,10 +14,12 @@
  *   baseline): green on the pristine tree, gone once the §10 seam lands.
  *
  *   SEAM assertions (--phase=post or default) — each enumerated global-
- *   constraints.md §6 touchpoint exists post-edit, the Increment 2 sampling
- *   seam (shared resolveLlamacppSampling in chat.ts AND councilExecutor) is
- *   present, LLAMACPP_SAMPLING_TOP_P is absent, and the pure registry exports
- *   behave per §1 (D8 legacy guard included).
+ *   constraints.md §6 touchpoint exists post-edit, the §10 sampling seam
+ *   (Increment 2d resolution v3: BOTH chat.ts AND councilExecutor injection
+ *   sites call resolveLlamacppSamplingForModel with their upstream model key,
+ *   presence_penalty included ONLY when set, no stale global-only resolver
+ *   call) is present, LLAMACPP_SAMPLING_TOP_P is absent, and the pure registry
+ *   exports behave per §1 (D8 legacy guard included).
  *
  * Usage:
  *   npx tsx scripts/test-llamacpp-chat-gates.ts --phase=pre   # baseline on the PRISTINE tree
@@ -185,8 +187,8 @@ function seamChecks(): void {
   ok('(C3) apiUrl override builds the resolved loopback endpoint', () => {
     assert.match(chatSource, /apiUrl = `http:\/\/127\.0\.0\.1:\$\{llamacppConfig\.port\}\/v1\/chat\/completions`;/);
   });
-  ok('(C4) llamacpp branch injects the resolved llamacpp_sampling row via the shared §10 resolver', () => {
-    assert.match(chatSource, /const s = resolveLlamacppSampling\(userId\);/);
+  ok('(C4) llamacpp branch injects the resolved sampling via the §10 ForModel resolver (resolution v3)', () => {
+    assert.match(chatSource, /const s = resolveLlamacppSamplingForModel\(userId, upstreamModel\);/);
     assert.match(
       chatSource,
       /requestBody\.temperature = s\.temp;\s*\n\s*requestBody\.top_p = s\.top_p;\s*\n\s*requestBody\.top_k = s\.top_k;\s*\n\s*requestBody\.min_p = s\.min_p;\s*\n\s*requestBody\.repeat_penalty = s\.repeat_penalty;/,
@@ -195,7 +197,7 @@ function seamChecks(): void {
     // `temperature: agent.temperature` literal stays for every other provider.
     assert.match(chatSource, /temperature: agent\.temperature,/);
     const genericAt = chatSource.indexOf('temperature: agent.temperature,');
-    const seamAt = chatSource.indexOf('resolveLlamacppSampling(userId)');
+    const seamAt = chatSource.indexOf('resolveLlamacppSamplingForModel(userId');
     assert.ok(seamAt > genericAt, 'sampling seam must come after the generic request-body literal');
   });
   ok('(C4b) OLD pin deleted: LLAMACPP_SAMPLING_TOP_P and top_p=0.8 are gone from chat.ts', () => {
@@ -277,13 +279,37 @@ function seamChecks(): void {
     assert.ok(gateAt > armAt, 'capability gate must sit inside the llamacpp arm');
     assert.ok(fetchAt > gateAt, 'capability gate must precede the llamacppFetch call');
   });
-  ok('(M6) council member AND synthesis bodies sample via the SAME shared §10 resolver', () => {
-    const uses = councilSource.match(/resolveLlamacppSampling\(options\.userId\)/g) ?? [];
-    assert.ok(uses.length >= 2, `expected >=2 shared-resolver uses (member + synthesis), found ${uses.length}`);
+  ok('(M6) council member AND synthesis bodies sample via the §10 ForModel resolver family', () => {
+    const uses = councilSource.match(/resolveLlamacppSamplingForModel\(options\.userId, ep\.upstreamModel\)/g) ?? [];
+    assert.ok(uses.length >= 2, `expected >=2 ForModel-resolver uses (member + synthesis), found ${uses.length}`);
   });
   ok('(M7) non-llamacpp council arms KEEP their fixed temp-0.7 body shape', () => {
     const fixed = councilSource.match(/temperature: 0\.7,/g) ?? [];
     assert.ok(fixed.length >= 2, `expected >=2 fixed-temperature literals preserved, found ${fixed.length}`);
+  });
+
+  // ---- §10 Increment 2d (task T11): per-model sampling + presence_penalty ---
+  // (C12/M8 ForModel pins live in C4/M6; these pin the OPTIONAL-knob semantics
+  // and the single-source rule.)
+  ok('(C13) chat.ts includes presence_penalty ONLY when set (conditional inclusion)', () => {
+    assert.match(
+      chatSource,
+      /if \(s\.presence_penalty !== undefined\) \{\s*\n\s*requestBody\.presence_penalty = s\.presence_penalty;\s*\n\s*\}/,
+    );
+  });
+  ok('(M9) council includes presence_penalty ONLY when set at BOTH seams', () => {
+    const uses = councilSource.match(
+      /if \(s\.presence_penalty !== undefined\) \{\s*\n\s*requestBody\.presence_penalty = s\.presence_penalty;/g,
+    ) ?? [];
+    assert.ok(uses.length >= 2, `expected >=2 conditional presence_penalty inclusions, found ${uses.length}`);
+  });
+  ok('(SS1) no consumer bypasses the ForModel family (§10 single-source rule)', () => {
+    // `resolveLlamacppSampling(` cannot match `resolveLlamacppSamplingForModel(`
+    // (the next char after "Sampling" must be "("), so this pins that BOTH
+    // injection sites moved to the ForModel family with no stale global-only
+    // call left behind.
+    assert.doesNotMatch(chatSource, /resolveLlamacppSampling\(/);
+    assert.doesNotMatch(councilSource, /resolveLlamacppSampling\(/);
   });
 
   // ---- chatCouncil.ts route-layer pre-flight (FF-T3-02, R8 consumer) --------

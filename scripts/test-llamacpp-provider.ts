@@ -28,6 +28,11 @@
  *    --reasoning-format right before the MTP pair), 'auto' omitted,
  *    override-beats-preset end-to-end, and the byte-identical argv omission
  *    regression on the exact golden array.
+ * 10. §10 Increment 2d OPTIONAL presence_penalty (bounds −2..2, ABSENT from
+ *     the canonical sampling defaults) + `llamacpp_model_sampling` row schema
+ *     (Record<modelKey, Partial<samplingRow>>) + mergeSamplingLayers v3 merge
+ *     unit (global ⊕ model; presence_penalty stays absent unless a layer sets
+ *     it).
  */
 import assert from 'node:assert/strict';
 import {
@@ -48,6 +53,7 @@ import {
   parseKnobs,
   stripThinkBlocks,
   type LlamacppKnobs,
+  type LlamacppSampling,
 } from '../server/providers/llamacpp.js';
 
 let checks = 0;
@@ -799,6 +805,92 @@ ok('argv regression: three canonical presets over MTP-capable and plain fixture 
     }
   }
 });
+
+// ---------------------------------------------------------------------------
+// 7b. §10 Increment 2d — OPTIONAL presence_penalty + model-sampling row
+// ---------------------------------------------------------------------------
+
+{
+  // Scoped dynamic import so a missing export fails ONLY this section.
+  const {
+    LLAMACPP_MODEL_SAMPLING_ROW_SCHEMA,
+    mergeSamplingLayers,
+  } = await import('../server/providers/llamacpp.js');
+
+  ok('LLAMACPP_SAMPLING_DEFAULTS does NOT carry presence_penalty (absent = omitted from body)', () => {
+    assert.equal('presence_penalty' in LLAMACPP_SAMPLING_DEFAULTS, false);
+  });
+
+  ok('LLAMACPP_SAMPLING_ROW_SCHEMA accepts OPTIONAL presence_penalty across the full -2..2 range', () => {
+    const canonical = { temp: 0.6, top_p: 0.95, top_k: 20, min_p: 0, repeat_penalty: 1 };
+    for (const value of [-2, -1.5, -1, 0, 0.75, 1.5, 2]) {
+      const parsed = LLAMACPP_SAMPLING_ROW_SCHEMA.safeParse({ ...canonical, presence_penalty: value });
+      assert.equal(parsed.success, true, `expected accept presence_penalty=${value}`);
+      if (parsed.success) assert.equal(parsed.data.presence_penalty, value);
+    }
+    // A row without presence_penalty parses fine and the key stays ABSENT.
+    const bare = LLAMACPP_SAMPLING_ROW_SCHEMA.parse({ ...canonical });
+    assert.equal('presence_penalty' in bare, false);
+  });
+
+  ok('LLAMACPP_SAMPLING_ROW_SCHEMA rejects out-of-range / non-numeric presence_penalty', () => {
+    const canonical = { temp: 0.6, top_p: 0.95, top_k: 20, min_p: 0, repeat_penalty: 1 };
+    for (const value of [-2.01, 2.01, 3, '1.5', null]) {
+      const parsed = LLAMACPP_SAMPLING_ROW_SCHEMA.safeParse({ ...canonical, presence_penalty: value });
+      assert.equal(parsed.success, false, `expected reject presence_penalty=${String(value)}`);
+    }
+  });
+
+  ok('LLAMACPP_MODEL_SAMPLING_ROW_SCHEMA accepts Record<modelKey, Partial<samplingRow>> incl. empty entries', () => {
+    const parsed = LLAMACPP_MODEL_SAMPLING_ROW_SCHEMA.safeParse({
+      'Tuned-Model': { temp: 1.0, presence_penalty: 1.5 },
+      'Plain-Model': {},
+      Partial: { top_k: 40 },
+    });
+    assert.equal(parsed.success, true);
+    assert.equal(LLAMACPP_MODEL_SAMPLING_ROW_SCHEMA.safeParse({}).success, true, 'empty row is valid');
+  });
+
+  ok('LLAMACPP_MODEL_SAMPLING_ROW_SCHEMA rejects unknown keys, bad values, non-object entries and arrays', () => {
+    const cases: Array<[string, unknown]> = [
+      ['unknown key inside an entry', { M: { temperature: 0.7 } }],
+      ['out-of-bounds temp inside an entry', { M: { temp: 5 } }],
+      ['presence_penalty above 2 inside an entry', { M: { presence_penalty: 2.5 } }],
+      ['non-object entry value', { M: 7 }],
+      ['array root (records must be keyed objects)', [{ M: {} }]],
+    ];
+    for (const [name, row] of cases) {
+      const parsed = LLAMACPP_MODEL_SAMPLING_ROW_SCHEMA.safeParse(row);
+      assert.equal(parsed.success, false, `expected reject: ${name}`);
+    }
+  });
+
+  ok('mergeSamplingLayers resolves global ⊕ model key-by-key; presence_penalty stays ABSENT unless set', () => {
+    const global: LlamacppSampling = { ...LLAMACPP_SAMPLING_DEFAULTS }; // no presence_penalty key
+
+    const merged = mergeSamplingLayers(global, { temp: 1.0, presence_penalty: 1.5 });
+    assert.equal(merged.temp, 1.0, 'model layer wins per-key');
+    assert.equal(merged.top_p, LLAMACPP_SAMPLING_DEFAULTS.top_p);
+    assert.equal(merged.top_k, LLAMACPP_SAMPLING_DEFAULTS.top_k);
+    assert.equal(merged.min_p, LLAMACPP_SAMPLING_DEFAULTS.min_p);
+    assert.equal(merged.repeat_penalty, LLAMACPP_SAMPLING_DEFAULTS.repeat_penalty);
+    assert.equal(merged.presence_penalty, 1.5);
+
+    const untouched = mergeSamplingLayers(global, { top_k: 60 });
+    assert.equal('presence_penalty' in untouched, false, 'omitted stays omitted (never serialized as 0)');
+
+    const globalOnlySurvives = mergeSamplingLayers(
+      { ...global, presence_penalty: -0.5 },
+      { repeat_penalty: 1.2 },
+    );
+    assert.equal(globalOnlySurvives.presence_penalty, -0.5, 'global-only presence_penalty survives upper-layer omission');
+    assert.equal(globalOnlySurvives.repeat_penalty, 1.2);
+
+    const undefinedSkipped = mergeSamplingLayers(global, { temp: undefined });
+    assert.equal(undefinedSkipped.temp, LLAMACPP_SAMPLING_DEFAULTS.temp, 'undefined layer keys never clobber');
+    assert.deepEqual(mergeSamplingLayers(global, null, undefined), global, 'null/undefined layers tolerated');
+  });
+}
 
 // ---------------------------------------------------------------------------
 // 8. Think splitter copy sanity

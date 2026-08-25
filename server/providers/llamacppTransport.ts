@@ -50,12 +50,14 @@ import {
   LLAMACPP_CANONICAL_PRESETS,
   LLAMACPP_DEFAULT_KNOBS,
   LLAMACPP_MODEL_OVERRIDES_ROW_SCHEMA,
+  LLAMACPP_MODEL_SAMPLING_ROW_SCHEMA,
   LLAMACPP_PRESETS_ROW_SCHEMA,
   LLAMACPP_SAMPLING_DEFAULTS,
   LLAMACPP_SAMPLING_ROW_SCHEMA,
   buildLlamaServerArgv,
   collapseShardEntries,
   mergeKnobLayers,
+  mergeSamplingLayers,
   parseKnobs,
   type LlamacppKnobs,
   type LlamacppKnobOverrides,
@@ -63,6 +65,7 @@ import {
   type LlamacppPresetId,
   type LlamacppPresetsRow,
   type LlamacppSampling,
+  type LlamacppSamplingOverride,
 } from './llamacpp.js';
 
 // ---------------------------------------------------------------------------
@@ -133,6 +136,11 @@ export interface LlamacppResolvedConfig {
   activePreset: LlamacppPresetId;
   /** Resolved `llamacpp_sampling` row (corrupt ⇒ canonical defaults + warn). */
   sampling: LlamacppSampling;
+  /**
+   * §10 Increment 2d — validated `llamacpp_model_sampling` rows AS STORED
+   * (absent row ⇒ {}; corrupt ⇒ {} + warn).
+   */
+  modelSampling: Record<string, LlamacppSamplingOverride>;
 }
 
 function readSetting(userId: string, key: string): string {
@@ -231,6 +239,32 @@ function resolveSamplingRow(userId: string): LlamacppSampling {
   return { ...LLAMACPP_SAMPLING_DEFAULTS };
 }
 
+/**
+ * Resolves the `llamacpp_model_sampling` row (§10 Increment 2d): validated
+ * per-model sampling partials exposed AS STORED. Absent row ⇒ {} SILENTLY;
+ * corrupt/schema-invalid row ⇒ {} + warn (repair-to-empty, mirroring the
+ * `llamacpp_model_overrides` discipline), never throws.
+ */
+function resolveModelSamplingRow(userId: string): Record<string, LlamacppSamplingOverride> {
+  const raw = parseJsonRow(readSetting(userId, 'llamacpp_model_sampling'));
+  if (raw === null) return {};
+  if (raw === undefined) {
+    warnOnce('corrupt llamacpp_model_sampling setting ignored; treating as empty.');
+    return {};
+  }
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    warnOnce('invalid llamacpp_model_sampling ignored (not an object); treating as empty.');
+    return {};
+  }
+  const parsed = LLAMACPP_MODEL_SAMPLING_ROW_SCHEMA.safeParse(raw);
+  if (parsed.success) return parsed.data;
+  const issue = parsed.error.issues[0];
+  warnOnce(
+    `invalid llamacpp_model_sampling ignored (${issue ? `${issue.path.join('.') || '(root)'}: ${issue.message}` : 'schema mismatch'}); treating as empty.`,
+  );
+  return {};
+}
+
 export function resolveLlamacppConfig(userId: string): LlamacppResolvedConfig {
   const exePath = readSetting(userId, 'llamacpp_exe_path')
     || envValue('LLAMACPP_EXE_PATH')
@@ -280,22 +314,41 @@ export function resolveLlamacppConfig(userId: string): LlamacppResolvedConfig {
   }
 
   // §3 Increment 2 rows: preset slots, the active pointer and the independent
-  // sampling row — same fail-soft repair discipline, never throw.
+  // sampling row — same fail-soft repair discipline, never throw. §10
+  // Increment 2d adds the per-model sampling rows (absent ⇒ {}, corrupt ⇒
+  // {} + warn).
   const presets = resolvePresetsRow(userId);
   const activePreset = resolveActivePreset(userId);
   const sampling = resolveSamplingRow(userId);
+  const modelSampling = resolveModelSamplingRow(userId);
 
-  return { exePath, modelsDir, port, idleUnloadMinutes, knobs, overrides, presets, activePreset, sampling };
+  return { exePath, modelsDir, port, idleUnloadMinutes, knobs, overrides, presets, activePreset, sampling, modelSampling };
 }
 
 /**
- * §10 shared sampling resolver — the SINGLE source consumed by chat.ts AND
- * councilExecutor.ts alike. Returns the persisted `llamacpp_sampling` row
- * (corrupt ⇒ canonical defaults + warn); no asymmetric per-consumer branch is
- * permitted.
+ * §10 shared sampling resolver family — THE single source consumed by chat.ts
+ * AND councilExecutor.ts alike; no asymmetric per-consumer branch is permitted.
+ *
+ * Resolution v3 (Increment 2d): global `llamacpp_sampling` row ⊕
+ * `llamacpp_model_sampling[modelKey]` (per-key override; keys absent from the
+ * model layer keep their global value). A null/undefined modelKey, or a model
+ * with no stored layer, resolves to the global row verbatim. Corrupt rows
+ * follow the ratified warn+repair discipline inside the row resolvers.
+ *
+ * Increment 2d note: the former global-only `resolveLlamacppSampling(userId)`
+ * export was folded into THIS family — both injection sites name their already-
+ * resolved upstream model key explicitly, so no separate global-only resolver
+ * remains.
  */
-export function resolveLlamacppSampling(userId: string): LlamacppSampling {
-  return resolveSamplingRow(userId);
+export function resolveLlamacppSamplingForModel(
+  userId: string,
+  modelKey: string | null | undefined,
+): LlamacppSampling {
+  const base = resolveSamplingRow(userId);
+  if (!modelKey) return base;
+  const layer = resolveModelSamplingRow(userId)[modelKey];
+  if (!layer) return base;
+  return mergeSamplingLayers(base, layer);
 }
 
 // ---------------------------------------------------------------------------

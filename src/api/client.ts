@@ -788,7 +788,12 @@ export interface LlamaCppSampling {
   top_k: number;
   min_p: number;
   repeat_penalty: number;
+  /** §10 Increment 2d — OPTIONAL; absent = omitted from the request body. */
+  presence_penalty?: number;
 }
+
+/** One `llamacpp_model_sampling` entry: any subset of the sampling row. */
+export type LlamaCppSamplingOverride = Partial<LlamaCppSampling>;
 
 /** Persisted `llamacpp_presets` row — one partial knob-bag slot per preset id. */
 export type LlamaCppPresetsRow = Record<LlamaCppPresetId, LlamaCppKnobOverrides>;
@@ -802,6 +807,9 @@ export interface LlamaCppConfigPayload {
   presets?: Partial<LlamaCppPresetsRow>;
   activePreset?: LlamaCppPresetId;
   sampling?: Partial<LlamaCppSampling>;
+  /** §10 Increment 2d: Record<modelKey, Partial<samplingRow>>, persisted
+   * verbatim after validation (`modelSampling.<key>.temp: …` on 400). */
+  modelSampling?: Record<string, LlamaCppSamplingOverride>;
 }
 
 /** §5 logs envelope — text never exceeds maxBytes. */

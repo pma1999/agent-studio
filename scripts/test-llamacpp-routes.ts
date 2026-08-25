@@ -5,9 +5,11 @@
  *   POST /api/models/llamacpp/start      ({model, overrides?})
  *   POST /api/models/llamacpp/stop       (FROZEN envelope)
  *   GET  /api/models/llamacpp/config     (effective config view incl. §3 v2
- *                                         presets/activePreset/sampling)
+ *                                         presets/activePreset/sampling and
+ *                                         the §10 Increment 2d modelSampling map)
  *   POST /api/models/llamacpp/config     (zod-validated persistence with
- *                                         key-level errors; CANONICAL ⊕ presets)
+ *                                         key-level errors; CANONICAL ⊕ presets;
+ *                                         modelSampling persisted verbatim)
  *   GET  /api/models/llamacpp/logs       (bounded tail, fail-soft)
  *
  * No real llama-server and no real local-agent binary are required: scenarios
@@ -492,6 +494,82 @@ try {
     const read = await call('GET', '/llamacpp/config', { user: USER_A });
     ok('rejected writes left the stored pointer untouched (still profundo)', () => {
       assert.equal(read.json.activePreset, 'profundo');
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // Section 6b-2d (§10 Increment 2d): modelSampling section — GET returns
+  // the resolved map; POST persists verbatim after key-level validation.
+  // ---------------------------------------------------------------------
+  {
+    const r = await call('POST', '/llamacpp/config', {
+      user: USER_A,
+      body: { modelSampling: { 'Qwen3-Test': { temp: 1.0, presence_penalty: 1.5 }, Other: { top_k: 80 } } },
+    });
+    ok('config persists the modelSampling row verbatim -> 200 {ok:true}', () => {
+      assert.equal(r.status, 200);
+      assert.deepEqual(r.json, { ok: true });
+    });
+
+    const read = await call('GET', '/llamacpp/config', { user: USER_A });
+    ok('config GET returns the resolved modelSampling map alongside sampling', () => {
+      assert.equal(read.status, 200);
+      assert.deepEqual(
+        read.json.modelSampling,
+        { 'Qwen3-Test': { temp: 1.0, presence_penalty: 1.5 }, Other: { top_k: 80 } },
+      );
+    });
+    ok('config GET payload carries exactly the §5 amended field set (exhaustive keys)', () => {
+      assert.deepEqual(
+        Object.keys(read.json).sort(),
+        [
+          'activePreset',
+          'defaults',
+          'exePath',
+          'idleUnloadMinutes',
+          'modelSampling',
+          'modelsDir',
+          'ok',
+          'overrides',
+          'port',
+          'presets',
+          'sampling',
+        ].sort(),
+      );
+    });
+  }
+  {
+    // modelSampling ALONE satisfies the at-least-one-section rule; like every
+    // config section it REPLACES its whole settings row.
+    const r = await call('POST', '/llamacpp/config', {
+      user: USER_A,
+      body: { modelSampling: { Solo: { presence_penalty: -1.5 } } },
+    });
+    ok('modelSampling-only POST counts as a provided section -> 200', () => {
+      assert.equal(r.status, 200);
+      assert.deepEqual(r.json, { ok: true });
+    });
+    const read = await call('GET', '/llamacpp/config', { user: USER_A });
+    ok('a modelSampling POST replaces the WHOLE row; partial entries persist as-stored', () => {
+      assert.deepEqual(read.json.modelSampling, { Solo: { presence_penalty: -1.5 } });
+    });
+  }
+  for (const [name, body, pattern] of [
+    ['out-of-bounds value inside a model-sampling entry', { modelSampling: { Bad: { temp: 99 } } }, /modelSampling\.Bad\.temp/],
+    ['presence_penalty outside −2..2', { modelSampling: { Bad: { presence_penalty: 2.01 } } }, /modelSampling\.Bad\.presence_penalty/],
+    ['unknown key inside a model-sampling entry', { modelSampling: { Bad: { nope: 1 } } }, /modelSampling\.Bad[^\n]*nope/],
+    ['non-object modelSampling section', { modelSampling: 42 }, /modelSampling/],
+  ] as Array<[string, unknown, RegExp]>) {
+    const r = await call('POST', '/llamacpp/config', { user: USER_A, body });
+    ok(`config rejects ${name} -> 400 with key-level detail`, () => {
+      assert.equal(r.status, 400);
+      assert.match(String(r.json?.error), pattern);
+    });
+  }
+  {
+    const read = await call('GET', '/llamacpp/config', { user: USER_A });
+    ok('rejected modelSampling writes left the stored row untouched (validate-before-persist)', () => {
+      assert.deepEqual(read.json.modelSampling, { Solo: { presence_penalty: -1.5 } });
     });
   }
 
