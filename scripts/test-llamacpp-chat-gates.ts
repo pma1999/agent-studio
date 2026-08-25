@@ -206,7 +206,12 @@ function seamChecks(): void {
   });
   ok('(C5) stream_options include_usage + chat_template_kwargs extras present', () => {
     assert.match(chatSource, /requestBody\.stream_options = \{ include_usage: true \};/);
-    assert.match(chatSource, /requestBody\.chat_template_kwargs = \{ enable_thinking: !reasoningEnabled \};/);
+    // Toggle polarity (bugfix): Thinking ON ⇒ enable_thinking:true (the model
+    // thinks); OFF ⇒ enable_thinking:false (fully off — verified live on build
+    // b10516 where the per-request flag is the only effective suppressor).
+    // The historical `!reasoningEnabled` here inverted the master switch.
+    assert.match(chatSource, /requestBody\.chat_template_kwargs = \{ enable_thinking: reasoningEnabled \};/);
+    assert.doesNotMatch(chatSource, /enable_thinking: !reasoningEnabled/);
   });
   ok('(C6) tools attach without the old veto flag', () => {
     assert.doesNotMatch(chatSource, /lmstudioToolsOmitted/);

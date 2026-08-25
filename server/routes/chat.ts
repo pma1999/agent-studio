@@ -816,9 +816,13 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     if (isLlamacppModel(effectiveModel)) {
       // llama.cpp request-body extras (§6): a usage frame on stream close, and
       // an explicit thinking toggle for the jinja chat template of Qwen3-class
-      // models (reasoning off ⇒ enable_thinking:false).
+      // models. The per-chat toggle is the master switch: ON ⇒
+      // enable_thinking:true so the model thinks regardless of template
+      // default; OFF ⇒ enable_thinking:false = fully off (verified live on
+      // b10516: this per-request flag is the only effective suppressor —
+      // --reasoning-budget 0 is NOT).
       requestBody.stream_options = { include_usage: true };
-      requestBody.chat_template_kwargs = { enable_thinking: !reasoningEnabled };
+      requestBody.chat_template_kwargs = { enable_thinking: reasoningEnabled };
     }
 
     // Structured outputs (OpenRouter JSON Schema)
