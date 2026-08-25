@@ -22,6 +22,14 @@
  * failures (disconnect/timeout/abort/status 0) to explanatory shapes —
  * 502 JSON from llamacppFetch, `{mode:'failed',error}` from ensure — and a
  * mid-stream relay failure surfaces as a stream error after the terminal.
+ *
+ * T9 streaming: a relay exchange whose first body byte arrives with the
+ * terminal frame still outstanding is handed to the caller IMMEDIATELY as a
+ * 200 `text/event-stream` Response (both callers are POST
+ * /v1/chat/completions SSE readers) so progressive delivery survives the
+ * relay leg; a later status-0 terminal surfaces as that body's read failure.
+ * Exchanges where the terminal leads — or lands within one short grace
+ * window of the whole byte burst — keep the exact buffered mappings above.
  */
 
 import { nanoid } from 'nanoid';
@@ -66,6 +74,14 @@ const PROBE_TIMEOUT_MS = 1500;
 export const PROBE_CACHE_TTL_MS = 10_000;
 /** Registry timeouts are ceilings; callers bound long streams via signals. */
 const DEFAULT_RELAY_REQUEST_TIMEOUT_MS = 600_000;
+/**
+ * T9 shape-decision grace window: after a relay body's FIRST byte, wait this
+ * long for the terminal frame before declaring the exchange 'streamed'.
+ * Buffered bodies (error JSON, /health) arrive as chunk(s)+terminal in one
+ * burst well inside the window and keep their precise terminal-led mapping;
+ * genuine streams hold the terminal outstanding for seconds to minutes.
+ */
+const RELAY_SHAPE_GRACE_MS = 50;
 /** §5/§8: readiness timeout ≥120 s for a cold 20+ GB GGUF load. */
 const DEFAULT_HEALTH_WAIT_MS = 120_000;
 const HEALTH_POLL_INTERVAL_MS = 500;
@@ -379,6 +395,14 @@ interface RelayStreamHandle {
   stream: ReadableStream<Uint8Array>;
   /** Resolves with the terminal frame, or rejects on abort/disconnect/timeout before it. */
   terminal: Promise<HttpProxyResult>;
+  /**
+   * T9 exchange shape — resolves 'streamed' once a body byte has flowed with
+   * the terminal still outstanding past the grace window (the upstream
+   * committed to a streamed body), or 'buffered' when the terminal settles
+   * first / within the window of the byte burst (the whole exchange is
+   * describable by its terminal frame). Never rejects.
+   */
+  shape: Promise<'streamed' | 'buffered'>;
 }
 
 function abortError(): Error {
@@ -408,6 +432,16 @@ function relayStream(
   const url = relayUrl(port, path);
   const requestId = `http_proxy_${nanoid()}`;
 
+  // T9 shape signal (see RelayStreamHandle). Never rejects; EVERY exit path
+  // below resolves it exactly once so llamacppFetch can never hang on it.
+  let resolveShape!: (shape: 'streamed' | 'buffered') => void;
+  const shape = new Promise<'streamed' | 'buffered'>((resolve) => {
+    resolveShape = resolve;
+  });
+  let sawBodyByte = false;
+  /** Set SYNCHRONOUSLY when the terminal promise settles (resolve OR reject). */
+  let terminalSettled = false;
+
   // F3-02 / §7 choke point: EVERY outbound relay request re-checks the
   // effective allowlist immediately before send — a cached probe verdict may
   // be up to ~10 s stale when settings change mid-window. Refusal mirrors a
@@ -429,6 +463,7 @@ function relayStream(
         },
       }),
       terminal: Promise.resolve(blocked),
+      shape: Promise.resolve('buffered'),
     };
   }
 
@@ -442,8 +477,14 @@ function relayStream(
   let resolveTerminal!: (result: HttpProxyResult) => void;
   let rejectTerminal!: (error: Error) => void;
   const terminal = new Promise<HttpProxyResult>((resolve, reject) => {
-    resolveTerminal = resolve;
-    rejectTerminal = reject;
+    resolveTerminal = (result) => {
+      terminalSettled = true;
+      resolve(result);
+    };
+    rejectTerminal = (error) => {
+      terminalSettled = true;
+      reject(error);
+    };
   });
 
   let settled = false;
@@ -465,6 +506,10 @@ function relayStream(
     } catch {
       /* stream already closed */
     }
+    // No byte ever flowed ⇒ the caller is still awaiting the shape; send it
+    // down the terminal-led path, whose `await handle.terminal` re-raises
+    // this same rejection (pre-T9 observable shape).
+    if (!sawBodyByte) resolveShape('buffered');
     detach();
   };
   const onExternalAbort = () => {
@@ -482,7 +527,7 @@ function relayStream(
         controller.error(error);
       },
     });
-    return { requestId, terminal, stream };
+    return { requestId, terminal, shape: Promise.resolve('buffered'), stream };
   }
 
   const stream = new ReadableStream<Uint8Array>({
@@ -496,6 +541,18 @@ function relayStream(
           requestId,
           { url, method, headers, body, timeoutMs },
           (text) => {
+            if (!sawBodyByte) {
+              sawBodyByte = true;
+              // T9: decide the exchange shape after a short grace window. A
+              // buffered body arrives as chunk(s)+terminal in ONE burst (the
+              // terminal wins ⇒ keep today's terminal-led status/error
+              // mapping); a genuinely streamed body leaves the terminal
+              // outstanding well past the window.
+              setTimeout(
+                () => resolveShape(terminalSettled ? 'buffered' : 'streamed'),
+                RELAY_SHAPE_GRACE_MS,
+              );
+            }
             try {
               controller.enqueue(encoder.encode(text));
             } catch {
@@ -511,6 +568,19 @@ function relayStream(
       settled = true;
       resolveTerminal(result);
       detach();
+      if (sawBodyByte && result.status === 0) {
+        // T9: the body already streamed past the grace window, so the caller
+        // holds a 200/SSE Response; map the relay-level failure — what the
+        // buffered path reports as explanatory 502 JSON — onto the body
+        // itself (documented mid-stream failure semantic).
+        try {
+          controller.error(new Error(result.error ?? 'llama.cpp request failed through the local-agent relay.'));
+        } catch {
+          /* stream already closed or errored */
+        }
+        return;
+      }
+      if (!sawBodyByte) resolveShape('buffered');
       try {
         controller.close();
       } catch {
@@ -523,7 +593,7 @@ function relayStream(
     },
   });
 
-  return { requestId, terminal, stream };
+  return { requestId, terminal, shape, stream };
 }
 
 interface BufferedExchange {
@@ -762,25 +832,44 @@ export async function llamacppFetch(
     }
     const handle = relayStream(userId, config.port, path, { method, headers, body, signal });
     if (releaseInFlight) {
-      // §8 relay hook: every chunk precedes the terminal frame, so terminal
-      // settlement — resolve OR reject (disconnect/timeout/abort) — IS the
-      // body-close event for this transport.
+      // §8 relay hook (unchanged by T9): every chunk precedes the terminal
+      // frame, so terminal settlement — resolve OR reject — IS the
+      // body-close event for this transport. Cancel/abort paths always end
+      // in a settlement or rejection, so the counter can never leak.
       void handle.terminal.then(
         () => undefined,
         () => undefined,
       ).then(() => releaseInFlight());
     }
-    // Rejects here when the relay fails before the terminal frame (disconnect,
-    // timeout, abort) — same observable shape as a failed upstream fetch.
-    const result = await handle.terminal;
-    if (result.status === 0) {
-      return jsonResponse(502, {
-        error: result.error ?? 'llama.cpp request failed through the local-agent relay.',
+    // T9 streaming gate: wait only for the exchange SHAPE, never blindly for
+    // the terminal. A streamed body hands its Response over at first byte
+    // (+ grace window) so the SSE writer reads progressively; a terminal-led
+    // (buffered) exchange keeps today's exact mappings below.
+    const shape = await handle.shape;
+    if (shape === 'buffered') {
+      // Rejects here when the relay failed before/at the terminal frame
+      // without a streamed body (disconnect, timeout, abort) — same
+      // observable shape as a failed upstream fetch.
+      const result = await handle.terminal;
+      if (result.status === 0) {
+        return jsonResponse(502, {
+          error: result.error ?? 'llama.cpp request failed through the local-agent relay.',
+        });
+      }
+      return new Response(handle.stream, {
+        status: result.status,
+        headers: { 'content-type': result.contentType ?? 'application/octet-stream' },
       });
     }
+    // Streamed: both callers are POST /v1/chat/completions SSE readers, so a
+    // body-led exchange is 200 text/event-stream by construction (INFERENCE_
+    // PATH). A later status-0 terminal is mapped to a readable-stream error
+    // inside relayStream (the buffered path's 502 analog); an ok:false
+    // terminal carrying the real upstream status still ends the body exactly
+    // as the buffered path did (clean close after the partial bytes).
     return new Response(handle.stream, {
-      status: result.status,
-      headers: { 'content-type': result.contentType ?? 'application/octet-stream' },
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
     });
   }
 

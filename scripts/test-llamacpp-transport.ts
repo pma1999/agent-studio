@@ -18,7 +18,11 @@
  *  6. stopLlamacpp idempotency + gate failures;
  *  7. llamacpp_exited push updates tracked state (observed once disconnected);
  *  8. runLlamacppIdleSweep boundaries: strict >N eviction, '0'=off,
- *     in-flight skip, never throws on agent-less users.
+ *     in-flight skip, never throws on agent-less users;
+ *  9. T9 relay streaming acceptance: TIMED progressivity (first body byte
+ *     strictly before the terminal frame), mid-stream error-terminal mapping
+ *     (body failure + counter release), client abort mid-stream (cancel frame
+ *     + counter release), and a paced DIRECT regression control.
  *
  * db-touching: needs a Linux-built better-sqlite3 — run in the
  * /tmp/opencode shadow tree under WSL (context-map.md §4 recipe).
@@ -1710,6 +1714,248 @@ try {
     ejected = await runLlamacppIdleSweep(Date.now() + 100 * 365 * 24 * 60 * 60 * 1000);
     assert.equal(ejected, 0, 'unreachable agent ⇒ failed unload, no throw, entry kept');
     assert.ok(usageEntry(goneUser, 'Gone-Model'), 'kept for a future tick');
+    setEnv('AGENT_HTTP_PROXY_ALLOW_HOSTS', undefined);
+  }
+
+  // -------------------------------------------------------------------------
+  // T9 acceptance — relay streaming. The FakeConnection replays frames with
+  // REAL delays so the seam's timing is observable: the Response returned by
+  // llamacppFetch must become readable as body bytes arrive, NEVER gated on
+  // the terminal http_proxy_response frame.
+  // -------------------------------------------------------------------------
+  console.log('10. T9 relay streaming: timed progressivity, mid-stream error, client abort');
+  {
+    setEnv('AGENT_HTTP_PROXY_ALLOW_HOSTS', `127.0.0.1:${CLOSED_PORT}`);
+
+    // (a) ACCEPTANCE A — TIMED RELAY PROGRESSIVITY: chunks at ~+300/+600/+900
+    // ms, terminal at ~+1200 ms. llamacppFetch must resolve and the first
+    // chunk must be readable STRICTLY BEFORE the terminal frame is even sent.
+    {
+      const userId = 't9-stream-timed';
+      insertUser(userId);
+      insertSetting(userId, 'llamacpp_port', String(CLOSED_PORT));
+      const CHUNKS = ['data: {"i":1}\n\n', 'data: {"i":2}\n\n', 'data: {"i":3}\n\n'];
+      let terminalSentAt = Number.POSITIVE_INFINITY;
+      const conn = connect(userId, {
+        capabilities: ['llamacpp'],
+        onProxy: (c, request) => {
+          const pathname = new URL(request.url).pathname;
+          if (pathname === '/health') {
+            replyText(c, request.requestId, 200, '{"status":"ok"}');
+            return;
+          }
+          if (pathname === '/v1/chat/completions' && request.method === 'POST') {
+            CHUNKS.forEach((text, seq) => {
+              setTimeout(() => {
+                c.receive({ type: 'http_proxy_chunk', requestId: request.requestId, seq, text });
+              }, 300 * (seq + 1));
+            });
+            setTimeout(() => {
+              terminalSentAt = Date.now();
+              c.receive({
+                type: 'http_proxy_response',
+                requestId: request.requestId,
+                ok: true,
+                status: 200,
+                contentType: 'text/event-stream',
+              });
+            }, 1200);
+            return;
+          }
+          replyText(c, request.requestId, 404, '{}');
+        },
+      });
+
+      const t0 = Date.now();
+      const streamed = await llamacppFetch(userId, '/v1/chat/completions', {
+        method: 'POST',
+        body: JSON.stringify({ model: 'timed-model' }),
+      });
+      const fetchResolvedAt = Date.now() - t0;
+      assert.equal(streamed.status, 200);
+      assert.equal(streamed.headers.get('content-type'), 'text/event-stream');
+      assert.ok(
+        fetchResolvedAt < 1200,
+        `llamacppFetch must resolve BEFORE the ~1200ms terminal frame; took ${fetchResolvedAt}ms`,
+      );
+
+      const reader = streamed.body!.getReader();
+      const decoder = new TextDecoder();
+      let streamedText = '';
+      let firstChunkAt = Number.POSITIVE_INFINITY;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (firstChunkAt === Number.POSITIVE_INFINITY) firstChunkAt = Date.now();
+        streamedText += decoder.decode(value, { stream: true });
+      }
+      assert.equal(streamedText, CHUNKS.join(''), 'all chunks arrive verbatim and in order');
+      assert.ok(
+        firstChunkAt < terminalSentAt,
+        `first body byte (+${firstChunkAt - t0}ms) must be readable strictly BEFORE the terminal frame (+${terminalSentAt - t0}ms)`,
+      );
+      await waitFor(() => (usageEntry(userId, 'timed-model')?.inFlight ?? 1) === 0);
+      conn.close();
+    }
+
+    // (b) ACCEPTANCE B — MID-STREAM ERROR TERMINAL: a status-0 terminal after
+    // a streamed body began maps to a readable-stream FAILURE carrying the
+    // terminal's descriptive error (the buffered path's 502-JSON analog), and
+    // the in-flight counter is released to 0.
+    {
+      const userId = 't9-stream-midfail';
+      insertUser(userId);
+      insertSetting(userId, 'llamacpp_port', String(CLOSED_PORT));
+      const conn = connect(userId, {
+        capabilities: ['llamacpp'],
+        onProxy: (c, request) => {
+          const pathname = new URL(request.url).pathname;
+          if (pathname === '/health') {
+            replyText(c, request.requestId, 200, '{"status":"ok"}');
+            return;
+          }
+          if (pathname === '/v1/chat/completions' && request.method === 'POST') {
+            setTimeout(() => c.receive({ type: 'http_proxy_chunk', requestId: request.requestId, seq: 0, text: 'data: {"j":1}\n\n' }), 100);
+            setTimeout(() => c.receive({ type: 'http_proxy_chunk', requestId: request.requestId, seq: 1, text: 'data: {"j":2}\n\n' }), 200);
+            setTimeout(() => {
+              c.receive({
+                type: 'http_proxy_response',
+                requestId: request.requestId,
+                ok: false,
+                status: 0,
+                error: 'simulated mid-stream relay failure',
+              });
+            }, 400);
+            return;
+          }
+          replyText(c, request.requestId, 404, '{}');
+        },
+      });
+
+      const response = await llamacppFetch(userId, '/v1/chat/completions', {
+        method: 'POST',
+        body: JSON.stringify({ model: 'midfail-model' }),
+      });
+      assert.equal(response.status, 200, 'streaming already committed before the error terminal');
+      assert.equal(response.headers.get('content-type'), 'text/event-stream');
+
+      const reader = response.body!.getReader();
+      const decoder = new TextDecoder();
+      let drained = '';
+      await assert.rejects(
+        () =>
+          (async () => {
+            for (;;) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              drained += decoder.decode(value, { stream: true });
+            }
+          })(),
+        /simulated mid-stream relay failure/,
+        'the mid-stream status-0 terminal must surface as a body failure with its error message',
+      );
+      assert.match(drained, /\{"j":1\}/, 'bytes that arrived before the failure still flow through');
+      await waitFor(() => (usageEntry(userId, 'midfail-model')?.inFlight ?? 1) === 0);
+      conn.close();
+    }
+
+    // (c) ACCEPTANCE C — CLIENT ABORT MID-STREAM: aborting the request signal
+    // while the relay body streams sends the http_proxy_cancel frame toward
+    // the agent, errors the body read deterministically (AbortError), and
+    // releases the in-flight counter once the exchange settles.
+    {
+      const userId = 't9-stream-abort';
+      insertUser(userId);
+      insertSetting(userId, 'llamacpp_port', String(CLOSED_PORT));
+      const conn = connect(userId, {
+        capabilities: ['llamacpp'],
+        onProxy: (c, request) => {
+          const pathname = new URL(request.url).pathname;
+          if (pathname === '/health') {
+            replyText(c, request.requestId, 200, '{"status":"ok"}');
+            return;
+          }
+          if (pathname === '/v1/chat/completions' && request.method === 'POST') {
+            // One chunk, then SILENCE — the stream is held open.
+            setTimeout(() => c.receive({ type: 'http_proxy_chunk', requestId: request.requestId, seq: 0, text: 'data: {"k":1}\n\n' }), 50);
+            return;
+          }
+          replyText(c, request.requestId, 404, '{}');
+        },
+      });
+
+      const controller = new AbortController();
+      const response = await llamacppFetch(userId, '/v1/chat/completions', {
+        method: 'POST',
+        body: JSON.stringify({ model: 'abort-model' }),
+        signal: controller.signal,
+      });
+      assert.equal(response.status, 200);
+      const reader = response.body!.getReader();
+      const first = await reader.read();
+      assert.ok(!first.done, 'premise: the held-open stream delivered its first chunk');
+
+      controller.abort();
+
+      // The backend must tell the agent to stop fetching upstream.
+      await waitFor(() => conn.sent.some((m) => m.type === 'http_proxy_cancel'));
+      const cancelFrame = conn.sent.find((m): m is Extract<BackendToAgentMessage, { type: 'http_proxy_cancel' }> => m.type === 'http_proxy_cancel')!;
+      // Emulate the agent's §5-pinned cancel ack ({ok:false,status:0,error:'cancelled'}).
+      conn.receive({ type: 'http_proxy_response', requestId: cancelFrame.requestId, ok: false, status: 0, error: 'cancelled' });
+
+      await assert.rejects(() => reader.read(), (err: Error) => err.name === 'AbortError');
+      await waitFor(() => (usageEntry(userId, 'abort-model')?.inFlight ?? 1) === 0);
+      conn.close();
+    }
+
+    // (d) DIRECT REGRESSION CONTROL — paced SSE over the real loopback server
+    // stays progressive end-to-end (direct mode untouched by T9).
+    {
+      let directEndedAt = Number.POSITIVE_INFINITY;
+      const directServer = await startFakeLlamaServer({
+        initialReady: true,
+        extra: (req, res, url) => {
+          if (req.method === 'POST' && url.pathname === '/v1/chat/completions') {
+            res.writeHead(200, { 'content-type': 'text/event-stream' });
+            res.write('data: {"d":1}\n\n');
+            setTimeout(() => res.write('data: {"d":2}\n\n'), 150);
+            setTimeout(() => {
+              directEndedAt = Date.now();
+              res.end('data: [DONE]\n\n');
+            }, 400);
+            return true;
+          }
+          return false;
+        },
+      });
+      try {
+        const userId = 't9-direct-paced';
+        insertUser(userId);
+        insertSetting(userId, 'llamacpp_port', String(directServer.port));
+        const direct = await llamacppFetch(userId, '/v1/chat/completions', {
+          method: 'POST',
+          body: JSON.stringify({ model: 'direct-paced-model' }),
+        });
+        assert.equal(direct.status, 200);
+        const reader = direct.body!.getReader();
+        const decoder = new TextDecoder();
+        let text = '';
+        let firstAt = Number.POSITIVE_INFINITY;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (firstAt === Number.POSITIVE_INFINITY) firstAt = Date.now();
+          text += decoder.decode(value, { stream: true });
+        }
+        assert.equal(text, 'data: {"d":1}\n\ndata: {"d":2}\n\ndata: [DONE]\n\n');
+        assert.ok(firstAt < directEndedAt, 'direct mode delivers bytes progressively (control stays green)');
+        assert.ok(usageEntry(userId, 'direct-paced-model'));
+        assert.equal(usageEntry(userId, 'direct-paced-model')?.inFlight, 0);
+      } finally {
+        directServer.close();
+      }
+    }
+
     setEnv('AGENT_HTTP_PROXY_ALLOW_HOSTS', undefined);
   }
 
