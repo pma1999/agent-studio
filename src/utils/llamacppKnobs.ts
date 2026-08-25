@@ -36,6 +36,14 @@ export interface LlamaCppKnobBag {
   gpu_layers: string;
   flash_attn: string;
   parallel_slots: number;
+  // §4 Increment 2c — OPTIONAL emit-when-set knobs. NOT part of
+  // LLAMACPP_KNOB_DEFAULTS: absent = omitted from argv = server default.
+  /** Prompt/logical batch size (`--batch-size`, int ≥ 1). */
+  logical_batch?: number;
+  /** Physical batch size (`--ubatch-size`, int ≥ 1). */
+  ubatch?: number;
+  /** Reasoning template (`--reasoning-format`); 'auto' is never emitted. */
+  reasoning_format?: LlamaCppReasoningFormat;
 }
 
 export type LlamaCppKnobKey = keyof LlamaCppKnobBag;
@@ -70,6 +78,11 @@ export const LLAMACPP_CACHE_TYPES = [
   'q5_0',
   'q5_1',
 ] as const;
+
+/** Values accepted by llama.cpp `--reasoning-format` (§4 Increment 2c). */
+export const LLAMACPP_REASONING_FORMATS = ['auto', 'none', 'deepseek', 'deepseek-legacy'] as const;
+
+export type LlamaCppReasoningFormat = (typeof LLAMACPP_REASONING_FORMATS)[number];
 
 // --- Increment 2 presets & sampling (§3 Increment 2; value-identical mirror) ---
 
@@ -128,12 +141,15 @@ export const LLAMACPP_PRESET_META: readonly LlamaCppPresetMeta[] = [
   { id: 'profundo', label: 'PROFUNDO', usage: 'problemas difíciles, debugging complejo, matemáticas' },
 ];
 
-/** Display order of the knob table (= §4 argv emission order). */
+/** Display order of the knob table (= §4 argv emission order; optional §4
+ * Increment 2c knobs sit at their exact emission slots). */
 const KNOB_ORDER: LlamaCppKnobKey[] = [
   'ctx',
   'parallel_slots',
   'threads',
   'threads_batch',
+  'logical_batch',
+  'ubatch',
   'gpu_layers',
   'n_cpu_moe',
   'flash_attn',
@@ -142,6 +158,7 @@ const KNOB_ORDER: LlamaCppKnobKey[] = [
   'mmap',
   'reasoning_budget',
   'device',
+  'reasoning_format',
   'mtp',
 ];
 
@@ -149,6 +166,8 @@ const KNOB_LABELS: Record<LlamaCppKnobKey, string> = {
   n_cpu_moe: 'MoE blocks on CPU',
   threads: 'Threads',
   threads_batch: 'Batch threads',
+  logical_batch: 'Logical batch',
+  ubatch: 'Ubatch (physical)',
   cache_type_k: 'KV cache K type',
   cache_type_v: 'KV cache V type',
   ctx: 'Context size',
@@ -159,7 +178,46 @@ const KNOB_LABELS: Record<LlamaCppKnobKey, string> = {
   gpu_layers: 'GPU layers',
   flash_attn: 'Flash attention',
   parallel_slots: 'Parallel slots',
+  reasoning_format: 'Reasoning format',
 };
+
+/**
+ * Per-key value types for fail-soft parse/merge. Derived-from-defaults checks
+ * (`typeof LLAMACPP_KNOB_DEFAULTS[key]`) cannot see the OPTIONAL §4 Increment
+ * 2c knobs (absent from the canonical bag), so the types are spelled out.
+ */
+const KNOB_VALUE_TYPES: Record<LlamaCppKnobKey, 'number' | 'boolean' | 'string'> = {
+  n_cpu_moe: 'number',
+  threads: 'number',
+  threads_batch: 'number',
+  logical_batch: 'number',
+  ubatch: 'number',
+  cache_type_k: 'string',
+  cache_type_v: 'string',
+  ctx: 'number',
+  mtp: 'number',
+  reasoning_budget: 'number',
+  mmap: 'boolean',
+  device: 'string',
+  gpu_layers: 'string',
+  flash_attn: 'string',
+  parallel_slots: 'number',
+  reasoning_format: 'string',
+};
+
+/** Value-type of a knob key (optional knobs included) — editor/parse helper. */
+export function knobValueType(key: LlamaCppKnobKey): 'number' | 'boolean' | 'string' {
+  return KNOB_VALUE_TYPES[key];
+}
+
+/** Fail-soft acceptance: right primitive type AND (for the closed
+ * `reasoning_format` enum) a documented member value. */
+function knobValueAcceptable(key: LlamaCppKnobKey, value: unknown): boolean {
+  if (key === 'reasoning_format') {
+    return typeof value === 'string' && (LLAMACPP_REASONING_FORMATS as readonly string[]).includes(value);
+  }
+  return typeof value === KNOB_VALUE_TYPES[key];
+}
 
 /**
  * Human-readable value for a knob as it appears in argv (`--load-mode mmap`,
@@ -190,7 +248,7 @@ export function mergeKnobLayers(
     if (!layer || typeof layer !== 'object') continue;
     for (const key of KNOB_ORDER) {
       const value = (layer as Record<string, unknown>)[key];
-      if (value !== undefined && typeof value === typeof merged[key]) {
+      if (knobValueAcceptable(key, value)) {
         (merged as unknown as Record<string, unknown>)[key] = value;
       }
     }
@@ -246,7 +304,7 @@ export function parseLlamaCppPresetsRow(raw: string | null | undefined): LlamaCp
       const clean: LlamaCppKnobOverrides = {};
       for (const key of KNOB_ORDER) {
         const value = (slot as Record<string, unknown>)[key];
-        if (value !== undefined && typeof value === typeof LLAMACPP_KNOB_DEFAULTS[key]) {
+        if (knobValueAcceptable(key, value)) {
           (clean as Record<string, unknown>)[key] = value;
         }
       }
@@ -344,6 +402,8 @@ const FLAG_BY_KEY: Partial<Record<LlamaCppKnobKey, string>> = {
   parallel_slots: '--parallel',
   threads: '--threads',
   threads_batch: '--threads-batch',
+  logical_batch: '--batch-size',
+  ubatch: '--ubatch-size',
   gpu_layers: '--gpu-layers',
   n_cpu_moe: '--n-cpu-moe',
   flash_attn: '--flash-attn',
@@ -352,6 +412,7 @@ const FLAG_BY_KEY: Partial<Record<LlamaCppKnobKey, string>> = {
   mmap: '--load-mode',
   reasoning_budget: '--reasoning-budget',
   device: '--device',
+  reasoning_format: '--reasoning-format',
   mtp: '--spec-draft-n-max',
 };
 
@@ -362,6 +423,10 @@ const FLAG_BY_KEY: Partial<Record<LlamaCppKnobKey, string>> = {
  * when a per-model override supplies it (precedence: model override >
  * preset > global), `inert` for the MTP pair whose flags are omitted (D7) —
  * reason `model-not-mtp` or `requires-parallel-1`.
+ *
+ * §4 Increment 2c OPTIONAL knobs render a dash with an omitted flag while
+ * unset; `reasoning_format 'auto'` also shows its flag as omitted ('auto' ==
+ * server default).
  *
  * `mtpActive` comes from the §5 status payload (argv truth); `mtpCapable`
  * from the catalog entry. When neither catalog nor status is available for
@@ -389,6 +454,7 @@ export function deriveLaunchRows(options: {
       : presetSupplied
         ? `preset:${presetId ?? '?'}`
         : 'global';
+    const rawValue = effective[key];
     let flag = FLAG_BY_KEY[key] ?? null;
     let inertReason: LaunchKnobRow['inertReason'];
 
@@ -397,6 +463,11 @@ export function deriveLaunchRows(options: {
     }
     if (key === 'device' && effective.device !== 'cuda') {
       flag = null; // §4: --device CUDA0 only when device==='cuda'
+    }
+    if (rawValue === undefined) {
+      flag = null; // §4 Increment 2c: OPTIONAL knob unset → omitted from argv
+    } else if (key === 'reasoning_format' && rawValue === 'auto') {
+      flag = null; // §4 Increment 2c: 'auto' == server default → never emitted
     }
 
     if (key === 'mtp') {
@@ -417,7 +488,7 @@ export function deriveLaunchRows(options: {
     return {
       key,
       label: KNOB_LABELS[key],
-      value: formatKnobValue(key, effective[key]),
+      value: rawValue === undefined ? '—' : formatKnobValue(key, rawValue),
       flag,
       origin: inertReason ? 'inert' : originBase,
       ...(inertReason ? { inertReason } : {}),

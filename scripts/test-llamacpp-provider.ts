@@ -21,13 +21,20 @@
  *    repair-to-canonical equality, resolution-order-v2 merge unit
  *    (override > preset > global), argv regression for all three canonical
  *    presets over an MTP-capable and a plain fixture name;
- * 8. think splitter copy sanity (tag split across deltas).
+ * 8. think splitter copy sanity (tag split across deltas);
+ * 9. §4 Increment 2c OPTIONAL emit-when-set knobs (logical_batch / ubatch /
+ *    reasoning_format): canonical-bag absence pin, zod accept/reject matrix,
+ *    slot-exact emission (--batch-size/--ubatch-size after --threads-batch,
+ *    --reasoning-format right before the MTP pair), 'auto' omitted,
+ *    override-beats-preset end-to-end, and the byte-identical argv omission
+ *    regression on the exact golden array.
  */
 import assert from 'node:assert/strict';
 import {
   LLAMACPP_ACTIVE_PRESET_DEFAULT,
   LLAMACPP_CANONICAL_PRESETS,
   LLAMACPP_DEFAULT_KNOBS,
+  LLAMACPP_MODEL_OVERRIDES_ROW_SCHEMA,
   LLAMACPP_PRESET_IDS,
   LLAMACPP_PRESETS_ROW_SCHEMA,
   LLAMACPP_SAMPLING_DEFAULTS,
@@ -180,6 +187,58 @@ ok('parseKnobs rejects wrong scalar types (string numbers are not ints)', () => 
   assert.equal(parseKnobs(null).ok, false);
   assert.equal(parseKnobs('bag').ok, false);
   assert.equal(parseKnobs([1, 2]).ok, false);
+});
+
+// --- §4 Increment 2c: OPTIONAL emit-when-set knobs --------------------------
+
+ok('LLAMACPP_DEFAULT_KNOBS does NOT carry the optional knobs (absent = server default)', () => {
+  for (const key of ['logical_batch', 'ubatch', 'reasoning_format'] as const) {
+    assert.equal(key in LLAMACPP_DEFAULT_KNOBS, false, `${key} must stay out of the §3 canonical bag`);
+  }
+});
+
+ok('parseKnobs accepts the three optional knobs at legal values and echoes them', () => {
+  for (const partial of [
+    { logical_batch: 1024 },
+    { ubatch: 1024 },
+    { reasoning_format: 'auto' },
+    { reasoning_format: 'none' },
+    { reasoning_format: 'deepseek' },
+    { reasoning_format: 'deepseek-legacy' },
+    { logical_batch: 1, ubatch: 1 },
+  ]) {
+    const parsed = parseKnobs(partial);
+    assert.equal(parsed.ok, true, `expected accept for ${JSON.stringify(partial)}`);
+    if (parsed.ok) assert.deepEqual(parsed.knobs, partial);
+  }
+});
+
+ok('parseKnobs rejects illegal optional-knob values (int >= 1; closed reasoning_format enum)', () => {
+  for (const partial of [
+    { logical_batch: 0 },
+    { logical_batch: -16 },
+    { logical_batch: 10.5 },
+    { ubatch: 0 },
+    { ubatch: 2.5 },
+    { reasoning_format: 'bogus' },
+    { reasoning_format: 'DeepSeek' }, // case-sensitive enum
+    { reasoning_format: 42 },
+    { reasoning_format: null },
+  ] as Array<Record<string, unknown>>) {
+    const parsed = parseKnobs(partial);
+    assert.equal(parsed.ok, false, `expected reject for ${JSON.stringify(partial)}`);
+  }
+});
+
+ok('row schemas built on KNOB_OVERRIDE_SCHEMA accept the optional knobs (presets + overrides record)', () => {
+  const presetsRow = LLAMACPP_PRESETS_ROW_SCHEMA.safeParse({
+    rapido: { logical_batch: 4096, reasoning_format: 'deepseek' },
+    equilibrado: {},
+    profundo: {},
+  });
+  assert.equal(presetsRow.success, true);
+  const overridesRow = LLAMACPP_MODEL_OVERRIDES_ROW_SCHEMA.safeParse({ SomeModel: { ubatch: 256 } });
+  assert.equal(overridesRow.success, true);
 });
 
 // ---------------------------------------------------------------------------
@@ -355,6 +414,82 @@ ok('buildLlamaServerArgv keeps --jinja always on and never emits --no-mmproj', (
   assert.equal(args.includes('--no-mmproj'), false);
 });
 
+// --- §4 Increment 2c: optional knob emission slots ---------------------------
+
+ok('buildLlamaServerArgv omits the optional knobs entirely when absent (byte-identical argv regression)', () => {
+  // The user's regression guard: a bag whose layers never mention the new keys
+  // must produce the EXACT pre-amendment argv — pinned as a full deepEqual on
+  // the golden array, not substring checks.
+  const modelPath = '/models/Qwen3.6-35B-A3B-MTP/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf';
+  const modelKey = 'Qwen3.6-35B-A3B-UD-Q4_K_M';
+  const { args } = buildLlamaServerArgv({
+    modelPath,
+    modelKey,
+    port: 8712,
+    knobs: { ...DEFAULTS }, // optional keys ABSENT — not merely 'auto' or zero
+    mtpCapable: true,
+  });
+  assert.deepEqual(args, expectedDefaultArgs(modelPath, modelKey));
+});
+
+ok('buildLlamaServerArgv emits --batch-size/--ubatch-size immediately after --threads-batch and --reasoning-format right before the MTP pair', () => {
+  const knobs = { ...DEFAULTS, logical_batch: 1024, ubatch: 512, reasoning_format: 'deepseek' as const };
+  const { args } = buildLlamaServerArgv({
+    modelPath: '/m/x.gguf',
+    modelKey: 'x',
+    port: 8712,
+    knobs,
+    mtpCapable: true,
+  });
+  const tb = args.indexOf('--threads-batch');
+  assert.notEqual(tb, -1);
+  assert.deepEqual(
+    args.slice(tb, tb + 6),
+    ['--threads-batch', '16', '--batch-size', '1024', '--ubatch-size', '512'],
+    'both batch flags land directly after --threads-batch, in order',
+  );
+  const specAt = args.indexOf('--spec-type');
+  assert.notEqual(specAt, -1);
+  assert.deepEqual(
+    args.slice(specAt - 2, specAt),
+    ['--reasoning-format', 'deepseek'],
+    '--reasoning-format sits immediately before the MTP pair',
+  );
+  assert.equal(args.filter((a) => a === '--batch-size').length, 1);
+  assert.equal(args.filter((a) => a === '--ubatch-size').length, 1);
+  assert.equal(args.filter((a) => a === '--reasoning-format').length, 1);
+});
+
+ok("buildLlamaServerArgv omits --reasoning-format at 'auto' (== server default) but still emits set batch knobs", () => {
+  const autoOnly = buildLlamaServerArgv({
+    modelPath: '/m/x.gguf',
+    modelKey: 'x',
+    port: 8712,
+    knobs: { ...DEFAULTS, reasoning_format: 'auto' },
+    mtpCapable: false,
+  }).args;
+  assert.equal(autoOnly.includes('--reasoning-format'), false, "'auto' is never emitted");
+  assert.equal(autoOnly.includes('--batch-size'), false);
+  assert.equal(autoOnly.includes('--ubatch-size'), false);
+
+  const setKnobs = buildLlamaServerArgv({
+    modelPath: '/m/x.gguf',
+    modelKey: 'x',
+    port: 8712,
+    knobs: { ...DEFAULTS, logical_batch: 7, ubatch: 9, reasoning_format: 'deepseek-legacy' },
+    mtpCapable: false, // MTP inert ⇒ --reasoning-format becomes the final pair
+  }).args;
+  const bIdx = setKnobs.indexOf('--batch-size');
+  assert.deepEqual(setKnobs.slice(bIdx, bIdx + 2), ['--batch-size', '7']);
+  const ubIdx = setKnobs.indexOf('--ubatch-size');
+  assert.deepEqual(setKnobs.slice(ubIdx, ubIdx + 2), ['--ubatch-size', '9']);
+  assert.deepEqual(
+    setKnobs.slice(-2),
+    ['--reasoning-format', 'deepseek-legacy'],
+    'enum value passes through verbatim at the MTP-pair slot even when inert',
+  );
+});
+
 // ---------------------------------------------------------------------------
 // 4. mergeKnobLayers — request > model > global > default
 // ---------------------------------------------------------------------------
@@ -380,6 +515,30 @@ ok('mergeKnobLayers resolves request > model > global > default knob-by-knob', (
   // layer omission tolerated at every position
   assert.deepEqual(mergeKnobLayers(base), base);
   assert.deepEqual(mergeKnobLayers(base, undefined, { threads: 9 }), { ...base, threads: 9 });
+});
+
+ok('override-beats-preset applies to the optional knobs end-to-end (merge + argv)', () => {
+  const globalLayer = { logical_batch: 2048 };
+  const presetLayer = { logical_batch: 4096, reasoning_format: 'none' as const };
+  const modelLayer = { logical_batch: 777 };
+  const requestLayer = { ubatch: 333 };
+  const merged = mergeKnobLayers({ ...DEFAULTS }, globalLayer, presetLayer, modelLayer, requestLayer);
+  assert.equal(merged.logical_batch, 777, 'model override beats preset beats global');
+  assert.equal(merged.ubatch, 333, 'request layer supplies ubatch');
+  assert.equal(merged.reasoning_format, 'none', 'preset value survives upper-layer omission');
+  const { args } = buildLlamaServerArgv({
+    modelPath: '/m/x.gguf',
+    modelKey: 'x',
+    port: 8712,
+    knobs: merged,
+    mtpCapable: false,
+  });
+  const bAt = args.indexOf('--batch-size');
+  assert.deepEqual(args.slice(bAt, bAt + 2), ['--batch-size', '777'], 'argv renders the WINNING layer');
+  const ubAt = args.indexOf('--ubatch-size');
+  assert.deepEqual(args.slice(ubAt, ubAt + 2), ['--ubatch-size', '333']);
+  const rfAt = args.indexOf('--reasoning-format');
+  assert.deepEqual(args.slice(rfAt, rfAt + 2), ['--reasoning-format', 'none']);
 });
 
 // ---------------------------------------------------------------------------

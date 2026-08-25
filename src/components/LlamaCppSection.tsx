@@ -22,11 +22,13 @@ import {
   LLAMACPP_LOGS_MAX_BYTES,
   LLAMACPP_PORT_DEFAULT,
   LLAMACPP_PRESET_META,
+  LLAMACPP_REASONING_FORMATS,
   LLAMACPP_SAMPLING_BOUNDS,
   LLAMACPP_SAMPLING_DEFAULTS,
   deriveLaunchRows,
   formatArgvLine,
   formatReasoningBudget,
+  knobValueType,
   mergeKnobLayers,
   parseLlamaCppActivePreset,
   parseLlamaCppJsonRow,
@@ -37,6 +39,7 @@ import {
   type LlamaCppKnobBag,
   type LlamaCppKnobKey,
   type LlamaCppKnobOverrides,
+  type LlamaCppReasoningFormat,
 } from '../utils/llamacppKnobs';
 import { Input } from './ui/Input';
 import { Button } from './ui/Button';
@@ -69,6 +72,16 @@ const NUM_KNOBS: Array<{ key: NumKnobKey; label: string; min: number; max?: numb
   { key: 'threads_batch', label: 'Batch threads', min: 1 },
   { key: 'n_cpu_moe', label: 'MoE blocks on CPU (0 = none)', min: 0 },
   { key: 'mtp', label: 'MTP draft tokens (0 = off)', min: 0, max: 5 },
+];
+
+/**
+ * §4 Increment 2c OPTIONAL emit-when-set knobs. Blank input = unset = key
+ * omitted from the persisted row = llama-server default applies (never a
+ * stored 0 or 'auto').
+ */
+const OPTIONAL_NUMERIC_KNOBS: Array<{ key: 'logical_batch' | 'ubatch'; label: string }> = [
+  { key: 'logical_batch', label: 'Logical batch (-b)' },
+  { key: 'ubatch', label: 'Ubatch (-ub)' },
 ];
 
 const REASONING_BUDGET_OPTIONS = [-1, 0, 512, 1024, 2048, 4096, 8192];
@@ -393,10 +406,41 @@ export function LlamaCppSection() {
     setDefaults((prev) => ({ ...prev, [key]: value }) as LlamaCppKnobBag);
   }, []);
 
+  // §4 Increment 2c OPTIONAL knobs: blank input = UNSET — the key is deleted
+  // from the defaults row so llama-server's own default applies. Invalid or
+  // half-typed numbers are ignored (existing fail-soft input discipline).
+  const updateOptionalNumberDefault = useCallback((key: 'logical_batch' | 'ubatch', raw: string) => {
+    setDefaults((prev) => {
+      const next = { ...prev } as LlamaCppKnobBag;
+      if (raw.trim() === '') {
+        delete next[key];
+        return next;
+      }
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 1) return prev;
+      (next as unknown as Record<string, unknown>)[key] = n;
+      return next;
+    });
+  }, []);
+
+  const updateDefaultReasoningFormat = useCallback((raw: string) => {
+    setDefaults((prev) => {
+      const next = { ...prev } as LlamaCppKnobBag;
+      if (raw === '') {
+        delete next.reasoning_format; // '(server default)' option = omitted key
+        return next;
+      }
+      next.reasoning_format = raw as LlamaCppReasoningFormat;
+      return next;
+    });
+  }, []);
+
   const updateOverride = useCallback((modelKey: string, knobKey: LlamaCppKnobKey, raw: string) => {
     setOverrides((prev) => {
       const row: LlamaCppKnobOverrides = { ...(prev[modelKey] ?? {}) };
-      const currentType = typeof LLAMACPP_KNOB_DEFAULTS[knobKey];
+      // knobValueType (not typeof-defaults) so the OPTIONAL §4 Increment 2c
+      // knobs type-check even though they are absent from the canonical bag.
+      const currentType = knobValueType(knobKey);
       let value: unknown = raw;
       if (currentType === 'number') {
         value = Number(raw);
@@ -549,6 +593,15 @@ export function LlamaCppSection() {
     [overrides, catalog]
   );
   const activeOverrideRow = overrideKey ? overrides[overrideKey] ?? {} : {};
+  // Inherited-value preview for override placeholders (global ⊕ this model's row).
+  const mergedOverride = useMemo(
+    () => mergeKnobLayers(defaults, activeOverrideRow),
+    [defaults, activeOverrideRow]
+  );
+  const inheritLabel = (key: LlamaCppKnobKey): string => {
+    const v = mergedOverride[key];
+    return v === undefined ? 'server default' : String(v);
+  };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
@@ -1209,6 +1262,19 @@ export function LlamaCppSection() {
               style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8125rem' }}
             />
           ))}
+          {OPTIONAL_NUMERIC_KNOBS.map(({ key, label }) => (
+            <Input
+              key={key}
+              label={label}
+              type="number"
+              min={1}
+              step={1}
+              placeholder="(blank = server default)"
+              value={defaults[key] !== undefined ? String(defaults[key]) : ''}
+              onChange={(e) => updateOptionalNumberDefault(key, e.target.value)}
+              style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8125rem' }}
+            />
+          ))}
           <div>
             <label className="form-field-label">Reasoning budget</label>
             <select
@@ -1275,6 +1341,30 @@ export function LlamaCppSection() {
               <option value="cuda">CUDA</option>
               <option value="cpu">CPU</option>
             </select>
+          </div>
+          <div>
+            <label className="form-field-label">Reasoning format</label>
+            <select
+              value={defaults.reasoning_format ?? ''}
+              onChange={(e) => updateDefaultReasoningFormat(e.target.value)}
+              aria-label="Default reasoning format"
+              style={{
+                width: '100%',
+                padding: '7px 10px',
+                borderRadius: 'var(--radius-sm)',
+                border: '1px solid var(--border)',
+                background: 'var(--bg-surface)',
+                color: 'var(--text-primary)',
+                fontFamily: 'var(--font-mono)',
+                fontSize: '0.8125rem',
+              }}
+            >
+              <option value="">(server default)</option>
+              {LLAMACPP_REASONING_FORMATS.map((f) => <option key={f} value={f}>{f}</option>)}
+            </select>
+            <div style={{ fontSize: '0.6875rem', color: 'var(--text-muted)' }}>
+              unset / auto = llama-server default
+            </div>
           </div>
           <div>
             <label className="form-field-label">Flash attention</label>
@@ -1377,6 +1467,19 @@ export function LlamaCppSection() {
                 style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8125rem' }}
               />
             ))}
+            {OPTIONAL_NUMERIC_KNOBS.map(({ key, label }) => (
+              <Input
+                key={key}
+                label={label}
+                type="number"
+                min={1}
+                step={1}
+                placeholder={`inherit: ${inheritLabel(key)}`}
+                value={activeOverrideRow[key] !== undefined ? String(activeOverrideRow[key]) : ''}
+                onChange={(e) => updateOverride(overrideKey, key, e.target.value)}
+                style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8125rem' }}
+              />
+            ))}
             <div>
               <label className="form-field-label">Reasoning budget</label>
               <select
@@ -1464,6 +1567,27 @@ export function LlamaCppSection() {
               >
                 <option value="">inherit</option>
                 {['on', 'off', 'auto'].map((t) => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="form-field-label">Reasoning format</label>
+              <select
+                value={activeOverrideRow.reasoning_format ?? ''}
+                onChange={(e) => updateOverride(overrideKey, 'reasoning_format', e.target.value)}
+                aria-label={`Override reasoning format for ${overrideKey}`}
+                style={{
+                  width: '100%',
+                  padding: '7px 10px',
+                  borderRadius: 'var(--radius-sm)',
+                  border: '1px solid var(--border)',
+                  background: 'var(--bg-surface)',
+                  color: 'var(--text-primary)',
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: '0.8125rem',
+                }}
+              >
+                <option value="">inherit ({inheritLabel('reasoning_format')})</option>
+                {LLAMACPP_REASONING_FORMATS.map((f) => <option key={f} value={f}>{f}</option>)}
               </select>
             </div>
             <Input

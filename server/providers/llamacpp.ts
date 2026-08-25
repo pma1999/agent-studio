@@ -37,6 +37,11 @@ export type LlamacppCacheType = (typeof LLAMACPP_CACHE_TYPES)[number];
 export type LlamacppFlashAttn = 'on' | 'off' | 'auto';
 export type LlamacppDevice = 'cuda' | 'cpu';
 
+/** Values accepted by llama.cpp `--reasoning-format`. */
+export const LLAMACPP_REASONING_FORMATS = ['auto', 'none', 'deepseek', 'deepseek-legacy'] as const;
+
+export type LlamacppReasoningFormat = (typeof LLAMACPP_REASONING_FORMATS)[number];
+
 export interface LlamacppKnobs {
   /** MoE expert layers kept on CPU (`--n-cpu-moe`). */
   n_cpu_moe: number;
@@ -57,6 +62,17 @@ export interface LlamacppKnobs {
   gpu_layers: string;
   flash_attn: LlamacppFlashAttn;
   parallel_slots: number;
+  // §4 Increment 2c — OPTIONAL emit-when-set knobs. Absent from the canonical
+  // bag on purpose: absent = omitted from argv = llama-server default applies.
+  /** Prompt/logical batch size (`--batch-size`, int ≥ 1). */
+  logical_batch?: number;
+  /** Physical batch size (`--ubatch-size`, int ≥ 1). */
+  ubatch?: number;
+  /**
+   * Reasoning template (`--reasoning-format`). NEVER emitted as `'auto'`
+   * ('auto' == the server default, so argv stays byte-identical to absent).
+   */
+  reasoning_format?: LlamacppReasoningFormat;
 }
 
 export type LlamacppKnobOverrides = Partial<LlamacppKnobs>;
@@ -110,6 +126,11 @@ export const KNOB_OVERRIDE_SCHEMA = z
     gpu_layers: GPU_LAYERS_SCHEMA,
     flash_attn: z.enum(['on', 'off', 'auto']),
     parallel_slots: intSchema(1),
+    // §4 Increment 2c — optional emit-when-set knobs (.partial() below makes
+    // each key optional; they are deliberately NOT in LLAMACPP_DEFAULT_KNOBS).
+    logical_batch: intSchema(1),
+    ubatch: intSchema(1),
+    reasoning_format: z.enum(LLAMACPP_REASONING_FORMATS),
   })
   .strict()
   .partial();
@@ -247,16 +268,21 @@ export interface BuildLlamaServerArgvInput {
  * spawn frames carry `args`, never a shell string).
  *
  * Emits exactly, in order: --model, --alias, --host 127.0.0.1, --port,
- * --ctx-size, --parallel, --threads, --threads-batch, --gpu-layers,
+ * --ctx-size, --parallel, --threads, --threads-batch, [--batch-size,
+ * --ubatch-size ONLY when the OPTIONAL knobs are set], --gpu-layers,
  * --n-cpu-moe, --flash-attn, --cache-type-k, --cache-type-v, --load-mode
  * mmap|none, --jinja, [--reasoning-budget N when ≥ 0], [--device CUDA0 when
- * device==='cuda'], plus the MTP pair ONLY when
- * `mtp>0 && mtpCapable && parallel_slots===1`.
+ * device==='cuda'], [--reasoning-format <v> when set and ≠ 'auto'], plus the
+ * MTP pair ONLY when `mtp>0 && mtpCapable && parallel_slots===1`.
  *
  * Every numeric/enum arg is explicit — llama-server defaults drift (`--fit`
  * auto-resizes unset args; the port default will change upstream). `--jinja`
  * stays on for Qwen3.x chat templates/tool calls; `--no-mmproj` is never
  * emitted (only meaningful with -hf downloads).
+ *
+ * §4 Increment 2c: logical_batch/ubatch/reasoning_format are OPTIONAL
+ * emit-when-set knobs — absent keys (and reasoning_format 'auto') keep the
+ * argv BYTE-IDENTICAL to the pre-amendment builder.
  */
 export function buildLlamaServerArgv(input: BuildLlamaServerArgvInput): { args: string[] } {
   const { modelPath, modelKey, port, knobs, mtpCapable } = input;
@@ -269,6 +295,10 @@ export function buildLlamaServerArgv(input: BuildLlamaServerArgvInput): { args: 
     '--parallel', String(knobs.parallel_slots),
     '--threads', String(knobs.threads),
     '--threads-batch', String(knobs.threads_batch),
+    // §4 Increment 2c emission slot: both optional batch flags directly after
+    // --threads-batch; each present ONLY when its knob is defined.
+    ...(knobs.logical_batch !== undefined ? ['--batch-size', String(knobs.logical_batch)] : []),
+    ...(knobs.ubatch !== undefined ? ['--ubatch-size', String(knobs.ubatch)] : []),
     '--gpu-layers', String(knobs.gpu_layers),
     '--n-cpu-moe', String(knobs.n_cpu_moe),
     '--flash-attn', String(knobs.flash_attn),
@@ -284,6 +314,11 @@ export function buildLlamaServerArgv(input: BuildLlamaServerArgvInput): { args: 
   }
   if (knobs.device === 'cuda') {
     args.push('--device', 'CUDA0');
+  }
+  // §4 Increment 2c emission slot: directly before the MTP pair; 'auto' is the
+  // server default and is NEVER emitted (byte-identical to an absent key).
+  if (knobs.reasoning_format !== undefined && knobs.reasoning_format !== 'auto') {
+    args.push('--reasoning-format', knobs.reasoning_format);
   }
   if (knobs.mtp > 0 && mtpCapable && knobs.parallel_slots === 1) {
     args.push('--spec-type', 'draft-mtp', '--spec-draft-n-max', String(knobs.mtp));
