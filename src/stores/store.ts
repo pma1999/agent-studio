@@ -18,6 +18,7 @@ import type {
   ProviderRoutingConfig,
   ConversationToolConfigOverride,
   ConversationSkillConfigOverride,
+  ChatArtifact,
 } from '../types';
 import type { AuthUser } from '../api/client';
 import { agentsApi, conversationsApi, messagesApi, settingsApi, creditsApi, usageApi, authApi, type MessagesListResponse } from '../api/client';
@@ -105,6 +106,16 @@ interface AppState {
 
   // Ordered live activity timeline (text/thinking/tool) for current streaming message
   // (now per conversation — see streamsByConversation above)
+
+  // Artifacts — per-conversation sidecar content
+  artifactsByConversation: Record<string, Record<string, ChatArtifact>>;
+  activeArtifactId: string | null;
+  artifactPanelOpen: boolean;
+  upsertConversationArtifact(conversationId: string, artifact: ChatArtifact): void;
+  hydrateConversationArtifacts(conversationId: string, artifacts: ChatArtifact[]): void;
+  setActiveArtifact(conversationId: string | null, artifactId: string | null): void;
+  closeArtifactPanel(): void;
+  clearConversationArtifacts(conversationId: string): void;
 
   // Settings
   openRouterApiKey: string;
@@ -660,6 +671,79 @@ export const useStore = create<AppState>((set, get) => ({
         ...state.streamsByConversation,
         [conversationId]: { ...entry, activityEvents: [] },
       },
+    };
+  }),
+
+  // Artifacts — per-conversation sidecar content
+  artifactsByConversation: {},
+  activeArtifactId: null,
+  artifactPanelOpen: false,
+  upsertConversationArtifact: (conversationId, artifact) => set((state) => {
+    const prevBucket = state.artifactsByConversation[conversationId] ?? {};
+    const isFirstInConversation = Object.keys(prevBucket).length === 0;
+    const nextBucket = { ...prevBucket, [artifact.id]: artifact };
+    // Auto-select semantics: set activeArtifactId to this artifact when the panel
+    // is already open showing an artifact from this conversation, OR when this is
+    // the first artifact ever for this conversation (no prior bucket entry).
+    const activeBelongsToThisConv = state.activeArtifactId !== null && state.activeArtifactId in prevBucket;
+    const shouldAutoSelect = isFirstInConversation || (state.artifactPanelOpen && activeBelongsToThisConv);
+    return {
+      artifactsByConversation: {
+        ...state.artifactsByConversation,
+        [conversationId]: nextBucket,
+      },
+      ...(shouldAutoSelect ? { activeArtifactId: artifact.id } : {}),
+    };
+  }),
+  hydrateConversationArtifacts: (conversationId, artifacts) => set((state) => {
+    const nextBucket: Record<string, ChatArtifact> = {};
+    for (const a of artifacts) nextBucket[a.id] = a;
+    let nextActive: string | null = state.activeArtifactId;
+    if (nextActive !== null && !(nextActive in nextBucket)) {
+      // Prefer lastActiveArtifact:<convId> from localStorage if it exists in this hydrate.
+      try {
+        const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(`lastActiveArtifact:${conversationId}`) : null;
+        if (saved && saved in nextBucket) nextActive = saved;
+        else nextActive = null;
+      } catch {
+        nextActive = null;
+      }
+    } else if (nextActive === null && artifacts.length > 0) {
+      try {
+        const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(`lastActiveArtifact:${conversationId}`) : null;
+        if (saved && saved in nextBucket) nextActive = saved;
+      } catch {}
+    }
+    return {
+      artifactsByConversation: {
+        ...state.artifactsByConversation,
+        [conversationId]: nextBucket,
+      },
+      activeArtifactId: nextActive !== null && nextActive in nextBucket ? nextActive : null,
+      ...(nextActive !== null && nextActive in nextBucket && state.activeArtifactId === null && !state.artifactPanelOpen && artifacts.length > 0 ? { artifactPanelOpen: true } : {}),
+    };
+  }),
+  setActiveArtifact: (conversationId, artifactId) => set(() => {
+    if (conversationId && artifactId) {
+      try { localStorage.setItem(`lastActiveArtifact:${conversationId}`, artifactId); } catch {}
+    } else if (conversationId && artifactId === null) {
+      try { localStorage.removeItem(`lastActiveArtifact:${conversationId}`); } catch {}
+    }
+    return {
+      activeArtifactId: artifactId,
+      ...(artifactId !== null ? { artifactPanelOpen: true } : {}),
+    };
+  }),
+  closeArtifactPanel: () => set({ artifactPanelOpen: false }),
+  clearConversationArtifacts: (conversationId) => set((state) => {
+    const bucket = state.artifactsByConversation[conversationId];
+    if (!bucket) return {};
+    const activeWasInBucket = state.activeArtifactId !== null && state.activeArtifactId in bucket;
+    const next = { ...state.artifactsByConversation };
+    delete next[conversationId];
+    return {
+      artifactsByConversation: next,
+      ...(activeWasInBucket ? { activeArtifactId: null, artifactPanelOpen: false } : {}),
     };
   }),
 

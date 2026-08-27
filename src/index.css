@@ -3612,3 +3612,269 @@ button:focus-visible .conv-delete-btn {
 @media (prefers-reduced-motion: reduce) {
   .shared-loading svg { animation: none; }
 }
+
+/* ===== Artifacts ===== */
+.artifact-panel {
+  /* Fill the resizable dock completely (dock is a row-flex container whose
+     main-axis sizing defaults to content width — without this, a transparent
+     strip appears at the right edge while dragging). */
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  background: var(--surface-1);
+  border-left: 1px solid var(--border-subtle);
+  position: relative;
+  overflow: hidden;
+}
+
+/* Fullscreen artifact mode: the dock leaves flex flow and covers the viewport.
+   The same React node stays mounted, so iframe/document state survives. */
+.artifact-panel-dock.artifact-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-drawer);
+  width: 100%;
+  height: 100vh;
+  height: 100dvh;
+}
+
+.artifact-panel-dock.artifact-fullscreen .artifact-panel {
+  border-left: none;
+  border-radius: 0;
+}
+
+.artifact-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-1);
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+.artifact-panel-title-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  min-width: 0;
+  flex: 1;
+}
+
+.artifact-panel-title {
+  font-family: var(--font-body);
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin: 0;
+  min-width: 0;
+}
+
+.artifact-panel-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background var(--motion-fast), color var(--motion-fast);
+}
+
+.artifact-panel-close:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.artifact-panel-close:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+}
+
+.artifact-panel-tabs {
+  flex-shrink: 0;
+  padding: 0 var(--space-sm);
+  background: var(--surface-1);
+}
+
+.artifact-panel-switch {
+  display: flex;
+  justify-content: flex-start;
+  padding: var(--space-sm) var(--space-md);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-1);
+  flex-shrink: 0;
+}
+
+.artifact-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: var(--space-md);
+  background: var(--surface-0);
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.artifact-frame {
+  width: 100%;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  display: block;
+}
+
+.artifact-svg-wrap {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  padding: var(--space-md);
+  overflow: auto;
+}
+
+.artifact-svg {
+  max-width: 100%;
+  display: flex;
+  justify-content: center;
+}
+
+.artifact-svg svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.artifact-diagram {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  padding: var(--space-md);
+  overflow: auto;
+  display: flex;
+  justify-content: center;
+}
+
+.artifact-diagram svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.artifact-diagram-error {
+  border: 1px solid var(--state-danger-softer);
+  background: var(--state-danger-soft);
+  color: var(--state-danger);
+  border-radius: var(--radius-md);
+  padding: var(--space-md);
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.artifact-diagram-loading {
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-1);
+  color: var(--text-muted);
+  border-radius: var(--radius-md);
+  padding: var(--space-lg);
+  text-align: center;
+  font-size: 0.875rem;
+}
+
+.artifact-code {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--surface-2);
+}
+
+.artifact-code-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  padding: 8px 12px;
+  background: var(--surface-3);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.artifact-code-lang {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+.artifact-code-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  transition: color var(--motion-fast), background var(--motion-fast);
+}
+
+.artifact-code-copy:hover {
+  color: var(--text-primary);
+  background: var(--surface-hover);
+}
+
+.artifact-code-copy[data-copied="true"] {
+  color: var(--state-success);
+}
+
+.artifact-code-pre {
+  margin: 0;
+  padding: var(--space-md);
+  background: var(--surface-2);
+  border: none;
+  border-radius: 0;
+  overflow-x: auto;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+.artifact-code-pre code {
+  background: transparent;
+  padding: 0;
+  color: var(--text-primary);
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  white-space: pre;
+}
+
+@media (max-width: 767px) {
+  .artifact-panel {
+    width: 100% !important;
+    border-left: none;
+  }
+
+  .artifact-panel-body {
+    padding: var(--space-sm);
+  }
+
+  .artifact-code-pre {
+    max-height: none;
+  }
+}

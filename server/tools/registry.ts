@@ -13,6 +13,7 @@ import {
   writeFileTool,
 } from './execFileOps.js';
 import { sendFileTool } from './execSendFile.js';
+import { CREATE_ARTIFACT_DESCRIPTION, CREATE_ARTIFACT_SCHEMA, UPDATE_ARTIFACT_DESCRIPTION, UPDATE_ARTIFACT_SCHEMA, createArtifactTool, updateArtifactTool } from './artifactsTool.js';
 import { getSettingValue } from '../routes/settings.js';
 
 export type ToolExecutor = (args: Record<string, unknown>, config?: unknown, userId?: string, conversationId?: string) => Promise<string>;
@@ -212,6 +213,22 @@ Si la página objetivo parece bloqueada, muestra un captcha, un muro de pago o c
       },
     },
   },
+  create_artifact: {
+    type: 'function',
+    function: {
+      name: 'create_artifact',
+      description: CREATE_ARTIFACT_DESCRIPTION,
+      parameters: CREATE_ARTIFACT_SCHEMA,
+    },
+  },
+  update_artifact: {
+    type: 'function',
+    function: {
+      name: 'update_artifact',
+      description: UPDATE_ARTIFACT_DESCRIPTION,
+      parameters: UPDATE_ARTIFACT_SCHEMA,
+    },
+  },
 };
 
 const executors: Record<string, ToolExecutor> = {
@@ -300,6 +317,14 @@ const executors: Record<string, ToolExecutor> = {
 
   async run_command(): Promise<string> {
     return JSON.stringify({ error: 'run_command requires the interactive execution context; not available from Model Council in v1.' });
+  },
+
+  async create_artifact(args: Record<string, unknown>, _config?: unknown, userId?: string, conversationId?: string): Promise<string> {
+    return createArtifactTool(args, userId, conversationId);
+  },
+
+  async update_artifact(args: Record<string, unknown>, _config?: unknown, userId?: string, conversationId?: string): Promise<string> {
+    return updateArtifactTool(args, userId, conversationId);
   },
 };
 

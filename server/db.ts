@@ -830,6 +830,39 @@ export function migrate() {
     ).run(fileTool.description, JSON.stringify(fileTool.schema), fileTool.name);
   }
 
+  // --- Artifact tools: fileToolSeeds pattern extended with GC3 single-source constants ---
+  // Leaf module artifactToolDefs.ts has no db/storage imports, so it can be
+  // imported synchronously from migrate() without circular dependency. The
+  // same leaf is re-exported by artifactsTool.ts (registry single source).
+  {
+    const seedMod = require('./tools/artifactToolDefs.js');
+    const artifactToolSeeds: Array<{ name: string; description: string; schema: unknown }> = [
+      { name: 'create_artifact', description: seedMod.CREATE_ARTIFACT_DESCRIPTION, schema: seedMod.CREATE_ARTIFACT_SCHEMA },
+      { name: 'update_artifact', description: seedMod.UPDATE_ARTIFACT_DESCRIPTION, schema: seedMod.UPDATE_ARTIFACT_SCHEMA },
+    ];
+    for (const artifactTool of artifactToolSeeds) {
+      for (const { id: uid } of allUserIds) {
+        const existingTool = existingFileToolStmt.get(uid, artifactTool.name) as { id: string; type: string } | undefined;
+        if (existingTool?.type === 'builtin') continue;
+        if (existingTool) {
+          const customNameBase = `${artifactTool.name}_custom`;
+          let customName = customNameBase;
+          let suffix = 2;
+          while (hasToolNameStmt.get(uid, customName)) {
+            customName = `${customNameBase}_${suffix}`;
+            suffix += 1;
+          }
+          renameCustomToolStmt.run(customName, existingTool.id);
+        }
+        const { nanoid } = await_nanoid();
+        insertFileToolStmt.run(nanoid(), uid, artifactTool.name, artifactTool.description, JSON.stringify(artifactTool.schema));
+      }
+      db.prepare(
+        `UPDATE tools SET description = ?, parameters_schema = ? WHERE name = ? AND type = 'builtin'`
+      ).run(artifactTool.description, JSON.stringify(artifactTool.schema), artifactTool.name);
+    }
+  }
+
   // --- Model Council migrations ---
   migrateCouncilTables();
 
@@ -885,6 +918,35 @@ export function migrate() {
     );
     CREATE INDEX IF NOT EXISTS idx_agent_files_user_id ON agent_files(user_id);
     CREATE INDEX IF NOT EXISTS idx_agent_files_expires_at ON agent_files(expires_at);
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS artifacts (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+      message_id TEXT,
+      kind TEXT NOT NULL CHECK (kind IN ('html','code','svg','mermaid')),
+      title TEXT NOT NULL,
+      language TEXT,
+      content TEXT NOT NULL DEFAULT '',
+      version INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_artifacts_user_id        ON artifacts(user_id);
+    CREATE INDEX IF NOT EXISTS idx_artifacts_conversation   ON artifacts(conversation_id, updated_at);
+
+    CREATE TABLE IF NOT EXISTS artifact_versions (
+      id TEXT PRIMARY KEY,
+      artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      version INTEGER NOT NULL,
+      content TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE (artifact_id, version)
+    );
+    CREATE INDEX IF NOT EXISTS idx_artifact_versions_artifact ON artifact_versions(artifact_id, version DESC);
   `);
 
   db.exec(`

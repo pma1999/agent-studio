@@ -26,6 +26,7 @@ import { mountWsProbe } from './routes/agentProbe.js';
 import agentRouter, { mountAgentTransport } from './routes/agent.js';
 import agentFilesRouter from './routes/agentFiles.js';
 import { startAgentFileSweep } from './agentFiles/storage.js';
+import artifactsRouter from './routes/artifacts.js';
 import chatgptRouter from './routes/chatgpt.js';
 import { startCodexReaper } from './codex/instanceManager.js';
 
@@ -119,6 +120,8 @@ app.use('/api/mcp-servers', authMiddleware, mcpServersRouter);
 app.use('/api/skills', authMiddleware, skillsRouter);
 app.use('/api/export', authMiddleware, exportRouter);
 app.use('/api/import', authMiddleware, importRouter);
+app.use('/api/artifacts', authMiddleware, artifactsRouter);
+app.use('/api/conversations', authMiddleware, artifactsRouter);
 app.use('/api/chat/council', authMiddleware, chatCouncilRouter);
 app.use('/api/council', authMiddleware, councilMembersRouter);
 app.use('/api/agent/files', agentFilesRouter);

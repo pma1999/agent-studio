@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Send, ArrowDown, StopCircle, MessageSquare, Bot, Brain, FileUp, Link, X, Users, SlidersHorizontal, Wrench, Layers, Laptop, History, Cpu, Share2 } from 'lucide-react';
+import { Send, ArrowDown, StopCircle, MessageSquare, Bot, Brain, FileUp, Link, X, Users, SlidersHorizontal, Wrench, Layers, Laptop, History, Cpu, Share2, Maximize2, Minimize2 } from 'lucide-react';
 import { CouncilToggle } from './CouncilToggle';
 import { CouncilStreamingView } from './CouncilStreamingView';
 import { useStore } from '../stores/store';
@@ -25,6 +25,10 @@ import { effectiveReasoningBudgetV2, LLAMACPP_PRESET_META, overridesForKey, pars
 import { PremiumMentionInput } from './ui/PremiumMentionInput';
 import { Sheet } from './ui/Sheet';
 import { ConversationTokenSummary, StreamingTokenCounter } from './TokenCounter';
+import { ArtifactPanel } from './artifacts/ArtifactPanel';
+import { artifactsApi } from '../api/client';
+import { buildArtifactsByMessageIndex, clampPanelPct } from '../utils/artifactWiring';
+import type { ChatArtifact } from '../types';
 import type {
   ReasoningEffort,
   ReasoningConfig,
@@ -145,6 +149,101 @@ export function ChatView() {
       .join('|')
   ), [streamingActivityEvents]);
   const { sendMessage, cancelStream, startNewChat, startGeneralChat, relaunchFromMessage, retryLastAssistant, getActiveThread } = useChat();
+
+  // ----- Artifacts state (granular selectors) -----
+  const artifactsByConversation = useStore((s) => s.artifactsByConversation);
+  const activeArtifactId = useStore((s) => s.activeArtifactId);
+  const artifactPanelOpen = useStore((s) => s.artifactPanelOpen);
+  const hydrateConversationArtifacts = useStore((s) => s.hydrateConversationArtifacts);
+  const setActiveArtifact = useStore((s) => s.setActiveArtifact);
+  const closeArtifactPanel = useStore((s) => s.closeArtifactPanel);
+
+  const artifactsBucket = activeConversationId ? artifactsByConversation[activeConversationId] : undefined;
+  const activeArtifact: ChatArtifact | null = useMemo(() => {
+    if (!artifactsBucket || !activeArtifactId) return null;
+    return artifactsBucket[activeArtifactId] ?? null;
+  }, [artifactsBucket, activeArtifactId]);
+
+  const artifactsByMessageId = useMemo(() => {
+    const arr = artifactsBucket ? Object.values(artifactsBucket) : [];
+    return buildArtifactsByMessageIndex(arr as ChatArtifact[]);
+  }, [artifactsBucket]);
+
+  const handleOpenArtifact = useCallback((convId: string, artId: string) => {
+    setActiveArtifact(convId, artId);
+  }, [setActiveArtifact]);
+
+  // Fullscreen artifact overlay (Escape closes). Hidden when the panel closes.
+  const [artifactFullscreen, setArtifactFullscreen] = useState(false);
+  useEffect(() => {
+    if (!artifactPanelOpen || !activeArtifact) setArtifactFullscreen(false);
+  }, [artifactPanelOpen, activeArtifact]);
+  useEffect(() => {
+    if (!artifactFullscreen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setArtifactFullscreen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [artifactFullscreen]);
+
+  // Artifacts: panel width % (30–60) + divider drag (pointer capture)
+  const PANEL_PCT_KEY = 'artifactPanelWidthPct';
+  const [panelPct, setPanelPct] = useState<number>(() => {
+    try {
+      const raw = localStorage.getItem(PANEL_PCT_KEY);
+      const n = raw ? Number(raw) : NaN;
+      if (Number.isFinite(n)) return clampPanelPct(n);
+    } catch {}
+    return 38;
+  });
+  const rowRef = useRef<HTMLDivElement>(null);
+  const startDrag = useCallback((e: React.PointerEvent) => {
+    const row = rowRef.current;
+    if (!row) return;
+    const target = e.currentTarget as HTMLElement;
+    try { target.setPointerCapture(e.pointerId); } catch {}
+    const onMove = (ev: PointerEvent) => {
+      const rect = row.getBoundingClientRect();
+      const pct = clampPanelPct(((ev.clientX - rect.left) / rect.width) * 100);
+      setPanelPct(pct);
+    };
+    const onUp = (ev: PointerEvent) => {
+      try { (ev.target as HTMLElement).releasePointerCapture?.(ev.pointerId); } catch {}
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      try {
+        const cur = row.getBoundingClientRect();
+        // Persist final pct from last pointer position; fallback to current state
+        const finalPct = clampPanelPct(((ev.clientX - cur.left) / cur.width) * 100);
+        localStorage.setItem(PANEL_PCT_KEY, String(finalPct));
+      } catch {}
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }, []);
+
+  // Persist panelPct on change (covers programmatic updates).
+  useEffect(() => {
+    try { localStorage.setItem(PANEL_PCT_KEY, String(panelPct)); } catch {}
+  }, [panelPct]);
+
+  // Hydrate-on-mount: when switching conversations, hydrate REST if no cache.
+  const hydratedConvsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!activeConversationId) return;
+    if (hydratedConvsRef.current.has(activeConversationId)) return;
+    if (artifactsByConversation[activeConversationId] !== undefined) {
+      hydratedConvsRef.current.add(activeConversationId);
+      return;
+    }
+    hydratedConvsRef.current.add(activeConversationId);
+    void artifactsApi.listByConversation(activeConversationId).then(
+      (res) => hydrateConversationArtifacts(activeConversationId, res.artifacts),
+      () => {},
+    );
+  }, [activeConversationId, artifactsByConversation, hydrateConversationArtifacts]);
+
   // Reopen reconciliation (RC4): tracks a server-side turn for this conversation
   // when there is no local stream entry (e.g. tab refreshed mid-generation).
   const { reconciling } = useTurnReconciliation(activeConversationId);
@@ -881,8 +980,10 @@ export function ChatView() {
         onClose={() => setShareOpen(false)}
       />
 
+      {/* Thread row: flex split thread | artifact panel */}
+      <div ref={rowRef} className="chat-thread-row" style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'row', overflow: 'hidden' }}>
       {/* Messages + FAB wrapper (position relative so FAB is positioned above input) */}
-      <div className="chat-view-messages-wrapper" style={{ flex: 1, minHeight: 0, position: 'relative', display: 'flex', flexDirection: 'column' }}>
+      <div className="chat-view-messages-wrapper" style={{ flex: 1, minWidth: 0, minHeight: 0, position: 'relative', display: 'flex', flexDirection: 'column' }}>
         <div
           ref={containerRef}
           onScroll={handleScroll}
@@ -1043,6 +1144,8 @@ export function ChatView() {
                   onSelectVariant={handleSelectVariant}
                   showRetry={showRetry}
                   onRetry={handleRetry}
+                  linkedArtifacts={artifactsByMessageId.get(msg.id)}
+                  onOpenArtifact={handleOpenArtifact}
                 />
               );
             })}
@@ -1105,6 +1208,30 @@ export function ChatView() {
           )}
         </AnimatePresence>
       </div>
+      {/* Artifact panel (desktop) */}
+      {artifactPanelOpen && activeArtifact && !isMobile && (
+        <>
+          {!artifactFullscreen && (
+            <div className="artifact-divider" role="separator" aria-orientation="vertical" onPointerDown={startDrag} style={{ width: 6, cursor: 'col-resize', flexShrink: 0, background: 'var(--border)', opacity: 0.6 }} />
+          )}
+          <aside className={`artifact-panel-dock${artifactFullscreen ? ' artifact-fullscreen' : ''}`} style={{ width: artifactFullscreen ? '100%' : `${panelPct}%`, flexShrink: 0, minWidth: 0, overflow: 'hidden', display: 'flex' }}>
+            <ArtifactPanel
+              conversationId={activeConversationId!}
+              isFullscreen={artifactFullscreen}
+              onRequestFullscreen={() => setArtifactFullscreen(true)}
+              onCloseFullscreen={() => setArtifactFullscreen(false)}
+            />
+          </aside>
+        </>
+      )}
+      </div>{/* end chat-thread-row */}
+
+      {/* Artifact Sheet (mobile) */}
+      {isMobile && artifactPanelOpen && activeArtifact && (
+        <Sheet isOpen onClose={() => closeArtifactPanel()} title={activeArtifact.title} maxHeight="85dvh">
+          <ArtifactPanel conversationId={activeConversationId!} />
+        </Sheet>
+      )}
 
       {/* Input Area */}
       <div className="chat-view-input">

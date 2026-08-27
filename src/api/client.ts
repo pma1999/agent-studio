@@ -26,6 +26,11 @@ import type {
 // Type-only import of the frozen snapshot wire contract (plan.md D6); erased at build time,
 // so vite never bundles from shared/. Nothing here exists yet anywhere else — single source.
 import type { ShareSnapshot, SharedMessage } from '../../shared/shareTypes';
+import type { ChatArtifact, ConversationArtifactsResponse } from '../../shared/artifactTypes';
+
+// Node/tsx headless compatibility for store unit tests (vite provides import.meta.env at runtime;
+// tsx/node does not — this guard ensures the API_BASE line below never throws outside vite).
+try { if (!(import.meta as unknown as { env?: Record<string, string | undefined> })?.env) (import.meta as unknown as { env: Record<string, string | undefined> }).env = {}; } catch { /* ignore */ }
 
 /** In production (Vercel), set VITE_API_URL to your Railway API URL (e.g. https://your-app.railway.app). No trailing slash. */
 const API_BASE = (import.meta.env.VITE_API_URL ?? '').replace(/\/$/, '') + '/api';
@@ -487,6 +492,8 @@ export async function streamChat(
   /** Appended last to preserve every positional call site. Must explicitly
    * approve or deny each exact MCP invocation. */
   onMcpApprovalRequired?: (data: McpApprovalRequiredData) => void,
+  // Appended last per the positional rule: every call site passes arguments in order.
+  onArtifact?: (data: ChatArtifact) => void,
 ): Promise<void> {
   try {
     const body: Record<string, unknown> = { conversation_id: conversationId, content };
@@ -630,6 +637,11 @@ export async function streamChat(
               // or implicitly approve it.
               void mcpServersApi.resolveApproval(approval.id, false).catch(() => {});
             }
+          }
+          if (parsed.artifact && onArtifact) {
+            const art = parsed.artifact as ChatArtifact;
+            if (!art?.id || !art.conversation_id) console.warn('[stream] malformed artifact event skipped', art);
+            else onArtifact(art);
           }
           // Done event with rich metadata
           if (parsed.done) {
@@ -1027,6 +1039,12 @@ export const sharesApi = {
   create: (conversationId: string) => request<CreateShareResponse>(`/conversations/${conversationId}/share`, { method: 'POST' }),
   revoke: (conversationId: string) => request<{ success: boolean }>(`/conversations/${conversationId}/share`, { method: 'DELETE' }),
   resolvePublic: (token: string) => request<ShareSnapshot>(`/shares/${encodeURIComponent(token)}`),
+};
+
+export const artifactsApi = {
+  listByConversation: (conversationId: string) =>
+    request<ConversationArtifactsResponse>(`/conversations/${conversationId}/artifacts`),
+  get: (artifactId: string) => request<ChatArtifact>(`/artifacts/${artifactId}`),
 };
 
 /** Trigger download of JSON as a file (e.g. export data). */

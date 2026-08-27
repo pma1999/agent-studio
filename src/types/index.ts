@@ -651,3 +651,5 @@ export interface CouncilUIState {
   synthesisPhase: boolean;
   streamingContent: string;
 }
+
+export type { ChatArtifact, ArtifactKind } from '../../shared/artifactTypes';

@@ -1133,6 +1133,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         persistToolResult: (callId, _name, result) => {
           pendingToolRows.push({ callId, output: result.output });
         },
+        getDraftId: () => openDraftId,
       });
 
       db.prepare('UPDATE conversations SET codex_thread_id = ? WHERE id = ? AND user_id = ?')
@@ -1711,6 +1712,26 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
           toolTimeMs += durationMs;
           if (!clientDisconnected && !res.writableEnded) {
             res.write(`data: ${JSON.stringify(buildToolResultEvent(id, name, result, durationMs))}\n\n`);
+          }
+          // Artifact SSE: emit {"artifact": <ChatArtifact>} immediately after tool_result for create/update artifact tools.
+          if ((name === 'create_artifact' || name === 'update_artifact') && !clientDisconnected && !res.writableEnded) {
+            try {
+              const out = JSON.parse(result.output) as { ok?: boolean; artifactId?: string };
+              if (out?.ok === true && typeof out.artifactId === 'string') {
+                const { getArtifact } = await import('../artifacts/storage.js');
+                const art = getArtifact(out.artifactId, userId);
+                if (art) {
+                  // Best-effort message_id linkage to current draft, if available.
+                  if (!art.message_id && typeof openDraftId === 'string' && openDraftId) {
+                    try {
+                      db.prepare('UPDATE artifacts SET message_id = ? WHERE id = ? AND user_id = ?').run(openDraftId, art.id, userId);
+                      art.message_id = openDraftId;
+                    } catch { /* skip linkage */ }
+                  }
+                  res.write(`data: ${JSON.stringify({ artifact: art })}\n\n`);
+                }
+              }
+            } catch { /* never break the turn over a notification failure */ }
           }
 
           messages.push({ role: 'tool', tool_call_id: id, content: result.output });

@@ -1,10 +1,10 @@
-import { useCallback } from 'react';
+import { useCallback, useRef } from 'react';
 import { useStore } from '../stores/store';
-import { streamChat, stopTurn } from '../api/client';
+import { streamChat, stopTurn, artifactsApi } from '../api/client';
 import { conversationsApi, mcpServersApi, type McpApprovalRequiredData } from '../api/client';
 import { streamCouncilChat } from '../api/councilClient';
 import { buildThread, getTurnVariants } from '../utils/threads';
-import type { Message, ChatAttachmentInput, PDFEngine, CouncilConfig, ProviderRoutingConfig } from '../types';
+import type { Message, ChatAttachmentInput, PDFEngine, CouncilConfig, ProviderRoutingConfig, ChatArtifact } from '../types';
 
 export interface SendMessageOptions {
   attachments?: ChatAttachmentInput[];
@@ -63,6 +63,13 @@ function stopTurnWithTimeout(conversationId: string, timeoutMs: number): Promise
   });
 }
 
+function hydrateArtifactsFor(conversationId: string): void {
+  void artifactsApi.listByConversation(conversationId).then(
+    (res) => useStore.getState().hydrateConversationArtifacts(conversationId, res.artifacts),
+    (err: unknown) => console.warn('[artifacts] hydrate failed', err),
+  );
+}
+
 export function useChat() {
   const {
     activeConversationId,
@@ -92,6 +99,12 @@ export function useChat() {
     appendCouncilStreamingContent,
     resetCouncilState,
   } = useStore();
+
+  // Track whether we already auto-opened the artifact panel this turn (per sendRegularMessage closure, reset on next send).
+  const turnOpenedArtifactPanelRef = useRef(false);
+  const artifactPanelOpenRef = useRef(useStore.getState().artifactPanelOpen);
+  // Keep artifactPanelOpenRef fresh without adding to callback deps (avoids stale closure).
+  artifactPanelOpenRef.current = useStore.getState().artifactPanelOpen;
 
   const sendMessage = useCallback(async (content: string, options?: SendMessageOptions) => {
     // Check if council mode is enabled or council config is provided
@@ -337,6 +350,8 @@ export function useChat() {
     const controller = new AbortController();
     beginStream(conversationId);
     setStreamAbortController(conversationId, controller);
+    // Reset per-turn auto-open flag for the upcoming stream.
+    turnOpenedArtifactPanelRef.current = false;
 
     await streamChat(
       conversationId,
@@ -349,10 +364,13 @@ export function useChat() {
         endStream(conversationId);
         await loadMessages(conversationId, { silent: true });
         await loadConversations(selectedAgentId || undefined);
+        // Fire-and-forget REST hydrate: authority for any artifact frames missed (incl. disconnects).
+        void hydrateArtifactsFor(conversationId);
       },
       async (error) => {
         endStream(conversationId);
         await loadMessages(conversationId, { silent: true });
+        void hydrateArtifactsFor(conversationId);
         // Join the error message to the visible chain (the server may or may
         // not have persisted the new variant) and make it the active leaf so
         // it renders; `temp-` prefix keeps setActiveLeaf from PUTting it.
@@ -390,6 +408,13 @@ export function useChat() {
         void mcpServersApi.resolveApproval(approval.id, approved).catch(() => {
           // The backend remains fail-closed and will expire the pending call.
         });
+      },
+      (data: ChatArtifact) => {
+        useStore.getState().upsertConversationArtifact(conversationId, data);
+        if (!artifactPanelOpenRef.current && !turnOpenedArtifactPanelRef.current) {
+          useStore.getState().setActiveArtifact(conversationId, data.id);
+          turnOpenedArtifactPanelRef.current = true;
+        }
       },
     );
   }, [activeConversationId, streamsByConversation, addMessage, beginStream, endStream, setStreamAbortController, appendStreamContent, appendStreamContentEvent, reasoningOverride, appendStreamReasoning, appendStreamReasoningEvent, upsertStreamToolCall, completeStreamToolCall, appendStreamToolOutputChunk, loadMessages, loadConversations, updateConversationTitle, selectedAgentId]);
@@ -456,6 +481,7 @@ export function useChat() {
       fresh.endStream(conversationId);
       await fresh.loadMessages(conversationId, { silent: true });
       await fresh.loadConversations(fresh.selectedAgentId || undefined);
+      void hydrateArtifactsFor(conversationId);
     })();
   }, []);
 

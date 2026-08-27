@@ -57,6 +57,8 @@ export interface CodexTurnInput {
   emit?: (evt: CodexTurnEvent) => void;
   /** Persists a tool-result message row (chat.ts owns the DB writes). */
   persistToolResult?: (callId: string, name: string, result: RunToolResult, durationMs: number) => void;
+  /** Best-effort hook: returns the current assistant draft message id for artifact linkage (chat.ts draft machinery). */
+  getDraftId?: () => string | null;
   turnTimeoutMs?: number;
 }
 
@@ -303,6 +305,29 @@ export async function runCodexTurn(input: CodexTurnInput): Promise<CodexTurnResu
           ...(name === 'run_command' && result.metadata ? { metadata: result.metadata } : {}),
         },
       });
+      // Artifact SSE for Codex path: same frame immediately after tool_result when create/update artifact succeeded.
+      // Best-effort message_id linkage mirrors server/routes/chat.ts (openDraftId if available; skip cleanly otherwise).
+      if ((name === 'create_artifact' || name === 'update_artifact') && !input.signal?.aborted) {
+        try {
+          const out = JSON.parse(result.output) as { ok?: boolean; artifactId?: string };
+          if (out?.ok === true && typeof out.artifactId === 'string') {
+            const { getArtifact } = await import('../artifacts/storage.js');
+            const art = getArtifact(out.artifactId, input.userId);
+            if (art) {
+              const draftId = input.getDraftId?.() ?? null;
+              if (!art.message_id && typeof draftId === 'string' && draftId) {
+                try {
+                  const dbMod = await import('../db.js');
+                  const db = (dbMod.default ?? dbMod) as { prepare: (sql: string) => { run: (...args: unknown[]) => unknown } };
+                  db.prepare('UPDATE artifacts SET message_id = ? WHERE id = ? AND user_id = ?').run(draftId, art.id, input.userId);
+                  art.message_id = draftId;
+                } catch { /* skip linkage */ }
+              }
+              emit({ artifact: art });
+            }
+          }
+        } catch { /* never break the turn over a notification failure */ }
+      }
       toolCalls.push({ id: callId, name, arguments: JSON.stringify(args) });
       input.persistToolResult?.(callId, name, result, durationMs);
     };

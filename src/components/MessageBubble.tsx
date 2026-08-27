@@ -12,7 +12,8 @@ import { useIsMobile } from '../utils/breakpoints';
 import { getCouncilRun } from '../api/councilClient';
 import { formatVariantTime } from '../utils/variantUtils';
 import { isSafeHttpUrl } from '../utils/url';
-import type { Message, Annotation, ToolExecution, StreamingActivityEvent, CouncilRunDetail, ProviderRoutingConfig } from '../types';
+import { Badge } from './ui/Badge';
+import type { Message, Annotation, ToolExecution, StreamingActivityEvent, CouncilRunDetail, ProviderRoutingConfig, ChatArtifact } from '../types';
 
 /** Compact pill showing which model generated the message; provider color and full id in tooltip. */
 function MessageModelBadge({ modelId, title }: { modelId: string; title?: string }) {
@@ -589,6 +590,10 @@ interface MessageBubbleProps {
   // --- Retry (last assistant message of the active thread) ---
   showRetry?: boolean;
   onRetry?: () => void;
+
+  // --- Artifacts (per-message chips via message_id association) ---
+  linkedArtifacts?: ChatArtifact[];
+  onOpenArtifact?: (conversationId: string, artifactId: string) => void;
 }
 
 function formatCost(cost: number): string {
@@ -828,6 +833,8 @@ export function MessageBubble({
   onSelectVariant,
   showRetry,
   onRetry,
+  linkedArtifacts,
+  onOpenArtifact,
 }: MessageBubbleProps) {
   const [copied, setCopied] = React.useState(false);
   const [councilRun, setCouncilRun] = React.useState<CouncilRunDetail | null>(null);
@@ -1231,6 +1238,37 @@ export function MessageBubble({
                 <span>
                   Document(s) used: {annotations.filter((a) => a.type === 'file' && a.file?.name).map((a) => a.file!.name).join(', ')}
                 </span>
+              </div>
+            )}
+
+            {/* Artifact chips (linked via message_id) */}
+            {!isUser && linkedArtifacts && linkedArtifacts.length > 0 && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
+                {linkedArtifacts.map((art) => (
+                  <button
+                    key={art.id}
+                    type="button"
+                    onClick={() => onOpenArtifact?.(art.conversation_id, art.id)}
+                    aria-label={`Open artifact ${art.title}`}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      padding: '4px 10px',
+                      borderRadius: '9999px',
+                      border: '1px solid var(--border-accent)',
+                      background: 'var(--accent-ghost)',
+                      color: 'var(--accent)',
+                      fontSize: '0.75rem',
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <Braces size={12} />
+                    <span style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{art.title || art.kind}</span>
+                    <Badge tone="mono" variant="soft">v{art.version}</Badge>
+                  </button>
+                ))}
               </div>
             )}
 
