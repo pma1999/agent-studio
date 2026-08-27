@@ -143,15 +143,23 @@ app.get('/api/health', (_req, res) => {
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+console.time('[server] listen');
+const server = app.listen(PORT, '0.0.0.0', () => {
+  console.log(`[server] Agent Studio server running on http://0.0.0.0:${PORT}`);
+  console.timeEnd('[server] listen');
+});
+
+// Migrate after listen so /api/health can respond immediately even if migrate is slow
+// (WSL 9p cold start can delay listen >20s if migrate blocks it)
+console.time('[server] migrate');
 try {
   migrate();
+  console.timeEnd('[server] migrate');
 } catch (err) {
+  console.timeEnd('[server] migrate');
   console.error('[server] Migration failed:', err);
   process.exit(1);
 }
-const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`[server] Agent Studio server running on http://0.0.0.0:${PORT}`);
-});
 
 // Railway's edge proxy keeps upstream connections alive ~15s and reuses them
 // from a pool. Node's default keepAliveTimeout (5s) closes them first, so the
