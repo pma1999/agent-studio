@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Menu, Plus, Share2 } from 'lucide-react';
+import { Layers, Menu, Plus, Share2 } from 'lucide-react';
 import { useStore } from '../../stores/store';
 import { useChat } from '../../hooks/useChat';
 import { useIsMobile } from '../../utils/breakpoints';
@@ -21,6 +21,11 @@ export function MobileTopBar() {
   const conversations = useStore((s) => s.conversations);
   const activeConversationId = useStore((s) => s.activeConversationId);
   const authRequired = useStore((s) => s.authRequired);
+  const artifactBucket = useStore((s) => (activeConversationId ? s.artifactsByConversation[activeConversationId] : undefined));
+  const artifactCount = artifactBucket ? Object.keys(artifactBucket).length : 0;
+  const artifactPanelOpen = useStore((s) => s.artifactPanelOpen);
+  const closeArtifactPanel = useStore((s) => s.closeArtifactPanel);
+  const setArtifactGalleryOpen = useStore((s) => s.setArtifactGalleryOpen);
   const { startGeneralChat } = useChat();
   const [shareOpen, setShareOpen] = useState(false);
 
@@ -45,6 +50,21 @@ export function MobileTopBar() {
       <h1 className="mobile-topbar-title">{title}</h1>
       {currentView === 'chat' && (
         <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+          <div style={{ position: 'relative', display: 'inline-flex' }}>
+            <IconButton
+              label={`Artifacts (${artifactCount})`}
+              disabled={artifactCount === 0}
+              onClick={() => {
+                if (artifactPanelOpen) closeArtifactPanel();
+                setArtifactGalleryOpen(true);
+              }}
+            >
+              <Layers size={22} />
+            </IconButton>
+            <span className="artifact-trigger-badge" data-tone={artifactCount > 0 ? 'accent' : 'muted'} aria-hidden="true">
+              {artifactCount}
+            </span>
+          </div>
           <IconButton
             label="Share conversation"
             title={

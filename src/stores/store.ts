@@ -196,6 +196,8 @@ interface AppState {
   /** True while the chat composer is focused (used to hide mobile bottom nav). */
   composerFocused: boolean;
   setComposerFocused: (focused: boolean) => void;
+  artifactGalleryOpen: boolean;
+  setArtifactGalleryOpen: (open: boolean) => void;
 }
 
 export const useStore = create<AppState>((set, get) => ({
@@ -972,4 +974,6 @@ export const useStore = create<AppState>((set, get) => ({
   setSidebarMobileOpen: (open) => set({ sidebarMobileOpen: open }),
   composerFocused: false,
   setComposerFocused: (focused) => set({ composerFocused: focused }),
+  artifactGalleryOpen: false,
+  setArtifactGalleryOpen: (open) => set({ artifactGalleryOpen: open }),
 }));

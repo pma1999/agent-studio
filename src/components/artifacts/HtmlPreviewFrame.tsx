@@ -11,7 +11,7 @@ export const IFRAME_SANDBOX_TOKENS_ALIAS = SANDBOX_TOKENS;
 
 export function HtmlPreviewFrame({ source }: { source: string }): React.JSX.Element {
   const iframeRef = useRef<HTMLIFrameElement>(null);
-  const [height, setHeight] = useState(320);
+  const [height, setHeight] = useState<number | string>('clamp(320px, 52dvh, 640px)');
 
   const srcDoc = useMemo(() => buildBootstrapWrappedHtml(source), [source]);
 
@@ -35,7 +35,13 @@ export function HtmlPreviewFrame({ source }: { source: string }): React.JSX.Elem
       sandbox={SANDBOX_TOKENS}
       srcDoc={srcDoc}
       className="artifact-frame"
-      style={{ height }}
+      style={{
+        height,
+        width: '100%',
+        maxWidth: '100%',
+        boxSizing: 'border-box',
+        display: 'block',
+      }}
       loading="lazy"
     />
   );

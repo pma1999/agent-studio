@@ -26,6 +26,7 @@ import { PremiumMentionInput } from './ui/PremiumMentionInput';
 import { Sheet } from './ui/Sheet';
 import { ConversationTokenSummary, StreamingTokenCounter } from './TokenCounter';
 import { ArtifactPanel } from './artifacts/ArtifactPanel';
+import { ArtifactGallery } from './artifacts/ArtifactGallery';
 import { artifactsApi } from '../api/client';
 import { buildArtifactsByMessageIndex, clampPanelPct } from '../utils/artifactWiring';
 import type { ChatArtifact } from '../types';
@@ -154,11 +155,17 @@ export function ChatView() {
   const artifactsByConversation = useStore((s) => s.artifactsByConversation);
   const activeArtifactId = useStore((s) => s.activeArtifactId);
   const artifactPanelOpen = useStore((s) => s.artifactPanelOpen);
+  const artifactGalleryOpen = useStore((s) => s.artifactGalleryOpen);
   const hydrateConversationArtifacts = useStore((s) => s.hydrateConversationArtifacts);
   const setActiveArtifact = useStore((s) => s.setActiveArtifact);
   const closeArtifactPanel = useStore((s) => s.closeArtifactPanel);
+  const setArtifactGalleryOpen = useStore((s) => s.setArtifactGalleryOpen);
 
   const artifactsBucket = activeConversationId ? artifactsByConversation[activeConversationId] : undefined;
+  const artifactsCount = useMemo(
+    () => (artifactsBucket ? Object.keys(artifactsBucket).length : 0),
+    [artifactsBucket],
+  );
   const activeArtifact: ChatArtifact | null = useMemo(() => {
     if (!artifactsBucket || !activeArtifactId) return null;
     return artifactsBucket[activeArtifactId] ?? null;
@@ -536,6 +543,27 @@ export function ChatView() {
   const setComposerFocused = useStore((s) => s.setComposerFocused);
   const [optionsOpen, setOptionsOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
+
+  // Gallery <-> viewer mutual exclusion (GC8): never two Sheets with scroll-lock active
+  useEffect(() => {
+    if (artifactGalleryOpen && isMobile && artifactPanelOpen) {
+      closeArtifactPanel();
+    }
+  }, [artifactGalleryOpen, isMobile, artifactPanelOpen, closeArtifactPanel]);
+  useEffect(() => {
+    if (artifactPanelOpen && isMobile && artifactGalleryOpen) {
+      setArtifactGalleryOpen(false);
+    }
+  }, [artifactPanelOpen, isMobile, artifactGalleryOpen, setArtifactGalleryOpen]);
+  useEffect(() => {
+    if (artifactGalleryOpen && artifactFullscreen) {
+      setArtifactFullscreen(false);
+    }
+  }, [artifactGalleryOpen, artifactFullscreen]);
+  // Close gallery on conversation switch (avoid stale cross-conv state)
+  useEffect(() => {
+    setArtifactGalleryOpen(false);
+  }, [activeConversationId, setArtifactGalleryOpen]);
   // Clear the composing flag if the chat unmounts while focused.
   useEffect(() => () => setComposerFocused(false), [setComposerFocused]);
   const composerOptionsActive =
@@ -964,6 +992,23 @@ export function ChatView() {
           </div>
         </div>
         <ConversationTokenSummary messages={messages} />
+        <div style={{ position: 'relative', display: 'inline-flex' }}>
+          <IconButton
+            label={`Artifacts (${artifactsCount})`}
+            disabled={artifactsCount === 0}
+            onClick={() => {
+              if (artifactFullscreen) setArtifactFullscreen(false);
+              if (isMobile && artifactPanelOpen) closeArtifactPanel();
+              setArtifactGalleryOpen(true);
+            }}
+            aria-label={`Artifacts (${artifactsCount})`}
+          >
+            <Layers size={16} />
+          </IconButton>
+          <span className="artifact-trigger-badge" data-tone={artifactsCount > 0 ? 'accent' : 'muted'} aria-hidden="true">
+            {artifactsCount}
+          </span>
+        </div>
         <IconButton
           label="Share conversation"
           title={!authRequired ? 'Sharing requires accounts (hosted deployments)' : undefined}
@@ -1231,6 +1276,14 @@ export function ChatView() {
         <Sheet isOpen onClose={() => closeArtifactPanel()} title={activeArtifact.title} maxHeight="85dvh">
           <ArtifactPanel conversationId={activeConversationId!} />
         </Sheet>
+      )}
+
+      {activeConversationId && (
+        <ArtifactGallery
+          conversationId={activeConversationId}
+          isOpen={artifactGalleryOpen}
+          onClose={() => setArtifactGalleryOpen(false)}
+        />
       )}
 
       {/* Input Area */}
@@ -2032,6 +2085,25 @@ export function ChatView() {
                 </select>
               </section>
             )}
+            <section className="composer-options-section">
+              <span className="composer-options-label"><Layers size={15} /> Artifacts</span>
+              <div className="composer-options-controls">
+                <button
+                  type="button"
+                  className="composer-options-btn"
+                  onClick={() => {
+                    setOptionsOpen(false);
+                    if (artifactFullscreen) setArtifactFullscreen(false);
+                    if (isMobile && artifactPanelOpen) closeArtifactPanel();
+                    // Delay gallery open until composer Sheet exit (0.32s) to avoid double useBodyScrollLock; GC8 atomic
+                    setTimeout(() => setArtifactGalleryOpen(true), 350);
+                  }}
+                  aria-label={`Ver galería (${artifactsCount})`}
+                >
+                  Ver galería ({artifactsCount})
+                </button>
+              </div>
+            </section>
           </div>
         </Sheet>
       )}

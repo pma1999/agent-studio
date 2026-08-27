@@ -1,8 +1,10 @@
 import React, { useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X } from 'lucide-react';
 import { useIsMobile, usePrefersReducedMotion } from '../../utils/breakpoints';
 import { useBodyScrollLock } from '../../hooks/useBodyScrollLock';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
 
 interface ModalProps {
   isOpen: boolean;
@@ -20,6 +22,7 @@ export function Modal({ isOpen, onClose, title, children, maxWidth = '560px', fo
   const prefersReducedMotion = usePrefersReducedMotion();
 
   useBodyScrollLock(isOpen);
+  useFocusTrap(contentRef, isOpen);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -49,7 +52,8 @@ export function Modal({ isOpen, onClose, title, children, maxWidth = '560px', fo
   // target is the overlay itself (never entered the panel's subtree) close the
   // modal. React events on portaled children still bubble through the fiber
   // tree, which is what makes this work where physical DOM containment fails.
-  return (
+  // Portal escapes App.tsx motion.div transform trap (GC9) like Sheet does.
+  return createPortal(
     <AnimatePresence>
       {isOpen && (
         <motion.div
@@ -80,6 +84,9 @@ export function Modal({ isOpen, onClose, title, children, maxWidth = '560px', fo
           <motion.div
             ref={contentRef}
             className={isMobile ? 'modal-panel-mobile' : undefined}
+            role="dialog"
+            aria-modal="true"
+            aria-label={title}
             initial={panelMotion.initial}
             animate={panelMotion.animate}
             exit={panelMotion.exit}
@@ -125,8 +132,10 @@ export function Modal({ isOpen, onClose, title, children, maxWidth = '560px', fo
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
-                    width: isMobile ? '40px' : '32px',
-                    height: isMobile ? '40px' : '32px',
+                    width: '40px',
+                    height: '40px',
+                    minWidth: '40px',
+                    minHeight: '40px',
                     background: 'transparent',
                     border: 'none',
                     color: 'var(--text-muted)',
@@ -155,6 +164,7 @@ export function Modal({ isOpen, onClose, title, children, maxWidth = '560px', fo
           </motion.div>
         </motion.div>
       )}
-    </AnimatePresence>
+    </AnimatePresence>,
+    document.body
   );
 }
