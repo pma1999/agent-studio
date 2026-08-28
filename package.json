@@ -80,5 +80,7 @@
     "express": {
       "path-to-regexp": "0.1.13"
     }
-  }
+  },
+  "description": "Self-hosted AI agent workspace: multi-provider chat, MCP, skills, Model Council, and your own PC as an agent backend.",
+  "license": "MIT"
 }

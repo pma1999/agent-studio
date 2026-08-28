@@ -5,7 +5,12 @@ const dbPath = path.join(__dirname, '..', 'agent-studio.db');
 const db = new Database(dbPath);
 
 const localRow = db.prepare("SELECT id FROM users WHERE email = 'local@localhost'").get();
-const adminRow = db.prepare("SELECT id FROM users WHERE email = 'pablomiguelargudo@gmail.com'").get();
+const adminEmail = (process.argv[2] || process.env.INITIAL_ADMIN_EMAIL || '').trim().toLowerCase();
+if (!adminEmail) {
+  console.error('Usage: node scripts/reassign-to-local.cjs <admin-email>  (or set INITIAL_ADMIN_EMAIL)');
+  process.exit(1);
+}
+const adminRow = db.prepare('SELECT id FROM users WHERE email = ?').get(adminEmail);
 
 if (!localRow || !adminRow) {
   console.error('Users not found');

@@ -65,8 +65,19 @@ temp/
 # .railway
 # .netlify
 
-# Local-agent test artifacts (not part of the repo)
+# Local-agent test artifacts (files the agent writes while you try it out)
 local-agent/substack-home.png
+local-agent/*.px
+local-agent/*.pdf
+local-agent/*.epub
+local-agent/*.png
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Machine-local agent/editor settings
+.claude/settings.local.json
 
 # Playwright (MCP browser automation traces and test output)
 .playwright-mcp/

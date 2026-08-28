@@ -579,12 +579,16 @@ export function migrate() {
     console.log(`[Agent Studio] Removed ${removedLmstudioSettings.changes} orphaned lmstudio_* settings row(s)`);
   }
 
-  // Initial admin user for deployment: create or update from INITIAL_ADMIN_PASSWORD
-  const INITIAL_ADMIN_EMAIL = 'pablomiguelargudo@gmail.com';
+  // Optional initial admin for a deployment. Disabled unless INITIAL_ADMIN_EMAIL is set,
+  // which keeps the default local single-user mode untouched.
+  const INITIAL_ADMIN_EMAIL = (process.env.INITIAL_ADMIN_EMAIL ?? '').trim().toLowerCase();
+  const hasInitialAdmin = INITIAL_ADMIN_EMAIL.length > 0;
   const adminPasswordEnv = process.env.INITIAL_ADMIN_PASSWORD;
   const adminPasswordSet = typeof adminPasswordEnv === 'string' && adminPasswordEnv.length >= 8;
 
-  const existingAdmin = db.prepare('SELECT id FROM users WHERE email = ?').get(INITIAL_ADMIN_EMAIL) as { id: string } | undefined;
+  const existingAdmin = hasInitialAdmin
+    ? (db.prepare('SELECT id FROM users WHERE email = ?').get(INITIAL_ADMIN_EMAIL) as { id: string } | undefined)
+    : undefined;
 
   if (existingAdmin && adminPasswordSet) {
     try {
@@ -617,7 +621,7 @@ export function migrate() {
     })();
   }
 
-  if (!existingAdmin && defaultUserId) {
+  if (hasInitialAdmin && !existingAdmin && defaultUserId) {
     const { nanoid } = await_nanoid();
     const newAdminId = nanoid();
     const rawPassword = adminPasswordSet ? adminPasswordEnv! : crypto.randomBytes(16).toString('base64url');
