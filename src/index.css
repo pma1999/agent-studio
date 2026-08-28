@@ -3872,6 +3872,12 @@ button:focus-visible .conv-delete-btn {
     overflow-x: hidden;
   }
 
+  .sheet-body .artifact-panel {
+    height: auto;
+    flex: 1;
+    min-height: 0;
+  }
+
   .artifact-panel-header {
     padding: var(--space-sm) var(--space-sm) var(--space-sm) var(--space-md);
     gap: var(--space-sm);

@@ -11,9 +11,13 @@ export const IFRAME_SANDBOX_TOKENS_ALIAS = SANDBOX_TOKENS;
 
 export function HtmlPreviewFrame({ source }: { source: string }): React.JSX.Element {
   const iframeRef = useRef<HTMLIFrameElement>(null);
-  const [height, setHeight] = useState<number | string>('clamp(320px, 52dvh, 640px)');
+  const [height, setHeight] = useState<number>(320);
 
   const srcDoc = useMemo(() => buildBootstrapWrappedHtml(source), [source]);
+
+  useEffect(() => {
+    setHeight(320);
+  }, [source]);
 
   useEffect(() => {
     const onMsg = (e: MessageEvent) => {
@@ -22,7 +26,11 @@ export function HtmlPreviewFrame({ source }: { source: string }): React.JSX.Elem
       const data = e.data as { type?: string; height?: unknown } | null;
       if (data?.type !== 'artifact-resize') return;
       const raw = typeof data.height === 'number' ? data.height : Number(data.height);
-      setHeight(clampHeight(raw));
+      setHeight((prev) => {
+        const next = clampHeight(raw);
+        if (prev === next) return prev;
+        return next;
+      });
     };
     window.addEventListener('message', onMsg);
     return () => window.removeEventListener('message', onMsg);

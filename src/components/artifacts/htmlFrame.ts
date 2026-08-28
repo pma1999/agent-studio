@@ -30,9 +30,12 @@ export function clampHeight(raw: number): number {
 export const RESIZE_BOOTSTRAP_SCRIPT = `<script>
 (function(){
   var t=null;
+  var lastH=-1;
   function post(){
     try{
-      var h=Math.max(document.documentElement.scrollHeight,document.body?document.body.scrollHeight:0);
+      var h=document.body?document.body.scrollHeight:0;
+      if(Math.abs(h-lastH)<=2) return;
+      lastH=h;
       parent.postMessage({type:'artifact-resize',height:h},'*');
     }catch(e){}
   }
@@ -44,7 +47,7 @@ export const RESIZE_BOOTSTRAP_SCRIPT = `<script>
   window.addEventListener('resize',schedule);
   window.addEventListener('DOMContentLoaded',schedule);
   if('ResizeObserver' in window){
-    try{ new ResizeObserver(schedule).observe(document.documentElement); }catch(e){}
+    try{ new ResizeObserver(schedule).observe(document.body); }catch(e){}
   }
   try{ new MutationObserver(schedule).observe(document.documentElement,{subtree:true,childList:true}); }catch(e){}
   post();
