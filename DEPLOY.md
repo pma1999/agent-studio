@@ -83,7 +83,7 @@ Si ya tienes un `agent-studio.db` en tu máquina (con tus agentes, conversacione
      npm run build:server
      npm run db:migrate-local
      ```
-   - Esto ejecuta las migraciones sobre tu `agent-studio.db` local: crea o actualiza el usuario `pablomiguelargudo@gmail.com` y le asigna todos los agentes, conversaciones y ajustes que estaban en el usuario por defecto. El archivo `agent-studio.db` queda listo para subir.
+   - Esto ejecuta las migraciones sobre tu `agent-studio.db` local: crea o actualiza el usuario indicado en `INITIAL_ADMIN_EMAIL` y le asigna todos los agentes, conversaciones y ajustes que estaban en el usuario por defecto. El archivo `agent-studio.db` queda listo para subir.
 
 2. **Volume y variable en Railway**: asegúrate de tener el Volume en `/data` y `DATABASE_PATH=/data/agent-studio.db` (pasos de la sección anterior).
 
