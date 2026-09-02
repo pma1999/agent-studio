@@ -105,7 +105,9 @@ Railway factura **memoria y CPU por minuto encendido**, no por petición atendid
 - Si algún día sí duerme: la primera petición tarda unos segundos y **puede devolver un 502** (documentado por Railway). El cliente ya reintenta 502/503/504 con back-off (`fetchWithGatewayRetry` en `src/api/client.ts`), así que el arranque en frío se vería como una carga lenta, no como un error, y el volumen `/data` sobrevive al ciclo. Mientras el **agente local** esté emparejado y conectado, su heartbeat cada 20 s mantiene el servicio despierto: es el comportamiento correcto, pero conviene cerrarlo cuando no se use.
 - **Watch paths**: el repo es único (frontend en Vercel, backend en Railway), así que sin filtro un commit de documentación o de `src/` reconstruye el backend. Los patrones activos limitan el build a `/server/**`, `/shared/**`, `/package.json`, `/package-lock.json`, `/tsconfig.server.json`, `/railway.json`, `/nixpacks.toml` y los dos scripts de BD que se ejecutan con `railway run`.
 
-Del lado del código, `jsdom` (~80 MB de RSS) y el SDK de `e2b` (~16 MB) se cargan con `import()` dinámico la primera vez que se usan en vez de en el arranque, porque la mayoría de las peticiones no pasan por extracción de artículos ni por sandbox en la nube.
+Del lado del código, `jsdom` (~80 MB de RSS medidos en local) y el SDK de `e2b` (~16 MB) se cargan con `import()` dinámico la primera vez que se usan en vez de en el arranque, porque la mayoría de las peticiones no pasan por extracción de artículos ni por sandbox en la nube.
+
+Ojo al medir el efecto: el suelo de arranque en producción **no se movió** (0,143 GB antes, 0,144 GB después), así que esos 80 MB de local no se trasladan al contenedor Linux en la misma proporción. Además las promesas de carga se cachean a nivel de módulo, de modo que el primer `web_fetch` que extraiga un artículo deja jsdom cargado para el resto de la vida del contenedor —y, mientras el servicio no duerma, esa vida son días. La cifra comparable es la media de 7 días (0,288 GB antes de este cambio); no la des por mejorada hasta releerla con varios días de uso real encima.
 
 ---
 
