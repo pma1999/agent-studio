@@ -97,6 +97,15 @@ Si ya tienes un `agent-studio.db` en tu máquina (con tus agentes, conversacione
 
 5. **Redeploy** del service en Railway. A partir de ahí, el backend usará la BD que subiste y verás tus agentes al iniciar sesión.
 
+### 1.5 Coste: modo Serverless y watch paths
+
+Railway factura **memoria y CPU por minuto encendido**, no por petición atendida. Un backend personal pasa la mayor parte del día ocioso, así que casi toda la factura es memoria parada. Dos ajustes en **Settings** del service la recortan:
+
+- **Serverless** (antes "App Sleeping"): el contenedor se duerme tras ~5-10 min sin tráfico *saliente* y despierta con la primera petición. El volumen `/data` sobrevive al ciclo dormir/despertar, así que la BD no se pierde. Contrapartidas: la primera petición tarda unos segundos y **puede devolver un 502** (documentado por Railway); el cliente ya reintenta 502/503/504 con back-off (`fetchWithGatewayRetry` en `src/api/client.ts`), de modo que el arranque en frío se ve como una carga lenta, no como un error. Mientras el **agente local** esté emparejado y conectado, su heartbeat cada 20 s mantiene el servicio despierto: es el comportamiento correcto, pero conviene cerrarlo cuando no se use.
+- **Watch paths**: el repo es único (frontend en Vercel, backend en Railway), así que sin filtro un commit de documentación o de `src/` reconstruye el backend. Los patrones activos limitan el build a `/server/**`, `/shared/**`, `/package.json`, `/package-lock.json`, `/tsconfig.server.json`, `/railway.json`, `/nixpacks.toml` y los dos scripts de BD que se ejecutan con `railway run`.
+
+Del lado del código, `jsdom` (~80 MB de RSS) y el SDK de `e2b` (~16 MB) se cargan con `import()` dinámico la primera vez que se usan en vez de en el arranque, porque la mayoría de las peticiones no pasan por extracción de artículos ni por sandbox en la nube.
+
 ---
 
 ## 2. Frontend en Vercel

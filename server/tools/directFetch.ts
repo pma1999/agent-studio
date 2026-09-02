@@ -45,5 +45,5 @@ export async function fetchDirect(url: string, timeoutMs: number): Promise<Direc
   }
 
   const html = await res.text();
-  return extractReadableContent(html, url);
+  return await extractReadableContent(html, url);
 }

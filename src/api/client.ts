@@ -63,39 +63,52 @@ export function setOnUnauthorized(fn: (() => void) | null) {
 /** Delay helper for retry back-off. */
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-/** Maximum retries for 503 (server restarting) responses. */
-const MAX_503_RETRIES = 3;
-const RETRY_DELAYS = [2_000, 4_000, 8_000];
+/**
+ * Statuses that mean the edge proxy answered instead of the API: the server is
+ * restarting during a deploy (503, sent by the shutdown middleware), or it was
+ * asleep and the first request only triggered the cold boot (502/504 — Railway
+ * serverless documents a 502 on the request that wakes a slept service). In all
+ * three cases the request never reached application code, so replaying it —
+ * including a POST — cannot duplicate work.
+ */
+const RETRYABLE_GATEWAY_STATUSES = new Set([502, 503, 504]);
+const MAX_GATEWAY_RETRIES = 4;
+/** Front-loaded so a deploy restart recovers fast and a cold boot still gets ~15s. */
+const RETRY_DELAYS = [1_000, 2_000, 4_000, 8_000];
+
+/**
+ * fetch() that replays the request while the edge proxy keeps answering with a
+ * retryable gateway status. Returns the last response either way, so callers
+ * keep their own error handling for a genuine failure.
+ */
+export async function fetchWithGatewayRetry(input: string, init?: RequestInit): Promise<Response> {
+  let res: Response;
+  for (let attempt = 0; ; attempt++) {
+    res = await fetch(input, init);
+    if (!RETRYABLE_GATEWAY_STATUSES.has(res.status) || attempt >= MAX_GATEWAY_RETRIES) return res;
+    await delay(RETRY_DELAYS[attempt]);
+  }
+}
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
-  let lastError: Error | null = null;
+  const res = await fetchWithGatewayRetry(`${API_BASE}${url}`, {
+    ...options,
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      ...getAuthHeaders(),
+      ...(options?.headers as Record<string, string> | undefined),
+    },
+  });
 
-  for (let attempt = 0; attempt <= MAX_503_RETRIES; attempt++) {
-    const res = await fetch(`${API_BASE}${url}`, {
-      ...options,
-      credentials: 'include',
-      headers: {
-        'Content-Type': 'application/json',
-        ...getAuthHeaders(),
-        ...(options?.headers as Record<string, string> | undefined),
-      },
-    });
-    if (res.status === 401 && onUnauthorized) {
-      onUnauthorized();
-    }
-    // Retry on 503 (server restarting during deploy)
-    if (res.status === 503 && attempt < MAX_503_RETRIES) {
-      await delay(RETRY_DELAYS[attempt]);
-      continue;
-    }
-    if (!res.ok) {
-      const error = await res.json().catch(() => ({ error: 'Request failed' }));
-      throw new Error(error.error || `HTTP ${res.status}`);
-    }
-    return res.json();
+  if (res.status === 401 && onUnauthorized) {
+    onUnauthorized();
   }
-
-  throw lastError ?? new Error('Request failed after retries');
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ error: 'Request failed' }));
+    throw new Error(error.error || `HTTP ${res.status}`);
+  }
+  return res.json();
 }
 
 // Auth
@@ -539,39 +552,32 @@ export async function streamChat(
       body.edit_message_id = editMessageId;
     }
 
-    // Retry loop for 503 (server restarting during deploy)
-    let res: Response | null = null;
-    for (let attempt = 0; attempt <= MAX_503_RETRIES; attempt++) {
-      res = await fetch(`${API_BASE}/chat`, {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-          ...getAuthHeaders(),
-        },
-        body: JSON.stringify(body),
-        signal,
-      });
+    // Replays past a deploy restart (503) or the cold boot of a slept service
+    // (502/504) — the turn never reached the API, so the POST is safe to send
+    // again; see RETRYABLE_GATEWAY_STATUSES.
+    const res = await fetchWithGatewayRetry(`${API_BASE}/chat`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        ...getAuthHeaders(),
+      },
+      body: JSON.stringify(body),
+      signal,
+    });
 
-      if (res.status === 503 && attempt < MAX_503_RETRIES) {
-        await delay(RETRY_DELAYS[attempt]);
-        continue;
-      }
-      break;
-    }
-
-    if (!res!.ok) {
-      const error = await res!.json().catch(() => ({ error: 'Chat request failed' }));
-      onError(error.error || `HTTP ${res!.status}`);
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({ error: 'Chat request failed' }));
+      onError(error.error || `HTTP ${res.status}`);
       return;
     }
 
-    if (!res!.body) {
+    if (!res.body) {
       onError('No response body');
       return;
     }
 
-    const reader = res!.body.getReader();
+    const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
 

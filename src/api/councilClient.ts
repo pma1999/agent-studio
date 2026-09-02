@@ -6,7 +6,7 @@ import type {
   CouncilRunDetail,
   CouncilConfig,
 } from '../types';
-import { getAuthHeaders } from './client';
+import { getAuthHeaders, fetchWithGatewayRetry } from './client';
 import type { McpApprovalRequiredData } from './client';
 
 /** Same as main API client: use VITE_API_URL in production so requests hit the backend, not the SPA. */
@@ -44,7 +44,9 @@ export async function streamCouncilChat(
   handlers: CouncilStreamHandlers,
   signal?: AbortSignal
 ): Promise<void> {
-  const response = await fetch(`${API_BASE}/chat/council`, {
+  // Same gateway-retry guard as the single-model chat stream: a deploy restart
+  // or the cold boot of a slept service must not surface as a failed council run.
+  const response = await fetchWithGatewayRetry(`${API_BASE}/chat/council`, {
     method: 'POST',
     credentials: 'include',
     headers: {

@@ -1,4 +1,4 @@
-import { Sandbox, type CommandResult, type SandboxOpts } from 'e2b';
+import type { Sandbox, CommandResult, SandboxOpts } from 'e2b';
 import { nanoid } from 'nanoid';
 import { z } from 'zod';
 import { getSettingValue } from '../routes/settings.js';
@@ -136,6 +136,25 @@ export function buildRunCommandDisclosure(userId: string): string {
     paragraphs.push('The `sandbox` backend is an ephemeral Linux VM running `/bin/bash` — use POSIX/bash syntax.');
   }
   return paragraphs.join('\n\n');
+}
+
+/**
+ * The e2b SDK costs ~16 MB of RSS at import time and is only reached by the
+ * cloud-sandbox backend; the local-agent backend never touches it. Loading it
+ * on first sandbox creation keeps that off the boot footprint (see
+ * htmlExtract.ts for the same reasoning about jsdom).
+ */
+let sandboxCtorPromise: Promise<typeof import('e2b')['Sandbox']> | null = null;
+function loadSandboxCtor(): Promise<typeof import('e2b')['Sandbox']> {
+  if (!sandboxCtorPromise) {
+    sandboxCtorPromise = import('e2b')
+      .then((mod) => mod.Sandbox)
+      .catch((err) => {
+        sandboxCtorPromise = null; // don't cache a failed load; the next call retries
+        throw err;
+      });
+  }
+  return sandboxCtorPromise;
 }
 
 function resolveSandboxCwd(cwd: string | undefined): string {
@@ -427,7 +446,8 @@ export async function runCommandTool(
       return finish({ error: CLIENT_DISCONNECT_ERROR }, true);
     }
 
-    sandbox = await Sandbox.create(sandboxOptions);
+    const SandboxCtor = await loadSandboxCtor();
+    sandbox = await SandboxCtor.create(sandboxOptions);
     if (ctx.signal.aborted) {
       void killSandbox();
       return finish({ error: CLIENT_DISCONNECT_ERROR }, true);

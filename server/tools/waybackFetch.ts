@@ -85,7 +85,7 @@ export async function fetchFromWayback(
     return { error: `Wayback snapshot respondió con estado HTTP ${res.status}` };
   }
   const html = await res.text();
-  const extracted = extractReadableContent(html, snapshotUrl);
+  const extracted = await extractReadableContent(html, snapshotUrl);
   if ('error' in extracted) return extracted;
   return { ...extracted, snapshotTimestamp: lookup.timestamp };
 }
