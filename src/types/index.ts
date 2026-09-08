@@ -353,12 +353,19 @@ export interface OpenRouterCredits {
   is_free_tier: boolean;
 }
 
+export interface OpenRouterReasoningInfo {
+  supported_efforts?: string[] | null;
+  mandatory?: boolean | null;
+  default_effort?: string | null;
+}
+
 export interface OpenRouterModel {
   id: string;
   name: string;
   description?: string;
   context_length: number;
   pricing: { prompt: string; completion: string };
+  reasoning?: OpenRouterReasoningInfo | null;
 }
 
 export interface OpenRouterEndpoint {

@@ -28,7 +28,7 @@ const agentExportSchema = z.object({
   max_tokens: z.number().optional().default(8192),
   web_search_enabled: z.union([z.number(), z.boolean()]).optional().default(0),
   reasoning_enabled: z.union([z.number(), z.boolean()]).optional().default(0),
-  reasoning_effort: z.string().nullable().optional(),
+  reasoning_effort: z.enum(['max', 'xhigh', 'high', 'medium', 'low', 'minimal', 'none']).nullable().optional(),
   reasoning_max_tokens: z.number().nullable().optional(),
   tool_choice: z.enum(['auto', 'none']).optional().default('auto'),
   parallel_tool_calls: z.union([z.number(), z.boolean()]).optional().default(1),

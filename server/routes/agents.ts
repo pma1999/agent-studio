@@ -11,6 +11,7 @@ import {
   serializeProviderRoutingConfig,
   type ProviderRoutingConfig,
 } from '../providerRouting.js';
+import { isReasoningEffort } from '../../shared/reasoningEfforts.js';
 
 const router = Router();
 
@@ -29,6 +30,19 @@ function withParsedProviderRouting<T extends Record<string, unknown>>(row: T): T
 }
 
 const INVALID_SKILL_IDS_ERROR = 'One or more skill_ids do not exist or are not owned by this user';
+const REASONING_EFFORT_ERROR = 'reasoning_effort must be one of max, xhigh, high, medium, low, minimal, none';
+
+/**
+ * Whitelist de unión para escrituras de `reasoning_effort` (asimetría
+ * intencional persist-vs-send: el persist rechaza basura, el send clamped).
+ * Solo actúa cuando el body trae valor no-nulo no-vacío: ausente/null/''
+ * equivalen a null (sin preferencia) y pasan. Cualquier valor válido de la
+ * unión se acepta con independencia del modelo.
+ */
+function reasoningEffortBodyError(value: unknown): string | null {
+  if (value === undefined || value === null || value === '') return null;
+  return isReasoningEffort(value) ? null : REASONING_EFFORT_ERROR;
+}
 
 function skillIdsAreOwnedByUser(skillIds: unknown, userId: string): boolean {
   if (!Array.isArray(skillIds)) return true;
@@ -199,6 +213,10 @@ router.post('/', (req: AuthRequest, res: Response) => {
     } catch (err) {
       return res.status(400).json({ error: err instanceof Error ? err.message : 'Invalid provider routing' });
     }
+    const reasoningEffortError = reasoningEffortBodyError(reasoning_effort);
+    if (reasoningEffortError) {
+      return res.status(400).json({ error: reasoningEffortError });
+    }
     if (!skillIdsAreOwnedByUser(skill_ids, userId)) {
       return res.status(400).json({ error: INVALID_SKILL_IDS_ERROR });
     }
@@ -348,6 +366,10 @@ router.put('/:id', (req: AuthRequest, res: Response) => {
       assertProviderRoutingCompatible(nextModel, nextProviderRouting);
     } catch (err) {
       return res.status(400).json({ error: err instanceof Error ? err.message : 'Invalid provider routing' });
+    }
+    const reasoningEffortError = reasoningEffortBodyError(reasoning_effort);
+    if (reasoningEffortError) {
+      return res.status(400).json({ error: reasoningEffortError });
     }
     const updateAgent = db.transaction(() => {
       db.prepare(`

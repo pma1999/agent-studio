@@ -12,6 +12,9 @@ import { Modal } from './ui/Modal';
 import { Input } from './ui/Input';
 import { Button } from './ui/Button';
 import { ModelSelectorCore } from './ModelSelectorCore';
+import { useOpenRouterModels } from '../hooks/useOpenRouterModels';
+import { clampReasoningEffort, filterSupportedEfforts, lookupSupportedEfforts } from '../../shared/reasoningEfforts';
+import { formatModelId } from '../utils/modelUtils';
 import { ProviderRoutingSelector } from './ProviderRoutingSelector';
 import { PremiumToggle } from './ui/PremiumToggle';
 import { PremiumEmojiPicker } from './ui/PremiumEmojiPicker';
@@ -681,6 +684,30 @@ function GeneralChatSettingsSection() {
     { value: 'max', label: 'Ultra', description: 'Max effort (ChatGPT)' },
   ];
 
+  // Per-model effort filter (T3, UI-only): cached catalog, no new requests, no payload change.
+  // Saving stays unblocked by design; the hint below only explains the server fallback.
+  const generalModelShort = formatModelId(localModel);
+  const { models: openRouterModels, loading: openRouterModelsLoading, error: openRouterModelsError } = useOpenRouterModels();
+  const supportedGeneralEfforts = React.useMemo(() => {
+    if (openRouterModelsLoading || openRouterModelsError) return null;
+    return filterSupportedEfforts(lookupSupportedEfforts(openRouterModels, localModel));
+  }, [openRouterModels, openRouterModelsLoading, openRouterModelsError, localModel]);
+  const generalEffortHint = React.useMemo(() => {
+    if (localReasoningEffort === 'none') return null;
+    if (supportedGeneralEfforts === null) return null;
+    if (supportedGeneralEfforts.includes(localReasoningEffort)) return null;
+    const fallback = clampReasoningEffort(localReasoningEffort, supportedGeneralEfforts);
+    const currentLabel = reasoningEffortOptions.find((o) => o.value === localReasoningEffort)?.label
+      ?? localReasoningEffort;
+    const fallbackLabel = fallback == null
+      ? null
+      : reasoningEffortOptions.find((o) => o.value === fallback)?.label ?? null;
+    if (fallback === null || fallbackLabel === null) {
+      return `"${currentLabel}" isn't supported by ${generalModelShort} — sending without effort.`;
+    }
+    return `"${currentLabel}" isn't supported by ${generalModelShort} — sending ${fallbackLabel}.`;
+  }, [supportedGeneralEfforts, localReasoningEffort, generalModelShort]);
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
       {/* Header */}
@@ -856,41 +883,66 @@ function GeneralChatSettingsSection() {
                   Thinking Depth
                 </label>
                 <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-                  {reasoningEffortOptions.map((option) => (
-                    <motion.button
-                      key={option.value}
-                      onClick={() => setLocalReasoningEffort(option.value as any)}
-                      whileHover={{ scale: 1.02 }}
-                      whileTap={{ scale: 0.98 }}
-                      style={{
-                        padding: '8px 14px',
-                        borderRadius: 'var(--radius-md)',
-                        border: `1.5px solid ${localReasoningEffort === option.value ? 'var(--accent)' : 'var(--border)'}`,
-                        background: localReasoningEffort === option.value
-                          ? 'var(--accent-soft)'
-                          : 'var(--bg-elevated)',
-                        cursor: 'pointer',
-                        transition: 'all 0.15s ease',
-                      }}
-                    >
-                      <div style={{
-                        fontSize: '0.8125rem',
-                        fontWeight: localReasoningEffort === option.value ? 600 : 500,
-                        color: localReasoningEffort === option.value ? 'var(--accent)' : 'var(--text-primary)',
-                        textTransform: 'capitalize',
-                      }}>
-                        {option.label}
-                      </div>
-                      <div style={{
-                        fontSize: '0.6875rem',
-                        color: 'var(--text-muted)',
-                        marginTop: '2px',
-                      }}>
-                        {option.description}
-                      </div>
-                    </motion.button>
-                  ))}
+                  {reasoningEffortOptions.map((option) => {
+                    const isActive = localReasoningEffort === option.value;
+                    const isSupported = supportedGeneralEfforts === null
+                      || (supportedGeneralEfforts as readonly string[]).includes(option.value);
+                    return (
+                      <motion.button
+                        key={option.value}
+                        onClick={() => setLocalReasoningEffort(option.value as any)}
+                        disabled={!isSupported}
+                        title={isSupported ? undefined : `${option.label} no soportado por ${generalModelShort}`}
+                        aria-label={isSupported ? undefined : `${option.label}. No soportado por ${generalModelShort}`}
+                        whileHover={isSupported ? { scale: 1.02 } : undefined}
+                        whileTap={isSupported ? { scale: 0.98 } : undefined}
+                        style={{
+                          padding: '8px 14px',
+                          borderRadius: 'var(--radius-md)',
+                          border: `1.5px solid ${isActive ? 'var(--accent)' : 'var(--border)'}`,
+                          background: isActive
+                            ? 'var(--accent-soft)'
+                            : 'var(--bg-elevated)',
+                          cursor: isSupported ? 'pointer' : 'not-allowed',
+                          transition: 'all 0.15s ease',
+                        }}
+                      >
+                        <div style={{
+                          fontSize: '0.8125rem',
+                          fontWeight: isActive ? 600 : 500,
+                          color: isActive ? 'var(--accent)' : 'var(--text-primary)',
+                          textTransform: 'capitalize',
+                        }}>
+                          {option.label}
+                        </div>
+                        <div style={{
+                          fontSize: '0.6875rem',
+                          color: 'var(--text-muted)',
+                          marginTop: '2px',
+                        }}>
+                          {option.description}
+                        </div>
+                      </motion.button>
+                    );
+                  })}
                 </div>
+                {localReasoningEnabled && generalEffortHint && (
+                  <div
+                    aria-live="polite"
+                    style={{
+                      marginTop: '12px',
+                      padding: '8px 10px',
+                      background: 'var(--bg-elevated)',
+                      border: '1px solid var(--border)',
+                      borderRadius: 'var(--radius-sm)',
+                      fontSize: '0.75rem',
+                      color: 'var(--text-muted)',
+                      lineHeight: 1.4,
+                    }}
+                  >
+                    {generalEffortHint}
+                  </div>
+                )}
               </div>
             </motion.div>
           )}

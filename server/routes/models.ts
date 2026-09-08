@@ -29,6 +29,7 @@ import {
 import { getAgentCapabilities, sendLlamacppRequest } from '../agentRelay/registry.js';
 import type { BackendToAgentMessage } from '../agentRelay/protocol.js';
 import { listChatgptModels, CodexForbiddenError } from '../codex/instanceManager.js';
+import { lookupSupportedEfforts } from '../../shared/reasoningEfforts.js';
 
 const router = Router();
 
@@ -37,6 +38,56 @@ let modelsCache: { data: any[]; timestamp: number } | null = null;
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 const ENDPOINTS_CACHE_TTL = 60 * 1000; // 1 minute
 const endpointsCache = new Map<string, { data: unknown[]; timestamp: number }>();
+
+/**
+ * Pure mapper for one upstream catalog entry. Verbatim passthrough of
+ * `reasoning.{supported_efforts, mandatory, default_effort}`; `null` when the
+ * upstream entry carries no `reasoning` object. Extracted pure for testability.
+ */
+export function mapOpenRouterCatalogEntry(m: any): {
+  id: string;
+  name: string;
+  description: string;
+  context_length: number;
+  pricing: { prompt: string; completion: string };
+  reasoning: {
+    supported_efforts?: string[] | null;
+    mandatory?: boolean | null;
+    default_effort?: string | null;
+  } | null;
+} {
+  const reasoning = m?.reasoning;
+  return {
+    id: m.id,
+    name: m.name,
+    description: m.description || '',
+    context_length: m.context_length || 0,
+    pricing: {
+      prompt: m.pricing?.prompt || '0',
+      completion: m.pricing?.completion || '0',
+    },
+    reasoning:
+      reasoning === null || reasoning === undefined || typeof reasoning !== 'object'
+        ? null
+        : {
+            supported_efforts: Array.isArray(reasoning.supported_efforts)
+              ? [...reasoning.supported_efforts]
+              : (reasoning.supported_efforts ?? null),
+            mandatory: reasoning.mandatory ?? null,
+            default_effort: reasoning.default_effort ?? null,
+          },
+  };
+}
+
+/**
+ * Read a model's supported efforts from the in-memory proxy cache. Never
+ * fetches: `null` when the cache is cold, the model is absent, or it carries
+ * no list (all fail-open cases for the T2 clamp).
+ */
+export function getCachedOpenRouterSupportedEfforts(modelId: string): string[] | null {
+  if (!modelsCache) return null;
+  return lookupSupportedEfforts(modelsCache.data, modelId);
+}
 
 // GET /api/models/openrouter - Fetch available OpenRouter models (cached)
 router.get('/openrouter', async (_req: AuthRequest, res: Response) => {
@@ -59,16 +110,7 @@ router.get('/openrouter', async (_req: AuthRequest, res: Response) => {
     }
 
     const json = await response.json();
-    const models = (json.data || []).map((m: any) => ({
-      id: m.id,
-      name: m.name,
-      description: m.description || '',
-      context_length: m.context_length || 0,
-      pricing: {
-        prompt: m.pricing?.prompt || '0',
-        completion: m.pricing?.completion || '0',
-      },
-    }));
+    const models = (json.data || []).map(mapOpenRouterCatalogEntry);
 
     // Update cache
     modelsCache = { data: models, timestamp: Date.now() };

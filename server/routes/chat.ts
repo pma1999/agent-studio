@@ -49,6 +49,8 @@ import {
 } from '../providers/llamacppTransport.js';
 import { runCodexTurn } from '../codex/chat.js';
 import { CodexUnavailableError } from '../codex/instanceManager.js';
+import { getCachedOpenRouterSupportedEfforts } from './models.js';
+import { clampReasoningEffort } from '../../shared/reasoningEfforts.js';
 import { buildDateTimeContext, injectDateTimeIntoCurrentTurn } from '../dateTimeContext.js';
 import {
   appendSkillCatalogIfNeeded,
@@ -785,6 +787,21 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       if (reasoningOverride.enabled !== undefined) reasoningEnabled = reasoningOverride.enabled;
       if (reasoningOverride.effort !== undefined) reasoningEffort = reasoningOverride.effort;
       if (reasoningOverride.max_tokens !== undefined) reasoningMaxTokens = reasoningOverride.max_tokens;
+    }
+
+    // T2-enforce: clamp pre-flight del effort resuelto (precedencia ya
+    // aplicada arriba) contra la lista del catálogo en caché. SOLO OpenRouter:
+    // caché fría / `openrouter/auto` / lista ausente → fail-open (enviar tal
+    // cual, el retry `max→xhigh` queda como backstop). Lista conocida y valor
+    // no soportado → clamped logueado; `[]` + valor → null (bare
+    // `{enabled:true}`); `'none'`/ausente → passthrough. Nunca 400 en el send.
+    if (provider.id === 'openrouter' && reasoningEnabled && reasoningEffort !== null && reasoningEffort !== undefined) {
+      const supported = getCachedOpenRouterSupportedEfforts(upstreamModel);
+      const clamped = clampReasoningEffort(reasoningEffort, supported);
+      if (clamped !== reasoningEffort) {
+        console.log(`[chat] Reasoning effort clamped: requested=${reasoningEffort} applied=${clamped ?? 'omitted'} model=${upstreamModel}`);
+        reasoningEffort = clamped;
+      }
     }
 
     if (provider.supportsReasoningParam) {

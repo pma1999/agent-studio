@@ -4,6 +4,9 @@ import { useStore } from '../stores/store';
 import { agentsApi, toolsApi, mcpServersApi, skillsApi } from '../api/client';
 import { Modal } from './ui/Modal';
 import { ModelSelectorCore } from './ModelSelectorCore';
+import { useOpenRouterModels } from '../hooks/useOpenRouterModels';
+import { clampReasoningEffort, filterSupportedEfforts, lookupSupportedEfforts } from '../../shared/reasoningEfforts';
+import { formatModelId } from '../utils/modelUtils';
 import { ProviderRoutingSelector } from './ProviderRoutingSelector';
 import { Input } from './ui/Input';
 import { TextArea } from './ui/TextArea';
@@ -169,6 +172,31 @@ export function AgentEditor() {
   const updateField = <K extends keyof AgentFormData>(key: K, value: AgentFormData[K]) => {
     setForm((prev) => ({ ...prev, [key]: value }));
   };
+
+  // Per-model effort filter (T3, UI-only): cached catalog, no new requests, no payload change.
+  // The server accepts any union value by design; the hint below never blocks saving.
+  const agentModelShort = formatModelId(form.model);
+  const { models: openRouterModels, loading: openRouterModelsLoading, error: openRouterModelsError } = useOpenRouterModels();
+  const supportedAgentEfforts = useMemo(() => {
+    if (openRouterModelsLoading || openRouterModelsError) return null;
+    return filterSupportedEfforts(lookupSupportedEfforts(openRouterModels, form.model));
+  }, [openRouterModels, openRouterModelsLoading, openRouterModelsError, form.model]);
+  const agentEffortHint = useMemo(() => {
+    if (form.reasoning_effort === 'none') return null;
+    if (supportedAgentEfforts === null) return null;
+    if (form.reasoning_effort == null) return null;
+    if (supportedAgentEfforts.includes(form.reasoning_effort)) return null;
+    const fallback = clampReasoningEffort(form.reasoning_effort, supportedAgentEfforts);
+    const currentLabel = EFFORT_LEVELS.find((l) => l.value === form.reasoning_effort)?.label
+      ?? form.reasoning_effort;
+    const fallbackLabel = fallback == null
+      ? null
+      : EFFORT_LEVELS.find((l) => l.value === fallback)?.label ?? null;
+    if (fallback === null || fallbackLabel === null) {
+      return `"${currentLabel}" isn't supported by ${agentModelShort} — sending without effort.`;
+    }
+    return `"${currentLabel}" isn't supported by ${agentModelShort} — sending ${fallbackLabel}.`;
+  }, [supportedAgentEfforts, form.reasoning_effort, agentModelShort]);
 
   return (
     <Modal
@@ -680,11 +708,15 @@ export function AgentEditor() {
                       }}>
                         {EFFORT_LEVELS.map((level) => {
                           const isActive = form.reasoning_effort === level.value;
+                          const isSupported = supportedAgentEfforts === null
+                            || supportedAgentEfforts.includes(level.value);
                           return (
                             <button
                               key={level.value}
                               onClick={() => updateField('reasoning_effort', level.value)}
-                              title={level.desc}
+                              disabled={!isSupported}
+                              title={isSupported ? level.desc : `${level.label} no soportado por ${agentModelShort}`}
+                              aria-label={isSupported ? undefined : `${level.label}. No soportado por ${agentModelShort}`}
                               style={{
                                 flex: 1,
                                 padding: '6px 4px',
@@ -693,7 +725,7 @@ export function AgentEditor() {
                                 fontFamily: 'var(--font-body)',
                                 border: 'none',
                                 borderRadius: 'calc(var(--radius-sm) - 2px)',
-                                cursor: 'pointer',
+                                cursor: isSupported ? 'pointer' : 'not-allowed',
                                 transition: 'all 0.15s ease',
                                 background: isActive ? 'var(--accent-soft)' : 'transparent',
                                 color: isActive ? 'var(--accent)' : 'var(--text-muted)',
@@ -705,6 +737,22 @@ export function AgentEditor() {
                           );
                         })}
                       </div>
+                      {agentEffortHint && (
+                        <div
+                          aria-live="polite"
+                          style={{
+                            padding: '6px 8px',
+                            background: 'var(--bg-base)',
+                            border: '1px solid var(--border)',
+                            borderRadius: 'var(--radius-sm)',
+                            fontSize: '0.6875rem',
+                            color: 'var(--text-muted)',
+                            lineHeight: 1.4,
+                          }}
+                        >
+                          {agentEffortHint}
+                        </div>
+                      )}
                     </div>
 
                     {/* Max Tokens for Reasoning (optional) */}

@@ -20,6 +20,9 @@ import { ProviderRoutingSelector } from './ProviderRoutingSelector';
 import { ConversationToolsSelector } from './ConversationToolsSelector';
 import { ConversationSkillsSelector } from './ConversationSkillsSelector';
 import { conversationsApi, skillsApi, agentPairingApi, agentUploadsApi, settingsApi } from '../api/client';
+import { useOpenRouterModels } from '../hooks/useOpenRouterModels';
+import { clampReasoningEffort, filterSupportedEfforts, lookupSupportedEfforts } from '../../shared/reasoningEfforts';
+import { formatModelId } from '../utils/modelUtils';
 import { isLlamaCppModel, stripLlamaCppPrefix } from '../utils/providers';
 import { effectiveReasoningBudgetV2, LLAMACPP_PRESET_META, overridesForKey, parseLlamaCppActivePreset, parseLlamaCppPresetsRow } from '../utils/llamacppKnobs';
 import { PremiumMentionInput } from './ui/PremiumMentionInput';
@@ -498,6 +501,28 @@ export function ChatView() {
   // it can go. Read the FOUR settings rows fail-soft and surface the result on
   // the toggle; -1 (unlimited) renders no hint at all.
   const chatModelId = effectiveConversationModel ?? defaultModelForChat;
+  const chatModelShort = formatModelId(chatModelId);
+  // Per-model effort filter (T3, UI-only): cached catalog, no new requests, no payload change.
+  const { models: openRouterModels, loading: openRouterModelsLoading, error: openRouterModelsError } = useOpenRouterModels();
+  const supportedChatEfforts = useMemo(() => {
+    if (openRouterModelsLoading || openRouterModelsError) return null;
+    return filterSupportedEfforts(lookupSupportedEfforts(openRouterModels, chatModelId));
+  }, [openRouterModels, openRouterModelsLoading, openRouterModelsError, chatModelId]);
+  // Hint when the current effort does not apply; fallback mirrors the server clamp.
+  const chatEffortHint = useMemo(() => {
+    if (currentEffort === 'none') return null;
+    if (supportedChatEfforts === null) return null;
+    if (supportedChatEfforts.includes(currentEffort)) return null;
+    const fallback = clampReasoningEffort(currentEffort, supportedChatEfforts);
+    const currentLabel = EFFORT_OPTIONS.find((o) => o.value === currentEffort)?.label ?? currentEffort;
+    const fallbackLabel = fallback == null
+      ? null
+      : EFFORT_OPTIONS.find((o) => o.value === fallback)?.label ?? null;
+    if (fallback === null || fallbackLabel === null) {
+      return `"${currentLabel}" isn't supported by ${chatModelShort} — sending without effort.`;
+    }
+    return `"${currentLabel}" isn't supported by ${chatModelShort} — sending ${fallbackLabel}.`;
+  }, [supportedChatEfforts, currentEffort, chatModelShort]);
   const chatModelIsLlamaCpp = isLlamaCppModel(chatModelId);
   const chatModelKey = chatModelIsLlamaCpp ? stripLlamaCppPrefix(chatModelId) : null;
   const [llamacppBudgetHint, setLlamacppBudgetHint] = useState<{ budget: number; source: string } | null>(null);
@@ -1463,10 +1488,15 @@ export function ChatView() {
                             }}>
                               {EFFORT_OPTIONS.map((opt) => {
                                 const isActive = currentEffort === opt.value;
+                                const isSupported = supportedChatEfforts === null
+                                  || supportedChatEfforts.includes(opt.value);
                                 return (
                                   <button
                                     key={opt.value}
                                     onClick={() => setEffort(opt.value)}
+                                    disabled={!isSupported}
+                                    title={isSupported ? undefined : `${opt.label} no soportado por ${chatModelShort}`}
+                                    aria-label={isSupported ? undefined : `${opt.short}. No soportado por ${chatModelShort}`}
                                     style={{
                                       flex: 1,
                                       padding: '5px 2px',
@@ -1475,7 +1505,7 @@ export function ChatView() {
                                       fontFamily: 'var(--font-body)',
                                       border: 'none',
                                       borderRadius: 'calc(var(--radius-sm) - 2px)',
-                                      cursor: 'pointer',
+                                      cursor: isSupported ? 'pointer' : 'not-allowed',
                                       transition: 'all 0.12s ease',
                                       background: isActive ? 'var(--accent-soft)' : 'transparent',
                                       color: isActive ? 'var(--accent)' : 'var(--text-muted)',
@@ -1486,6 +1516,24 @@ export function ChatView() {
                                 );
                               })}
                             </div>
+
+                            {chatEffortHint && (
+                              <div
+                                aria-live="polite"
+                                style={{
+                                  marginTop: '8px',
+                                  padding: '6px 8px',
+                                  background: 'var(--bg-base)',
+                                  border: '1px solid var(--border)',
+                                  borderRadius: 'var(--radius-sm)',
+                                  fontSize: '0.625rem',
+                                  color: 'var(--text-muted)',
+                                  lineHeight: 1.4,
+                                }}
+                              >
+                                {chatEffortHint}
+                              </div>
+                            )}
 
                             {/* Info line */}
                             <div style={{
@@ -1967,16 +2015,41 @@ export function ChatView() {
               </div>
               {reasoningActive && (
                 <div className="composer-effort">
-                  {EFFORT_OPTIONS.map((opt) => (
-                    <button
-                      key={opt.value}
-                      type="button"
-                      className={currentEffort === opt.value ? 'is-active' : ''}
-                      onClick={() => setEffort(opt.value)}
-                    >
-                      {opt.label}
-                    </button>
-                  ))}
+                  {EFFORT_OPTIONS.map((opt) => {
+                    const isSupported = supportedChatEfforts === null
+                      || supportedChatEfforts.includes(opt.value);
+                    return (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        className={currentEffort === opt.value ? 'is-active' : ''}
+                        onClick={() => setEffort(opt.value)}
+                        disabled={!isSupported}
+                        title={isSupported ? undefined : `${opt.label} no soportado por ${chatModelShort}`}
+                        aria-label={isSupported ? undefined : `${opt.label}. No soportado por ${chatModelShort}`}
+                        style={isSupported ? undefined : { cursor: 'not-allowed' }}
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              {reasoningActive && chatEffortHint && (
+                <div
+                  aria-live="polite"
+                  style={{
+                    marginTop: '8px',
+                    padding: '6px 8px',
+                    background: 'var(--bg-base)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 'var(--radius-sm)',
+                    fontSize: '0.75rem',
+                    color: 'var(--text-muted)',
+                    lineHeight: 1.4,
+                  }}
+                >
+                  {chatEffortHint}
                 </div>
               )}
             </section>
