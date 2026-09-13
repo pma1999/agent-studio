@@ -23,12 +23,14 @@
  * OpenRouter's own `deepseek/...` slugs.
  */
 
-export type ProviderId = 'openrouter' | 'deepseek' | 'codex' | 'lmstudio' | 'llamacpp' | 'abliteration';
+export type ProviderId = 'openrouter' | 'deepseek' | 'codex' | 'lmstudio' | 'llamacpp' | 'abliteration' | 'arnict';
 
 export const DEEPSEEK_PREFIX = 'deepseek:';
 export const DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 export const ABLITERATION_PREFIX = 'abliteration:';
 export const ABLITERATION_BASE_URL = 'https://api.abliteration.ai';
+export const ARNICT_PREFIX = 'arnict:';
+export const ARNICT_BASE_URL = 'https://api.arnict.com';
 export const CODEX_PREFIX = 'codex:';
 export const LMSTUDIO_PREFIX = 'lmstudio:';
 export const LLAMACPP_PREFIX = 'llamacpp:';
@@ -100,6 +102,27 @@ const ABLITERATION_CONFIG: ProviderConfig = {
 };
 
 /**
+ * Arnict (Direct). OpenAI-compatible `POST /v1/chat/completions` relayed
+ * server-side with `Authorization: Bearer <key>`. Wave-1 ships a plain POST:
+ * no provider/plugins routing prefs, no reasoning object, no json_schema
+ * (all flags false), following the ABLITERATION_CONFIG shape.
+ */
+const ARNICT_CONFIG: ProviderConfig = {
+  id: 'arnict',
+  label: 'Arnict (Direct)',
+  chatCompletionsUrl: `${ARNICT_BASE_URL}/v1/chat/completions`,
+  apiKeySetting: 'arnict_api_key',
+  buildHeaders: (apiKey) => ({
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${apiKey}`,
+  }),
+  supportsProviderRouting: false,
+  supportsPlugins: false,
+  supportsReasoningParam: false,
+  supportsJsonSchema: false,
+};
+
+/**
  * ChatGPT (Codex app-server). There is no chat-completions URL or API key: the
  * backend bridges to a per-user `codex app-server` process over JSON-RPC/stdio
  * and usage is billed to the user's ChatGPT plan. apiKeySetting is left empty
@@ -163,12 +186,14 @@ const CONFIGS: Record<ProviderId, ProviderConfig> = {
   lmstudio: LMSTUDIO_REMOVED_CONFIG,
   llamacpp: LLAMACPP_CONFIG,
   abliteration: ABLITERATION_CONFIG,
+  arnict: ARNICT_CONFIG,
 };
 
 /** Returns the provider that should serve a given namespaced model id. */
 export function resolveProviderId(modelId: string | null | undefined): ProviderId {
   if (typeof modelId === 'string' && modelId.startsWith(DEEPSEEK_PREFIX)) return 'deepseek';
   if (typeof modelId === 'string' && modelId.startsWith(ABLITERATION_PREFIX)) return 'abliteration';
+  if (typeof modelId === 'string' && modelId.startsWith(ARNICT_PREFIX)) return 'arnict';
   if (typeof modelId === 'string' && modelId.startsWith(CODEX_PREFIX)) return 'codex';
   // D8: retained so legacy ids resolve to 'lmstudio' (rejected downstream),
   // NEVER to openrouter.
@@ -181,6 +206,7 @@ export function resolveProviderId(modelId: string | null | undefined): ProviderI
 export function toUpstreamModelId(modelId: string): string {
   if (modelId.startsWith(DEEPSEEK_PREFIX)) return modelId.slice(DEEPSEEK_PREFIX.length);
   if (modelId.startsWith(ABLITERATION_PREFIX)) return modelId.slice(ABLITERATION_PREFIX.length);
+  if (modelId.startsWith(ARNICT_PREFIX)) return modelId.slice(ARNICT_PREFIX.length);
   if (modelId.startsWith(CODEX_PREFIX)) return modelId.slice(CODEX_PREFIX.length);
   if (modelId.startsWith(LMSTUDIO_PREFIX)) return modelId.slice(LMSTUDIO_PREFIX.length);
   if (modelId.startsWith(LLAMACPP_PREFIX)) return modelId.slice(LLAMACPP_PREFIX.length);
@@ -210,6 +236,15 @@ export function isLmStudioModel(modelId: string | null | undefined): boolean {
 export function isAbliterationModel(modelId: string | null | undefined): boolean {
   return resolveProviderId(modelId) === 'abliteration';
 }
+
+/** True when the model id targets the Arnict-direct provider. */
+export function isArnictModel(modelId: string | null | undefined): boolean {
+  return resolveProviderId(modelId) === 'arnict';
+}
+
+/** Exact shared guard message: tools are OpenRouter-only, never sent for arnict (GC §5). */
+export const ARNICT_TOOLS_UNSUPPORTED_MESSAGE =
+  'Tool calls are currently supported only with OpenRouter models, not Arnict (Direct).';
 
 /** Exact shared guard message for text-only Abliteration large models (GC §5). */
 export const ABLITERATION_LARGE_TEXT_ONLY_MESSAGE =
@@ -254,7 +289,7 @@ export function persistedModelId(
   effectiveModel: string,
   actualModelFromResponse: string | null,
 ): string {
-  if (providerId === 'deepseek' || providerId === 'lmstudio' || providerId === 'llamacpp' || providerId === 'abliteration') return effectiveModel;
+  if (providerId === 'deepseek' || providerId === 'lmstudio' || providerId === 'llamacpp' || providerId === 'abliteration' || providerId === 'arnict') return effectiveModel;
   return actualModelFromResponse ?? effectiveModel;
 }
 
@@ -495,4 +530,82 @@ export function computeAbliterationCost(
 export function abliterationCachedTokens(usage: AbliterationUsage | null | undefined): number {
   if (!usage) return 0;
   return usage.prompt_tokens_details?.cached_tokens ?? usage.prompt_cache_hit_tokens ?? 0;
+}
+
+// ---------------------------------------------------------------------------
+// Arnict-direct catalog / cost (GC §§3,6, static wave-1)
+// Docs: https://arnict.com/models + /pricing + /docs/models (2026-09-13);
+// contract pinned by plans/arnict-provider/integration-arnict.md. Static
+// catalog (GET /v1/models is key-gated; DeepSeek/Abliteration precedent);
+// Bearer auth; static per-token pricing because usage frames carry no `cost`
+// field. Success-payload field reads (`data[].id`) are per-docs
+// UNVERIFIED until the first keyed probe.
+// ---------------------------------------------------------------------------
+
+export interface ArnictCatalogModel {
+  id: string; // namespaced, e.g. 'arnict:zai/glm-5.3-flash-uncensored'
+  name: string;
+  description: string;
+  context_length: number;
+  pricing: { prompt: string; completion: string };
+}
+
+export const ARNICT_CATALOG: ArnictCatalogModel[] = [
+  {
+    id: `${ARNICT_PREFIX}zai/glm-5.3-flash-uncensored`,
+    name: 'GLM 5.3 Flash Uncensored',
+    description:
+      'Fast uncensored flagship model. Text, image and video input, text output.',
+    context_length: 1048576,
+    pricing: { prompt: '0.000000125', completion: '0.0000005' }, // $0.125 / $0.50 per 1M
+  },
+  {
+    id: `${ARNICT_PREFIX}qwen/qwen3.8-27b`,
+    name: 'Qwen 3.8 27B',
+    description:
+      'Free launch-week model. Text and image input, text output.',
+    context_length: 262144,
+    pricing: { prompt: '0', completion: '0' }, // free during launch week
+  },
+];
+
+/** Per-1M-token pricing used to compute cost (Arnict usage carries no `cost` field). */
+interface ArnictPrice {
+  in: number; // input, cache miss
+  cachedIn: number; // input, cache hit
+  out: number; // output
+}
+
+const ARNICT_PRICING: Record<string, ArnictPrice> = {
+  'zai/glm-5.3-flash-uncensored': { in: 0.125, cachedIn: 0.05, out: 0.5 },
+  'qwen/qwen3.8-27b': { in: 0, cachedIn: 0, out: 0 },
+};
+
+export interface ArnictUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  prompt_tokens_details?: { cached_tokens?: number };
+}
+
+/**
+ * Best-effort cost (USD) for an Arnict response, using the static price table.
+ * Cached input tokens bill at the cached rate, the remainder at the input
+ * rate, output at the output rate. Returns 0 for unknown models or absent usage.
+ */
+export function computeArnictCost(
+  usage: ArnictUsage | null | undefined,
+  upstreamModelId: string,
+): number {
+  const price = ARNICT_PRICING[upstreamModelId];
+  if (!price || !usage) return 0;
+  const hit = usage.prompt_tokens_details?.cached_tokens ?? 0;
+  const miss = Math.max((usage.prompt_tokens ?? 0) - hit, 0);
+  const out = usage.completion_tokens ?? 0;
+  return (hit * price.cachedIn + miss * price.in + out * price.out) / 1_000_000;
+}
+
+/** Cache-hit tokens from an Arnict usage object (for the app's cached_tokens metric). */
+export function arnictCachedTokens(usage: ArnictUsage | null | undefined): number {
+  if (!usage) return 0;
+  return usage.prompt_tokens_details?.cached_tokens ?? 0;
 }

@@ -126,6 +126,8 @@ interface AppState {
   setDeepSeekApiKey: (key: string) => void;
   abliterationApiKey: string;
   setAbliterationApiKey: (key: string) => void;
+  arnictApiKey: string;
+  setArnictApiKey: (key: string) => void;
   loadSettings: () => Promise<void>;
 
   // OAuth PKCE callback feedback
@@ -760,6 +762,8 @@ export const useStore = create<AppState>((set, get) => ({
   setDeepSeekApiKey: (key) => set({ deepSeekApiKey: key }),
   abliterationApiKey: '',
   setAbliterationApiKey: (key) => set({ abliterationApiKey: key }),
+  arnictApiKey: '',
+  setArnictApiKey: (key) => set({ arnictApiKey: key }),
   loadSettings: async () => {
     try {
       const data = await settingsApi.getAll();
@@ -768,6 +772,7 @@ export const useStore = create<AppState>((set, get) => ({
         autoConversationTitlesEnabled: data.auto_conversation_titles_enabled === 'true' || data.auto_conversation_titles_enabled === '1',
         deepSeekApiKey: data.deepseek_api_key ?? '',
         abliterationApiKey: data.abliteration_api_key ?? '',
+        arnictApiKey: data.arnict_api_key ?? '',
       });
     } catch (err) {
       console.error('Failed to load settings:', err);

@@ -29,13 +29,16 @@ import {
   assistantReasoningField,
   resolveAssistantHistoryContent,
   abliterationCachedTokens,
+  arnictCachedTokens,
   buildAbliterationReasoning,
   buildDeepSeekThinking,
   computeAbliterationCost,
+  computeArnictCost,
   computeDeepSeekCost,
   deepSeekCachedTokens,
   isAbliterationLargeModel,
   ABLITERATION_LARGE_TEXT_ONLY_MESSAGE,
+  ARNICT_TOOLS_UNSUPPORTED_MESSAGE,
   isCodexModel,
   isLlamacppModel,
   persistedModelId,
@@ -682,6 +685,14 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     mcpClients = resolved.mcpClients;
     const openRouterTools = toOpenRouterTools(resolvedTools);
 
+    // Arnict (Direct) accepts no `tools`/`tool_choice` (GC §5): reject a turn
+    // that would attach tools BEFORE any network call or SSE flush — same
+    // discipline as the PDF gate above and the large-model guard.
+    if (provider.id === 'arnict' && openRouterTools.length > 0) {
+      res.status(400).json({ error: ARNICT_TOOLS_UNSUPPORTED_MESSAGE });
+      return;
+    }
+
     // Augment system prompt with MCP tool naming instruction when applicable
     if (messages[0]?.role === 'system' && typeof messages[0].content === 'string') {
       messages[0].content = appendToolInstructionsIfNeeded(messages[0].content, resolvedTools);
@@ -876,6 +887,15 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       requestBody.stream_options = { include_usage: true };
     }
 
+    if (provider.id === 'arnict') {
+      // Usage frame required for static cost accounting (GC §6). The body
+      // otherwise stays allowlisted (GC §7: model/messages/temperature/
+      // max_tokens/stream/stream_options only) — provider/plugins/reasoning/
+      // tools/response_format never attach (flags §2 all false + tools gate
+      // above), so no arm beyond this line is needed.
+      requestBody.stream_options = { include_usage: true };
+    }
+
     // Structured outputs (OpenRouter JSON Schema)
     // Accept both: short form { name, strict, schema } or full API form { type: "json_schema", json_schema: { name, strict, schema } }
     const structuredEnabled = !!agent.structured_output_enabled;
@@ -917,7 +937,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     // 'response-healing' field is meaningless upstream), so both are excluded.
     // Abliteration is excluded too: the healing plugin is a 422 risk there
     // (GC §2) and healing forces stream:false, which abliteration never uses.
-    const useResponseHealing = !!agent.response_healing_enabled && !!responseFormat && provider.id !== 'codex' && provider.id !== 'llamacpp' && provider.id !== 'abliteration';
+    const useResponseHealing = !!agent.response_healing_enabled && !!responseFormat && provider.id !== 'codex' && provider.id !== 'llamacpp' && provider.id !== 'abliteration' && provider.id !== 'arnict';
     if (useResponseHealing) {
       requestBody.stream = false;
       const plugins = (requestBody.plugins as { id: string; pdf?: { engine: string } }[]) || [];
@@ -931,7 +951,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     // receives a reasoning param, so a local model error merely mentioning
     // "max" must never trigger this retry. Abliteration receives 'max' as-is
     // with no retry (GC §4).
-    const requestedMaxEffort = reasoningEnabled && reasoningEffort === 'max' && provider.id !== 'codex' && provider.id !== 'llamacpp' && provider.id !== 'abliteration';
+    const requestedMaxEffort = reasoningEnabled && reasoningEffort === 'max' && provider.id !== 'codex' && provider.id !== 'llamacpp' && provider.id !== 'abliteration' && provider.id !== 'arnict';
     let maxEffortFallbackDone = false;
     const effortMaxRejected = (msg: string): boolean =>
       /unsupported value: ?'?max|'max' is not supported|max is not supported/i.test(msg);
@@ -1352,6 +1372,13 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
           cachedTokens = abliterationCachedTokens(au);
           if (u.cost === undefined) cost = computeAbliterationCost(au, upstreamModel);
         }
+        if (provider.id === 'arnict') {
+          // Static cost: upstream usage carries no `cost` (GC §6). Never
+          // overwrite an upstream cost if one ever appears.
+          const au = u as unknown as Parameters<typeof arnictCachedTokens>[0];
+          cachedTokens = arnictCachedTokens(au);
+          if (u.cost === undefined) cost = computeArnictCost(au, upstreamModel);
+        }
       }
       const dataWithModel = data as { model?: string };
       if (dataWithModel.model && typeof dataWithModel.model === 'string' && dataWithModel.model.trim()) {
@@ -1607,6 +1634,10 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
                 if (provider.id === 'abliteration') {
                   cachedTokens = abliterationCachedTokens(usage);
                   if (usage.cost === undefined) cost = computeAbliterationCost(usage, upstreamModel);
+                }
+                if (provider.id === 'arnict') {
+                  cachedTokens = arnictCachedTokens(usage);
+                  if (usage.cost === undefined) cost = computeArnictCost(usage, upstreamModel);
                 }
               }
 

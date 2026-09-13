@@ -23,9 +23,11 @@ import {
   assistantReasoningField,
   buildAbliterationReasoning,
   computeAbliterationCost,
+  computeArnictCost,
   computeDeepSeekCost,
   isAbliterationLargeModel,
   ABLITERATION_LARGE_TEXT_ONLY_MESSAGE,
+  ARNICT_TOOLS_UNSUPPORTED_MESSAGE,
   resolveProviderId,
   type ProviderConfig,
   type ProviderId,
@@ -453,6 +455,12 @@ export class CouncilExecutor {
     const resolvedTools = options.tools || [];
     const openRouterTools = toOpenRouterTools(resolvedTools);
 
+    // Arnict (Direct) accepts no `tools` (GC §5): throw BEFORE any network
+    // call, mirroring the chat 400 gate and the large-model guard above.
+    if (ep.provider.id === 'arnict' && openRouterTools.length > 0) {
+      throw new Error(ARNICT_TOOLS_UNSUPPORTED_MESSAGE);
+    }
+
     const requestBody: Record<string, unknown> = {
       model: ep.upstreamModel,
       messages,
@@ -467,6 +475,11 @@ export class CouncilExecutor {
       requestBody.stream_options = { include_usage: true };
       const reasoning = this.resolveCouncilReasoning(options.conversationId, options.userId);
       Object.assign(requestBody, buildAbliterationReasoning(reasoning.enabled, reasoning.effort));
+    }
+    if (ep.provider.id === 'arnict') {
+      // Usage frame for static cost accounting (GC §6). No reasoning arm,
+      // no transport arm: plain fetch like DeepSeek (GC §4/§8).
+      requestBody.stream_options = { include_usage: true };
     }
     // §10 (+ Increment 2d): council members share the chat sampling resolver —
     // the fixed temp 0.7 above is superseded for llamacpp arms by resolution
@@ -602,6 +615,7 @@ export class CouncilExecutor {
                 if (usage.cost !== undefined) cost = usage.cost;
                 else if (ep.provider.id === 'deepseek') cost = computeDeepSeekCost(usage, ep.upstreamModel);
                 else if (ep.provider.id === 'abliteration') cost = computeAbliterationCost(usage, ep.upstreamModel);
+                else if (ep.provider.id === 'arnict') cost = computeArnictCost(usage, ep.upstreamModel);
                 if (usage.completion_tokens_details?.reasoning_tokens) {
                   reasoningTokens = usage.completion_tokens_details.reasoning_tokens;
                 }
@@ -822,6 +836,10 @@ export class CouncilExecutor {
       const reasoning = this.resolveCouncilReasoning(options.conversationId, options.userId);
       Object.assign(requestBody, buildAbliterationReasoning(reasoning.enabled, reasoning.effort));
     }
+    if (ep.provider.id === 'arnict') {
+      // Same relay contract as member bodies (GC §6/§7, no reasoning arm).
+      requestBody.stream_options = { include_usage: true };
+    }
 
     // Notify synthesis start
     console.log(`\n🧠 SYNTHESIS STARTED`);
@@ -906,6 +924,7 @@ export class CouncilExecutor {
                 if (usage.cost !== undefined) cost = usage.cost;
                 else if (ep.provider.id === 'deepseek') cost = computeDeepSeekCost(usage, ep.upstreamModel);
                 else if (ep.provider.id === 'abliteration') cost = computeAbliterationCost(usage, ep.upstreamModel);
+                else if (ep.provider.id === 'arnict') cost = computeArnictCost(usage, ep.upstreamModel);
               }
             } catch {
               // Skip malformed

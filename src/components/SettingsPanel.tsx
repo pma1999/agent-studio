@@ -2,9 +2,9 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { CheckCircle, AlertCircle, ExternalLink, Zap, Coins, BarChart3, Loader2, Globe, KeyRound, Database, MessageSquare, Brain, Check, ChevronDown, Sparkles, Lightbulb, SlidersHorizontal, Wrench, Plug, Layers, Link, Box, LogOut, Copy, RefreshCw } from 'lucide-react';
 import { useStore } from '../stores/store';
-import { settingsApi, toolsApi, mcpServersApi, skillsApi, deepseekApi, abliterationApi } from '../api/client';
+import { settingsApi, toolsApi, mcpServersApi, skillsApi, deepseekApi, abliterationApi, arnictApi } from '../api/client';
 import type { ProviderRoutingConfig, ReasoningEffort, Tool, McpServer, Skill } from '../types';
-import { DEEPSEEK_ACCENT, CODEX_ACCENT, LLAMACPP_ACCENT, ABLITERATION_ACCENT } from '../utils/providers';
+import { DEEPSEEK_ACCENT, CODEX_ACCENT, LLAMACPP_ACCENT, ABLITERATION_ACCENT, ARNICT_ACCENT } from '../utils/providers';
 import { chatgptApi, type ChatgptStatus } from '../api/client';
 import { CHATGPT_STATUS_CHANGED_EVENT } from '../hooks/useCodexModels';
 import { LlamaCppSection } from './LlamaCppSection';
@@ -355,6 +355,45 @@ function AbliterationSection() {
       helpText="Use Abliteration models directly with your own Abliteration API key (ak-...) — billed by Abliteration. Create one at"
       helpUrl="https://abliteration.ai/console"
       helpLabel="Abliteration Console"
+      onTest={handleTest}
+    />
+  );
+}
+
+/** Arnict direct-provider API key section. Reuses ProviderKeySection with live key validation. */
+function ArnictSection() {
+  const { arnictApiKey, setArnictApiKey } = useStore();
+  const [localKey, setLocalKey] = useState('');
+
+  const hasSavedKey = !!arnictApiKey;
+
+  const handleTest = async (): Promise<{ ok: boolean; message: string }> => {
+    try {
+      const result = await arnictApi.validate();
+      if (result.ok) {
+        return { ok: true, message: `Arnict key is valid. ${result.models ?? 0} models` };
+      }
+      return { ok: false, message: result.error || 'Invalid Arnict API key' };
+    } catch (err) {
+      if (err instanceof TypeError) return { ok: false, message: 'Could not reach Arnict' };
+      return { ok: false, message: err instanceof Error ? err.message : 'Could not reach Arnict' };
+    }
+  };
+
+  return (
+    <ProviderKeySection
+      providerName="Arnict"
+      providerIcon={<Sparkles size={15} />}
+      accentColor={ARNICT_ACCENT}
+      settingKey="arnict_api_key"
+      localKey={localKey}
+      setLocalKey={setLocalKey}
+      savedKey={arnictApiKey}
+      setSavedKey={setArnictApiKey}
+      placeholder={hasSavedKey ? `Saved: ${arnictApiKey} — enter a new key to replace` : 'arn_live-...'}
+      helpText="Use Arnict models directly with your own Arnict API key (arn_live-...) — billed by Arnict. Create one at"
+      helpUrl="https://arnict.com/"
+      helpLabel="Arnict"
       onTest={handleTest}
     />
   );
@@ -2042,6 +2081,12 @@ export function SettingsPanel() {
 
         {/* Abliteration (Direct) */}
         <AbliterationSection />
+
+        {/* Divider */}
+        <div style={{ height: '1px', background: 'var(--border)' }} />
+
+        {/* Arnict (Direct) */}
+        <ArnictSection />
 
         {/* Divider */}
         <div style={{ height: '1px', background: 'var(--border)' }} />

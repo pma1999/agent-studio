@@ -694,6 +694,7 @@ export const modelsApi = {
   deepseek: () => request<{ data: OpenRouterModel[] }>('/models/deepseek'),
   codex: () => request<{ data: OpenRouterModel[] }>('/models/codex'),
   abliteration: () => request<{ data: OpenRouterModel[] }>('/models/abliteration'),
+  arnict: () => request<{ data: OpenRouterModel[] }>('/models/arnict'),
   llamacpp: () => request<{ data: LlamaCppModel[] }>('/models/llamacpp'),
   /** NEVER-THROWS §5 status payload. */
   llamacppStatus: () => request<LlamaCppStatus>('/models/llamacpp/status'),
@@ -758,6 +759,18 @@ export interface AbliterationValidateResult {
 
 export const abliterationApi = {
   validate: () => request<AbliterationValidateResult>('/models/abliteration/validate'),
+};
+
+// Arnict (direct provider)
+export interface ArnictValidateResult {
+  ok: boolean;
+  models?: number;
+  ids?: string[];
+  error?: string;
+}
+
+export const arnictApi = {
+  validate: () => request<ArnictValidateResult>('/models/arnict/validate'),
 };
 
 // llama.cpp (local provider via the paired local agent) — response types

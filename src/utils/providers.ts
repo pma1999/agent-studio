@@ -12,6 +12,7 @@
 export const DEEPSEEK_PREFIX = 'deepseek:';
 export const CODEX_PREFIX = 'codex:';
 export const ABLITERATION_PREFIX = 'abliteration:';
+export const ARNICT_PREFIX = 'arnict:';
 export const LLAMACPP_PREFIX = 'llamacpp:';
 
 /** Synthetic author/group key used by the model selector for DeepSeek-direct models. */
@@ -22,6 +23,9 @@ export const CODEX_DIRECT_GROUP = 'codex-chatgpt';
 
 /** Synthetic author/group key used by the model selector for Abliteration-direct models. */
 export const ABLITERATION_GROUP = 'abliteration-direct';
+
+/** Synthetic author/group key used by the model selector for Arnict-direct models. */
+export const ARNICT_GROUP = 'arnict-direct';
 
 /** Synthetic author/group key used by the model selector for llama.cpp (local) models. */
 export const LLAMACPP_GROUP = 'llamacpp-local';
@@ -34,6 +38,9 @@ export const CODEX_ACCENT = '#10a37f';
 
 /** Brand accent for the Abliteration-direct provider. */
 export const ABLITERATION_ACCENT = '#e5489e';
+
+/** Brand accent for the Arnict-direct provider. */
+export const ARNICT_ACCENT = '#14b8a6';
 
 /** Brand accent for the llama.cpp (local) provider. */
 export const LLAMACPP_ACCENT = '#ca8a04';
@@ -56,6 +63,10 @@ export function isCodexModel(modelId: string | null | undefined): boolean {
 
 export function isAbliterationModel(modelId: string | null | undefined): boolean {
   return typeof modelId === 'string' && modelId.startsWith(ABLITERATION_PREFIX);
+}
+
+export function isArnictModel(modelId: string | null | undefined): boolean {
+  return typeof modelId === 'string' && modelId.startsWith(ARNICT_PREFIX);
 }
 
 export function isLlamaCppModel(modelId: string | null | undefined): boolean {
@@ -89,6 +100,11 @@ export function stripCodexPrefix(modelId: string): string {
 /** Strips the `abliteration:` scheme for display (e.g. `abliteration:abliterated-model-large-v2` → `abliterated-model-large-v2`). */
 export function stripAbliterationPrefix(modelId: string): string {
   return modelId.startsWith(ABLITERATION_PREFIX) ? modelId.slice(ABLITERATION_PREFIX.length) : modelId;
+}
+
+/** Strips the `arnict:` scheme for display (e.g. `arnict:zai/glm-5.3-flash-uncensored` → `zai/glm-5.3-flash-uncensored`). */
+export function stripArnictPrefix(modelId: string): string {
+  return modelId.startsWith(ARNICT_PREFIX) ? modelId.slice(ARNICT_PREFIX.length) : modelId;
 }
 
 /** Strips the `llamacpp:` scheme (e.g. `llamacpp:Qwen3.6-35B` → `Qwen3.6-35B`). */

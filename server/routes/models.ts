@@ -4,7 +4,7 @@ import { AuthRequest } from '../middleware/auth.js';
 import db from '../db.js';
 import { getSettingValue } from './settings.js';
 import { normalizeOpenRouterEndpoints } from '../providerRouting.js';
-import { ABLITERATION_BASE_URL, ABLITERATION_CATALOG, DEEPSEEK_BASE_URL, DEEPSEEK_CATALOG, LLAMACPP_PREFIX } from '../providers/index.js';
+import { ABLITERATION_BASE_URL, ABLITERATION_CATALOG, ARNICT_BASE_URL, ARNICT_CATALOG, DEEPSEEK_BASE_URL, DEEPSEEK_CATALOG, LLAMACPP_PREFIX } from '../providers/index.js';
 import {
   LLAMACPP_ACTIVE_PRESET_SCHEMA,
   LLAMACPP_CANONICAL_PRESETS,
@@ -195,6 +195,11 @@ router.get('/abliteration', (_req: AuthRequest, res: Response) => {
   res.json({ data: ABLITERATION_CATALOG });
 });
 
+// GET /api/models/arnict - Curated Arnict-direct catalog (static; no key needed)
+router.get('/arnict', (_req: AuthRequest, res: Response) => {
+  res.json({ data: ARNICT_CATALOG });
+});
+
 // GET /api/models/codex - Models available to the user's connected ChatGPT account
 const codexModelsCache = new Map<string, { data: unknown[]; timestamp: number }>();
 const CODEX_MODELS_CACHE_TTL = 60_000; // 1 minute
@@ -312,6 +317,86 @@ router.get('/abliteration/validate', async (req: AuthRequest, res: Response) => 
   } catch (err) {
     console.error('Error validating Abliteration key:', err);
     res.status(500).json({ ok: false, error: 'Failed to reach Abliteration' });
+  }
+});
+// GET /api/models/arnict/validate - Verify the saved Arnict key via keyed GET /v1/models probe
+router.get('/arnict/validate', async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.userId;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const apiKey = getSettingValue(userId, 'arnict_api_key');
+    if (!apiKey?.trim()) {
+      return res.status(400).json({ error: 'Arnict API key not configured' });
+    }
+
+    const response = await fetch(`${ARNICT_BASE_URL}/v1/models`, {
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+    });
+
+    if (!response.ok) {
+      const errJson = (await response.json().catch(() => ({}))) as {
+        error?: { code?: unknown; message?: unknown };
+      };
+      const code = typeof errJson.error?.code === 'string' ? errJson.error.code : '';
+      const message =
+        typeof errJson.error?.message === 'string' && errJson.error.message
+          ? errJson.error.message
+          : '';
+      if (response.status === 401 || code === 'invalid_api_key') {
+        return res.status(401).json({ ok: false, error: 'Invalid Arnict API key' });
+      }
+      if (code === 'insufficient_quota') {
+        return res.status(429).json({
+          ok: false,
+          error: 'Insufficient Arnict credits — top up at arnict.com',
+        });
+      }
+      if (code === 'rate_limit_exceeded' || response.status === 429) {
+        return res.status(429).json({
+          ok: false,
+          error: 'Arnict rate limit exceeded — retry later',
+        });
+      }
+      if (
+        response.status === 403
+        || code === 'key_expired'
+        || code === 'ip_not_allowed'
+        || code === 'model_not_allowed'
+        || code === 'account_suspended'
+        || code === 'account_blocked'
+      ) {
+        return res.status(403).json({
+          ok: false,
+          error: message || 'Arnict key expired or restricted',
+        });
+      }
+      return res
+        .status(response.status)
+        .json({ ok: false, error: message || `Arnict error (${response.status})` });
+    }
+
+    // Success payload UNVERIFIED (no key at recipe time): per-docs the probe
+    // returns an OpenAI-compatible list, so read ids from `data[].id`.
+    const json = (await response.json().catch(() => ({}))) as {
+      data?: unknown;
+    };
+    const ids = Array.isArray(json.data)
+      ? json.data
+          .map((entry) =>
+            entry !== null && typeof entry === 'object' && 'id' in entry
+              ? (entry as { id?: unknown }).id
+              : undefined,
+          )
+          .filter((id): id is string => typeof id === 'string')
+      : [];
+    res.json({ ok: true, models: ids.length, ids });
+  } catch (err) {
+    console.error('Error validating Arnict key:', err);
+    res.status(500).json({ ok: false, error: 'Failed to reach Arnict' });
   }
 });
 

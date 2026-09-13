@@ -9,6 +9,7 @@ export const SENSITIVE_SETTINGS_KEYS = new Set([
   'openrouter_api_key',
   'deepseek_api_key',
   'abliteration_api_key',
+  'arnict_api_key',
   'search_api_key',
   'jina_api_key',
   'e2b_api_key',
