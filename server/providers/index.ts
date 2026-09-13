@@ -103,9 +103,12 @@ const ABLITERATION_CONFIG: ProviderConfig = {
 
 /**
  * Arnict (Direct). OpenAI-compatible `POST /v1/chat/completions` relayed
- * server-side with `Authorization: Bearer <key>`. Wave-1 ships a plain POST:
- * no provider/plugins routing prefs, no reasoning object, no json_schema
- * (all flags false), following the ABLITERATION_CONFIG shape.
+ * server-side with `Authorization: Bearer <key>`. Full-parity send allowlist:
+ * model/messages/temperature/top_p/stop/max_tokens|XOR/stream/stream_options,
+ * tools/tool_choice/parallel_tool_calls (OpenAI shape), response_format
+ * json_schema (strict:true) via `supportsJsonSchema:true`, reasoning object
+ * `{enabled,effort,exclude}` via `buildArnictReasoning`; never
+ * provider/plugins or top-level reasoning fields.
  */
 const ARNICT_CONFIG: ProviderConfig = {
   id: 'arnict',
@@ -119,7 +122,7 @@ const ARNICT_CONFIG: ProviderConfig = {
   supportsProviderRouting: false,
   supportsPlugins: false,
   supportsReasoningParam: false,
-  supportsJsonSchema: false,
+  supportsJsonSchema: true,
 };
 
 /**
@@ -241,10 +244,6 @@ export function isAbliterationModel(modelId: string | null | undefined): boolean
 export function isArnictModel(modelId: string | null | undefined): boolean {
   return resolveProviderId(modelId) === 'arnict';
 }
-
-/** Exact shared guard message: tools are OpenRouter-only, never sent for arnict (GC §5). */
-export const ARNICT_TOOLS_UNSUPPORTED_MESSAGE =
-  'Tool calls are currently supported only with OpenRouter models, not Arnict (Direct).';
 
 /** Exact shared guard message for text-only Abliteration large models (GC §5). */
 export const ABLITERATION_LARGE_TEXT_ONLY_MESSAGE =
@@ -533,13 +532,13 @@ export function abliterationCachedTokens(usage: AbliterationUsage | null | undef
 }
 
 // ---------------------------------------------------------------------------
-// Arnict-direct catalog / cost (GC §§3,6, static wave-1)
+// Arnict-direct catalog / reasoning / cost (GC §§3,4,6, keyed full-parity)
 // Docs: https://arnict.com/models + /pricing + /docs/models (2026-09-13);
-// contract pinned by plans/arnict-provider/integration-arnict.md. Static
-// catalog (GET /v1/models is key-gated; DeepSeek/Abliteration precedent);
-// Bearer auth; static per-token pricing because usage frames carry no `cost`
-// field. Success-payload field reads (`data[].id`) are per-docs
-// UNVERIFIED until the first keyed probe.
+// contract pinned by plans/arnict-full-parity/integration-arnict-keyed.md
+// (veredicto ENVÍO, VERIFIED-keyed 2026-09-13). Static catalog (GET
+// /v1/models is key-gated; DeepSeek/Abliteration precedent); Bearer auth;
+// reasoning via object `reasoning:{enabled,effort,exclude}`; static per-token
+// pricing because usage frames carry no `cost` field.
 // ---------------------------------------------------------------------------
 
 export interface ArnictCatalogModel {
@@ -568,6 +567,33 @@ export const ARNICT_CATALOG: ArnictCatalogModel[] = [
     pricing: { prompt: '0', completion: '0' }, // free during launch week
   },
 ];
+
+/** Allowed `reasoning.effort` values for arnict (GC §3, VERIFIED-keyed; `none` = off). */
+const ARNICT_ALLOWED_EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+
+/**
+ * Builds the Arnict reasoning object from the app's reasoning toggle
+ * (GC §3). Toggle off or effort `'none'` → `{enabled:false}`; allowed
+ * effort → `{enabled:true, effort}` (+ `exclude:true` solo si
+ * `exclude === true`); cualquier otro valor o null con toggle on →
+ * `{enabled:true}` bare (fail-safe, nunca 400). Nunca emite
+ * `reasoning_effort`, `thinking`, `effort` top-level, `max_tokens` dentro
+ * de `reasoning`, ni boolean.
+ */
+export function buildArnictReasoning(
+  reasoningEnabled: boolean,
+  effort: string | null | undefined,
+  exclude?: boolean,
+): Record<string, unknown> {
+  if (!reasoningEnabled) return { enabled: false };
+  if (effort === 'none') return { enabled: false };
+  if (typeof effort === 'string' && ARNICT_ALLOWED_EFFORTS.has(effort)) {
+    const out: Record<string, unknown> = { enabled: true, effort };
+    if (exclude === true) out.exclude = true;
+    return out;
+  }
+  return { enabled: true };
+}
 
 /** Per-1M-token pricing used to compute cost (Arnict usage carries no `cost` field). */
 interface ArnictPrice {

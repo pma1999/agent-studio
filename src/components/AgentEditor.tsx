@@ -7,6 +7,7 @@ import { ModelSelectorCore } from './ModelSelectorCore';
 import { useOpenRouterModels } from '../hooks/useOpenRouterModels';
 import { clampReasoningEffort, filterSupportedEfforts, lookupSupportedEfforts } from '../../shared/reasoningEfforts';
 import { formatModelId } from '../utils/modelUtils';
+import { isArnictModel } from '../utils/providers';
 import { ProviderRoutingSelector } from './ProviderRoutingSelector';
 import { Input } from './ui/Input';
 import { TextArea } from './ui/TextArea';
@@ -176,6 +177,9 @@ export function AgentEditor() {
   // Per-model effort filter (T3, UI-only): cached catalog, no new requests, no payload change.
   // The server accepts any union value by design; the hint below never blocks saving.
   const agentModelShort = formatModelId(form.model);
+  // T5: Arnict (Direct) models ignore response healing and reasoning_max_tokens
+  // server-side by design (§5). Inline hints only; values are preserved (warn, never disable).
+  const isArnictAgentModel = isArnictModel(form.model);
   const { models: openRouterModels, loading: openRouterModelsLoading, error: openRouterModelsError } = useOpenRouterModels();
   const supportedAgentEfforts = useMemo(() => {
     if (openRouterModelsLoading || openRouterModelsError) return null;
@@ -812,6 +816,22 @@ export function AgentEditor() {
                       }}>
                         Override the effort level with an exact token budget (1,024 - 128,000). Leave empty to use the effort level.
                       </span>
+                      {isArnictAgentModel && form.reasoning_max_tokens != null && (
+                        <div
+                          aria-live="polite"
+                          style={{
+                            padding: '6px 8px',
+                            background: 'var(--bg-base)',
+                            border: '1px solid var(--border)',
+                            borderRadius: 'var(--radius-sm)',
+                            fontSize: '0.6875rem',
+                            color: 'var(--text-muted)',
+                            lineHeight: 1.4,
+                          }}
+                        >
+                          Ignored for Arnict (Direct) models.
+                        </div>
+                      )}
                     </div>
                   </div>
                 )}
@@ -959,6 +979,22 @@ export function AgentEditor() {
                         </a>
                       </span>
                     </label>
+                    {isArnictAgentModel && form.response_healing_enabled && (
+                      <div
+                        aria-live="polite"
+                        style={{
+                          padding: '6px 8px',
+                          background: 'var(--bg-base)',
+                          border: '1px solid var(--border)',
+                          borderRadius: 'var(--radius-sm)',
+                          fontSize: '0.6875rem',
+                          color: 'var(--text-muted)',
+                          lineHeight: 1.4,
+                        }}
+                      >
+                        Response healing applies to OpenRouter models only.
+                      </div>
+                    )}
                     <p style={{
                       fontSize: '0.6875rem',
                       color: 'var(--text-muted)',

@@ -1,14 +1,14 @@
 /**
  * Offline acceptance harness for the arnict.com provider (6th provider).
  *
- * Pure registry/cost/guard dynamic smoke: imports ONLY the pure
+ * Pure registry/cost/builder dynamic smoke: imports ONLY the pure
  * `server/providers/index.ts` module (zero db/network imports) and asserts the
- * GC-frozen literals (§§1-6):
+ * GC-frozen literals (§§1-6, keyed full-parity):
  *
- *   routing/strip/persist, flags, catalog ids/contexts/prices, cost spots
- *   (§6), reasoning default (no arm, §4), guard message exact (§5),
- *   `isArnictLargeModel`/`buildArnictReasoning`/`ultracode`/`total_credits`
- *   absent (§4/§5/§11).
+ *   routing/strip/persist, flags (`supportsJsonSchema:true`), catalog
+ *   ids/contexts/prices, cost spots (§6), `buildArnictReasoning` matrix (§3),
+ *   guard-message absence (§4: tools are sent, the wave-1 gate is gone),
+ *   `isArnictLargeModel`/`ultracode`/`total_credits` absent (§4/§5/§11).
  *
  * Usage:
  *   npx tsx scripts/test-arnict-provider.ts
@@ -19,9 +19,9 @@ import assert from 'node:assert/strict';
 import {
   ARNICT_CATALOG,
   ARNICT_PREFIX,
-  ARNICT_TOOLS_UNSUPPORTED_MESSAGE,
   arnictCachedTokens,
   assistantReasoningField,
+  buildArnictReasoning,
   computeArnictCost,
   getProviderConfig,
   isArnictModel,
@@ -92,12 +92,12 @@ ok('ARNICT_PREFIX is the frozen namespaced prefix', () => {
 // Provider flags + endpoint + headers (GC §1 + §2)
 // ---------------------------------------------------------------------------
 
-ok('arnict capability flags are F,F,F,F', () => {
+ok('arnict capability flags are F,F,F,T (json_schema on, keyed full-parity)', () => {
   const cfg = getProviderConfig('arnict');
   assert.equal(cfg.supportsProviderRouting, false);
   assert.equal(cfg.supportsPlugins, false);
   assert.equal(cfg.supportsReasoningParam, false);
-  assert.equal(cfg.supportsJsonSchema, false);
+  assert.equal(cfg.supportsJsonSchema, true);
 });
 
 ok('arnict endpoint + label + key setting are frozen', () => {
@@ -215,29 +215,102 @@ ok('cost is 0 for unknown models and missing usage', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Reasoning default + guard message (GC §4 + §5)
+// Reasoning builder matrix + tools-gate absence (GC §3 + §4 keyed full-parity)
 // ---------------------------------------------------------------------------
 
-ok("assistantReasoningField(arnict) is the default reasoning field (no arm)", () => {
+ok("assistantReasoningField(arnict) is the default reasoning field (serves GLM)", () => {
   assert.equal(assistantReasoningField('arnict'), 'reasoning');
 });
 
-ok('tools-unsupported guard message is the exact frozen string', () => {
-  assert.equal(
-    ARNICT_TOOLS_UNSUPPORTED_MESSAGE,
-    'Tool calls are currently supported only with OpenRouter models, not Arnict (Direct).',
-  );
-});
-
-// ---------------------------------------------------------------------------
-// Forbidden (§4/§5/§11: no image guard, no reasoning arm, no ultracode)
-// ---------------------------------------------------------------------------
-
-ok('no Arnict large-model guard or reasoning builder is exported', () => {
+ok('tools-unsupported guard message is gone (tools are sent, gate retired)', () => {
   const ns = providersNs as unknown as Record<string, unknown>;
-  assert.equal(ns['isArnictLargeModel'], undefined);
-  assert.equal(ns['buildArnictReasoning'], undefined);
+  assert.equal(ns['ARNICT_TOOLS_UNSUPPORTED_MESSAGE'], undefined);
 });
+
+ok('buildArnictReasoning is exported; no Arnict large-model guard exists', () => {
+  const ns = providersNs as unknown as Record<string, unknown>;
+  assert.equal(typeof ns['buildArnictReasoning'], 'function');
+  assert.equal(ns['isArnictLargeModel'], undefined);
+});
+
+ok('builder: toggle off always yields {enabled:false} (never exclude/boolean)', () => {
+  assert.deepEqual(buildArnictReasoning(false, 'high'), { enabled: false });
+  assert.deepEqual(buildArnictReasoning(false, null), { enabled: false });
+  assert.deepEqual(buildArnictReasoning(false, undefined), { enabled: false });
+  assert.deepEqual(buildArnictReasoning(false, 'high', true), { enabled: false });
+});
+
+ok("builder: 'none' yields {enabled:false} even with the toggle on", () => {
+  assert.deepEqual(buildArnictReasoning(true, 'none'), { enabled: false });
+  assert.deepEqual(buildArnictReasoning(true, 'none', true), { enabled: false });
+});
+
+for (const effort of ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const) {
+  ok(`builder: effort '${effort}' yields {enabled:true, effort}`, () => {
+    assert.deepEqual(buildArnictReasoning(true, effort), { enabled: true, effort });
+  });
+}
+
+ok('builder: exclude:true rides only on a valid effort', () => {
+  assert.deepEqual(buildArnictReasoning(true, 'high', true), {
+    enabled: true,
+    effort: 'high',
+    exclude: true,
+  });
+  // exclude falsy/omitted never attaches the key.
+  assert.deepEqual(buildArnictReasoning(true, 'high'), { enabled: true, effort: 'high' });
+  assert.deepEqual(buildArnictReasoning(true, 'high', false), { enabled: true, effort: 'high' });
+});
+
+ok('builder: unknown/null effort with toggle on is fail-safe bare {enabled:true}', () => {
+  assert.deepEqual(buildArnictReasoning(true, 'bogus'), { enabled: true });
+  assert.deepEqual(buildArnictReasoning(true, null), { enabled: true });
+  assert.deepEqual(buildArnictReasoning(true, undefined), { enabled: true });
+  assert.deepEqual(buildArnictReasoning(true, ''), { enabled: true });
+  // Fail-safe never smuggles exclude either.
+  assert.deepEqual(buildArnictReasoning(true, 'bogus', true), { enabled: true });
+});
+
+ok('builder: fail-safe — no case emits a forbidden key or a boolean', () => {
+  const cases: Array<Record<string, unknown>> = [
+    buildArnictReasoning(false, 'high'),
+    buildArnictReasoning(true, 'none'),
+    ...(['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const).map((effort) =>
+      buildArnictReasoning(true, effort),
+    ),
+    buildArnictReasoning(true, 'high', true),
+    buildArnictReasoning(true, 'bogus'),
+    buildArnictReasoning(true, null),
+    buildArnictReasoning(true, undefined),
+  ];
+  for (const out of cases) {
+    assert.ok(typeof out === 'object' && out !== null && !Array.isArray(out));
+    for (const key of Object.keys(out)) {
+      assert.ok(
+        key === 'enabled' || key === 'effort' || key === 'exclude',
+        `forbidden reasoning key: ${key}`,
+      );
+    }
+    assert.equal('reasoning_effort' in out, false);
+    assert.equal('thinking' in out, false);
+    assert.equal('max_tokens' in out, false);
+    // The object form is the only honest wire shape: never a bare boolean,
+    // never a top-level `effort` outside the object.
+  }
+  // effort values that do travel are exactly the gateway-accepted set.
+  const withEffort = cases.filter((out) => 'effort' in out);
+  assert.ok(withEffort.length > 0);
+  for (const out of withEffort) {
+    assert.ok(
+      ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(out['effort'] as string),
+      `unexpected effort value: ${String(out['effort'])}`,
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Forbidden (§4/§5/§11: no large-model guard, no ultracode)
+// ---------------------------------------------------------------------------
 
 ok('ultracode and total_credits never appear in the catalog', () => {
   assert.doesNotMatch(JSON.stringify(ARNICT_CATALOG), /ultracode/);

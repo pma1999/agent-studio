@@ -31,6 +31,7 @@ import {
   abliterationCachedTokens,
   arnictCachedTokens,
   buildAbliterationReasoning,
+  buildArnictReasoning,
   buildDeepSeekThinking,
   computeAbliterationCost,
   computeArnictCost,
@@ -38,7 +39,6 @@ import {
   deepSeekCachedTokens,
   isAbliterationLargeModel,
   ABLITERATION_LARGE_TEXT_ONLY_MESSAGE,
-  ARNICT_TOOLS_UNSUPPORTED_MESSAGE,
   isCodexModel,
   isLlamacppModel,
   persistedModelId,
@@ -79,6 +79,7 @@ import type { ResolvedSkill } from '../skills/resolve.js';
 import {
   AUTO_CONVERSATION_TITLES_SETTING_KEY,
   createFallbackConversationTitle,
+  generateConversationTitleWithArnict,
   generateConversationTitleWithOpenRouter,
   isAutoConversationTitlesEnabled,
 } from '../conversationTitles.js';
@@ -561,6 +562,17 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
           userMessage: content,
           systemPrompt: agent.system_prompt,
         }).then(titleFallback);
+      } else if (titleEnabled) {
+        // Precedencia OpenRouter > arnict > fallback: sin key OpenRouter pero
+        // con key arnict, el primer turno titula vía Qwen gratis (reasoning off).
+        const arnictTitleApiKey = getSettingValue(userId, 'arnict_api_key');
+        if (arnictTitleApiKey.trim()) {
+          generatedTitlePromise = generateConversationTitleWithArnict({
+            apiKey: arnictTitleApiKey,
+            userMessage: content,
+            systemPrompt: agent.system_prompt,
+          }).then(titleFallback);
+        }
       }
     } else {
       db.prepare("UPDATE conversations SET updated_at = datetime('now') WHERE id = ? AND user_id = ?").run(conversation_id, userId);
@@ -684,14 +696,6 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     const resolvedTools = excludeReservedSkillToolNames(resolved.resolvedTools, skillTools);
     mcpClients = resolved.mcpClients;
     const openRouterTools = toOpenRouterTools(resolvedTools);
-
-    // Arnict (Direct) accepts no `tools`/`tool_choice` (GC §5): reject a turn
-    // that would attach tools BEFORE any network call or SSE flush — same
-    // discipline as the PDF gate above and the large-model guard.
-    if (provider.id === 'arnict' && openRouterTools.length > 0) {
-      res.status(400).json({ error: ARNICT_TOOLS_UNSUPPORTED_MESSAGE });
-      return;
-    }
 
     // Augment system prompt with MCP tool naming instruction when applicable
     if (messages[0]?.role === 'system' && typeof messages[0].content === 'string') {
@@ -837,67 +841,10 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       }
     }
 
-    if (provider.supportsReasoningParam) {
-      if (reasoningEnabled) {
-        const reasoningParam: Record<string, unknown> = {};
-        // 'max' is supported by some OpenRouter models only; it is sent
-        // as-is and degraded to 'xhigh' with a single retry when the model
-        // rejects it (see effortMaxRejected handling below).
-        if (reasoningEffort && reasoningEffort !== 'none') {
-          reasoningParam.effort = reasoningEffort;
-        } else if (reasoningEffort === 'none') {
-          reasoningParam.effort = 'none';
-        }
-        if (reasoningMaxTokens && reasoningMaxTokens > 0) {
-          reasoningParam.max_tokens = reasoningMaxTokens;
-        }
-        if (Object.keys(reasoningParam).length === 0) {
-          reasoningParam.enabled = true;
-        }
-        requestBody.reasoning = reasoningParam;
-        console.log(`[chat] Reasoning enabled:`, JSON.stringify(reasoningParam));
-      }
-    } else if (provider.id === 'deepseek') {
-      // DeepSeek toggles thinking mode via top-level `thinking` (+ optional reasoning_effort),
-      // driven by the app's Reasoning switch. Default off → non-thinking (fast/cheap).
-      Object.assign(requestBody, buildDeepSeekThinking(reasoningEnabled, reasoningEffort));
-    } else if (provider.id === 'abliteration') {
-      // Custom arm (GC §4): top-level `reasoning_effort` verbatim when the
-      // toggle is on with a known effort, otherwise nothing (fail-safe omit).
-      Object.assign(requestBody, buildAbliterationReasoning(reasoningEnabled, reasoningEffort));
-    }
-
-    if (isLlamacppModel(effectiveModel)) {
-      // llama.cpp request-body extras (§6): a usage frame on stream close, and
-      // an explicit thinking toggle for the jinja chat template of Qwen3-class
-      // models. The per-chat toggle is the master switch: ON ⇒
-      // enable_thinking:true so the model thinks regardless of template
-      // default; OFF ⇒ enable_thinking:false = fully off (verified live on
-      // b10516: this per-request flag is the only effective suppressor —
-      // --reasoning-budget 0 is NOT).
-      requestBody.stream_options = { include_usage: true };
-      requestBody.chat_template_kwargs = { enable_thinking: reasoningEnabled };
-    }
-
-    if (provider.id === 'abliteration') {
-      // Usage frame required for static cost accounting (GC §6/§7). The body
-      // otherwise stays allowlisted: provider/plugins/reasoning-object never
-      // attach (supportsProviderRouting/supportsPlugins/supportsReasoningParam
-      // are all false), tools attach normally above.
-      requestBody.stream_options = { include_usage: true };
-    }
-
-    if (provider.id === 'arnict') {
-      // Usage frame required for static cost accounting (GC §6). The body
-      // otherwise stays allowlisted (GC §7: model/messages/temperature/
-      // max_tokens/stream/stream_options only) — provider/plugins/reasoning/
-      // tools/response_format never attach (flags §2 all false + tools gate
-      // above), so no arm beyond this line is needed.
-      requestBody.stream_options = { include_usage: true };
-    }
-
-    // Structured outputs (OpenRouter JSON Schema)
+    // Structured outputs (OpenRouter JSON Schema, arnict json_schema strict:true)
     // Accept both: short form { name, strict, schema } or full API form { type: "json_schema", json_schema: { name, strict, schema } }
+    // El flag `supportsJsonSchema:true` de arnict abre este bloque; la rama
+    // schema⇒reasoning-off vive en el arm arnict de abajo (Gotcha 4 keyed).
     const structuredEnabled = !!agent.structured_output_enabled;
     const schemaRaw = agent.structured_output_schema;
     let responseFormat: { type: 'json_schema'; json_schema: { name: string; strict: boolean; schema: Record<string, unknown> } } | undefined;
@@ -930,6 +877,78 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       } catch (e) {
         console.warn('[chat] Structured output schema JSON parse error:', e);
       }
+    }
+
+    if (provider.supportsReasoningParam) {
+      if (reasoningEnabled) {
+        const reasoningParam: Record<string, unknown> = {};
+        // 'max' is supported by some OpenRouter models only; it is sent
+        // as-is and degraded to 'xhigh' with a single retry when the model
+        // rejects it (see effortMaxRejected handling below).
+        if (reasoningEffort && reasoningEffort !== 'none') {
+          reasoningParam.effort = reasoningEffort;
+        } else if (reasoningEffort === 'none') {
+          reasoningParam.effort = 'none';
+        }
+        if (reasoningMaxTokens && reasoningMaxTokens > 0) {
+          reasoningParam.max_tokens = reasoningMaxTokens;
+        }
+        if (Object.keys(reasoningParam).length === 0) {
+          reasoningParam.enabled = true;
+        }
+        requestBody.reasoning = reasoningParam;
+        console.log(`[chat] Reasoning enabled:`, JSON.stringify(reasoningParam));
+      }
+    } else if (provider.id === 'deepseek') {
+      // DeepSeek toggles thinking mode via top-level `thinking` (+ optional reasoning_effort),
+      // driven by the app's Reasoning switch. Default off → non-thinking (fast/cheap).
+      Object.assign(requestBody, buildDeepSeekThinking(reasoningEnabled, reasoningEffort));
+    } else if (provider.id === 'abliteration') {
+      // Custom arm (GC §4): top-level `reasoning_effort` verbatim when the
+      // toggle is on with a known effort, otherwise nothing (fail-safe omit).
+      Object.assign(requestBody, buildAbliterationReasoning(reasoningEnabled, reasoningEffort));
+    } else if (provider.id === 'arnict') {
+      // Reasoning objeto `{enabled,effort,exclude}` vía builder T1 (GC §3):
+      // `reasoning_max_tokens` nunca viaja y nunca hay campos top-level.
+      // Con `response_format` activo el trace canibaliza `max_tokens`
+      // (Gotcha 4 keyed: `content:""` + `length`), así que el schema fuerza
+      // `reasoning:{enabled:false}`.
+      if (responseFormat) {
+        requestBody.reasoning = { enabled: false };
+        console.log('[chat] Structured output active: reasoning disabled for arnict (schema+reasoning budget conflict)');
+      } else {
+        requestBody.reasoning = buildArnictReasoning(reasoningEnabled, reasoningEffort);
+      }
+    }
+
+    if (isLlamacppModel(effectiveModel)) {
+      // llama.cpp request-body extras (§6): a usage frame on stream close, and
+      // an explicit thinking toggle for the jinja chat template of Qwen3-class
+      // models. The per-chat toggle is the master switch: ON ⇒
+      // enable_thinking:true so the model thinks regardless of template
+      // default; OFF ⇒ enable_thinking:false = fully off (verified live on
+      // b10516: this per-request flag is the only effective suppressor —
+      // --reasoning-budget 0 is NOT).
+      requestBody.stream_options = { include_usage: true };
+      requestBody.chat_template_kwargs = { enable_thinking: reasoningEnabled };
+    }
+
+    if (provider.id === 'abliteration') {
+      // Usage frame required for static cost accounting (GC §6/§7). The body
+      // otherwise stays allowlisted: provider/plugins/reasoning-object never
+      // attach (supportsProviderRouting/supportsPlugins/supportsReasoningParam
+      // are all false), tools attach normally above.
+      requestBody.stream_options = { include_usage: true };
+    }
+
+    if (provider.id === 'arnict') {
+      // Usage frame required for static cost accounting (GC §6). Allowlist
+      // exacta (GC §6 keyed): model/messages/temperature/max_tokens(XOR)/
+      // stream/stream_options/tools/tool_choice/parallel_tool_calls/
+      // response_format/reasoning(objeto) — provider/plugins nunca adjuntan
+      // (supportsProviderRouting/supportsPlugins son false) y `reasoning`
+      // viaja solo como objeto del arm de arriba (nunca top-level).
+      requestBody.stream_options = { include_usage: true };
     }
 
     // Response healing is an OpenRouter plugin: codex has no chat-completions

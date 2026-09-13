@@ -379,8 +379,9 @@ router.get('/arnict/validate', async (req: AuthRequest, res: Response) => {
         .json({ ok: false, error: message || `Arnict error (${response.status})` });
     }
 
-    // Success payload UNVERIFIED (no key at recipe time): per-docs the probe
-    // returns an OpenAI-compatible list, so read ids from `data[].id`.
+    // Success payload VERIFIED-keyed (2026-09-13): live GET /v1/models returns
+    // an OpenAI-compatible list with no `owned_by`, so read ids from
+    // `data[].id` only. Live may list 4 ids; the app catalog stays at 2 by plan.
     const json = (await response.json().catch(() => ({}))) as {
       data?: unknown;
     };

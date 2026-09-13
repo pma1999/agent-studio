@@ -22,12 +22,12 @@ import {
   toUpstreamModelId,
   assistantReasoningField,
   buildAbliterationReasoning,
+  buildArnictReasoning,
   computeAbliterationCost,
   computeArnictCost,
   computeDeepSeekCost,
   isAbliterationLargeModel,
   ABLITERATION_LARGE_TEXT_ONLY_MESSAGE,
-  ARNICT_TOOLS_UNSUPPORTED_MESSAGE,
   resolveProviderId,
   type ProviderConfig,
   type ProviderId,
@@ -451,15 +451,10 @@ export class CouncilExecutor {
       throw new Error(ABLITERATION_LARGE_TEXT_ONLY_MESSAGE);
     }
 
-    // Resolve tools
+    // Resolve tools (arnict accepts `tools` like any OpenRouter-shaped
+    // provider: keyed parity, no gate — the generic attach below applies).
     const resolvedTools = options.tools || [];
     const openRouterTools = toOpenRouterTools(resolvedTools);
-
-    // Arnict (Direct) accepts no `tools` (GC §5): throw BEFORE any network
-    // call, mirroring the chat 400 gate and the large-model guard above.
-    if (ep.provider.id === 'arnict' && openRouterTools.length > 0) {
-      throw new Error(ARNICT_TOOLS_UNSUPPORTED_MESSAGE);
-    }
 
     const requestBody: Record<string, unknown> = {
       model: ep.upstreamModel,
@@ -477,9 +472,12 @@ export class CouncilExecutor {
       Object.assign(requestBody, buildAbliterationReasoning(reasoning.enabled, reasoning.effort));
     }
     if (ep.provider.id === 'arnict') {
-      // Usage frame for static cost accounting (GC §6). No reasoning arm,
-      // no transport arm: plain fetch like DeepSeek (GC §4/§8).
+      // Usage frame for static cost accounting (GC §6) + the object
+      // reasoning arm (GC §3/§4): `reasoning:{enabled,effort}` verbatim via
+      // the frozen builder, same resolve pattern as the arm above.
       requestBody.stream_options = { include_usage: true };
+      const reasoning = this.resolveCouncilReasoning(options.conversationId, options.userId);
+      requestBody.reasoning = buildArnictReasoning(reasoning.enabled, reasoning.effort);
     }
     // §10 (+ Increment 2d): council members share the chat sampling resolver —
     // the fixed temp 0.7 above is superseded for llamacpp arms by resolution
@@ -837,8 +835,11 @@ export class CouncilExecutor {
       Object.assign(requestBody, buildAbliterationReasoning(reasoning.enabled, reasoning.effort));
     }
     if (ep.provider.id === 'arnict') {
-      // Same relay contract as member bodies (GC §6/§7, no reasoning arm).
+      // Same relay contract as member bodies (GC §3/§6/§7): usage frame +
+      // object reasoning arm via the frozen builder.
       requestBody.stream_options = { include_usage: true };
+      const reasoning = this.resolveCouncilReasoning(options.conversationId, options.userId);
+      requestBody.reasoning = buildArnictReasoning(reasoning.enabled, reasoning.effort);
     }
 
     // Notify synthesis start
@@ -1054,6 +1055,9 @@ export class CouncilExecutor {
           type: 'json_schema',
           json_schema: COUNCIL_COMPARISON_JSON_SCHEMA,
         },
+        // Schemas force reasoning off on arnict (keyed Gotcha 4: an active
+        // trace canibalizes max_tokens into `length` with empty content).
+        ...(ep.provider.id === 'arnict' ? { reasoning: { enabled: false } } : {}),
       }),
       signal,
     });

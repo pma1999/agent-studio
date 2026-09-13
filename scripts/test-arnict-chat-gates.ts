@@ -1,5 +1,6 @@
 /**
- * Guardrail for the arnict.com provider (6th provider, GC §§1-11).
+ * Guardrail for the arnict.com provider (6th provider, GC §§1-11, keyed
+ * full-parity).
  *
  * Source-regex assertions in the `test-abliteration-chat-gates.ts` idiom
  * (STABILITY + SEAM, `ok N - name` logging). Two phases live in this one
@@ -10,11 +11,16 @@
  *   across the arnict edits (GC §8: existing branches byte-stable).
  *
  *   SEAM — each GC-frozen arnict touchpoint exists exactly once where the
- *   T1-T4 reports say it landed: registry config/prefix, static catalog
- *   routes + validate code-match, chat guard/stream_options/healing-max
- *   exclusions/cost arms, council guard/bodies/cost arms, frontend
+ *   T1-T5 reports say it landed: registry config/prefix, static catalog
+ *   routes + validate code-match, chat tools-send/stream_options/reasoning
+ *   arms/healing-max exclusions/cost arms/titles fallback, council
+ *   tools-send/bodies/cost arms/comparison reasoning-off, frontend
  *   prefix/group/picker/routing-exclusion/settings-card/store arms, and the
  *   crypto allowlist.
+ *
+ *   UNVERIFIED — forms the keyed recipe never proved (`strict:false`,
+ *   `tool_choice` object, arnict-specific tools overrides, `video`, `http`
+ *   image URLs) are pinned as never-sent tripwires.
  *
  * Transport/relay pins are N/A: arnict is a hosted Bearer API relayed
  * server-side like DeepSeek/Abliteration (no loopback transport module).
@@ -122,12 +128,12 @@ function seamChecks(): void {
     assert.match(indexSource, /export const ARNICT_PREFIX = 'arnict:';/);
     assert.match(indexSource, /export const ARNICT_BASE_URL = 'https:\/\/api\.arnict\.com';/);
   });
-  ok('(P3) ARNICT_CONFIG pinned shape (label/endpoint/key/Bearer/flags)', () => {
+  ok('(P3) ARNICT_CONFIG pinned shape (label/endpoint/key/Bearer/flags F,F,F,T)', () => {
     assert.match(indexSource, /label: 'Arnict \(Direct\)',/);
     assert.match(indexSource, /chatCompletionsUrl: `\$\{ARNICT_BASE_URL\}\/v1\/chat\/completions`,/);
     assert.match(indexSource, /apiKeySetting: 'arnict_api_key',/);
     assert.match(indexSource, /'Authorization': `Bearer \$\{apiKey\}`,/);
-    assert.match(indexSource, /supportsProviderRouting: false,\s*\n\s*supportsPlugins: false,\s*\n\s*supportsReasoningParam: false,\s*\n\s*supportsJsonSchema: false,/);
+    assert.match(indexSource, /supportsProviderRouting: false,\s*\n\s*supportsPlugins: false,\s*\n\s*supportsReasoningParam: false,\s*\n\s*supportsJsonSchema: true,/);
   });
   ok('(P4) resolveProviderId + toUpstreamModelId arnict arms', () => {
     assert.match(indexSource, /modelId\.startsWith\(ARNICT_PREFIX\)\) return 'arnict';/);
@@ -136,12 +142,9 @@ function seamChecks(): void {
   ok('(P5) isArnictModel classifier exported', () => {
     assert.match(indexSource, /export function isArnictModel\(/);
   });
-  ok('(P6) tools-unsupported guard message is the exact frozen string', () => {
-    assert.match(indexSource, /export const ARNICT_TOOLS_UNSUPPORTED_MESSAGE =/);
-    assert.match(
-      indexSource,
-      /'Tool calls are currently supported only with OpenRouter models, not Arnict \(Direct\)\.'/,
-    );
+  ok('(P6) tools-unsupported guard eliminated; builder owns the reasoning contract', () => {
+    assert.doesNotMatch(indexSource, /ARNICT_TOOLS_UNSUPPORTED_MESSAGE/);
+    assert.match(indexSource, /export function buildArnictReasoning\(/);
   });
   ok('(P7) persistedModelId keeps namespaced id for arnict', () => {
     assert.match(
@@ -171,12 +174,12 @@ function seamChecks(): void {
       /usage\.prompt_tokens_details\?\.cached_tokens \?\? 0/,
     );
   });
-  ok('(P11) no reasoning arm, no image guard, no ultracode in the arnict block', () => {
-    assert.doesNotMatch(indexSource, /buildArnictReasoning/);
+  ok('(P11) reasoning builder present, no large-model guard, no ultracode in the arnict block', () => {
+    assert.match(indexSource, /export function buildArnictReasoning\(/);
     assert.doesNotMatch(indexSource, /isArnictLargeModel/);
     // `ultracode` legitimately appears once in the abliteration effort arm
     // (L479 fail-safe list); pin its absence in the arnict block only.
-    const arnictAt = indexSource.indexOf('// Arnict-direct catalog / cost');
+    const arnictAt = indexSource.indexOf('// Arnict-direct catalog');
     assert.ok(arnictAt >= 0, 'arnict catalog block missing');
     assert.doesNotMatch(indexSource.slice(arnictAt), /ultracode/);
   });
@@ -213,7 +216,10 @@ function seamChecks(): void {
     assert.doesNotMatch(block, /402/);
     assert.doesNotMatch(block, /total_credits/);
   });
-  ok('(R5) validate success returns {ok,models,ids} and catch returns 500', () => {
+  ok('(R5) validate success returns {ok,models,ids} (VERIFIED-keyed, no owned_by) and catch returns 500', () => {
+    assert.match(modelsSource, /Success payload VERIFIED-keyed/);
+    assert.match(modelsSource, /with no `owned_by`, so read ids from/);
+    assert.match(modelsSource, /Live may list 4 ids; the app catalog stays at 2/);
     assert.match(modelsSource, /res\.json\(\{ ok: true, models: ids\.length, ids \}\);/);
     assert.match(modelsSource, /res\.status\(500\)\.json\(\{ ok: false, error: 'Failed to reach Arnict' \}\);/);
   });
@@ -223,24 +229,24 @@ function seamChecks(): void {
   });
 
   // ---- chat.ts (GC §4/§5/§6/§7/§8) -----------------------------------------
-  ok('(C1) chat imports the arnict helpers (and no arnict reasoning/image arm)', () => {
+  ok('(C1) chat imports the arnict helpers incl. the builder (guard message gone)', () => {
     assert.match(chatSource, /arnictCachedTokens,/);
     assert.match(chatSource, /computeArnictCost,/);
-    assert.match(chatSource, /ARNICT_TOOLS_UNSUPPORTED_MESSAGE,/);
-    assert.doesNotMatch(chatSource, /buildArnictReasoning/);
+    assert.match(chatSource, /buildArnictReasoning,/);
+    assert.doesNotMatch(chatSource, /ARNICT_TOOLS_UNSUPPORTED_MESSAGE/);
     assert.doesNotMatch(chatSource, /isArnictLargeModel/);
   });
-  ok('(C2) chat arnict tools gate fires 400 BEFORE any network call or SSE flush', () => {
-    assert.match(
-      chatSource,
-      /if \(provider\.id === 'arnict' && openRouterTools\.length > 0\) \{/,
-    );
-    assert.match(chatSource, /res\.status\(400\)\.json\(\{ error: ARNICT_TOOLS_UNSUPPORTED_MESSAGE \}\);/);
-    const gateAt = chatSource.indexOf("provider.id === 'arnict' && openRouterTools.length > 0");
-    const flushAt = chatSource.indexOf('res.flushHeaders();');
-    const fetchAt = chatSource.indexOf('apiRes = await fetch(apiUrl,');
-    assert.ok(gateAt >= 0 && flushAt > gateAt, 'tools gate must come BEFORE the SSE flush');
-    assert.ok(fetchAt > flushAt, 'tools gate must come BEFORE the upstream fetch');
+  ok('(C2) chat sends tools for arnict via the generic attach (no 400 gate)', () => {
+    // Single generic attach (+ its per-segment re-attach): no arnict veto.
+    assert.match(chatSource, /if \(openRouterTools\.length > 0\) \{\s*\n\s*requestBody\.tools = openRouterTools;/);
+    assert.match(chatSource, /requestBody\.tool_choice = agent\.tool_choice === 'none' \? 'none' : 'auto';/);
+    assert.match(chatSource, /requestBody\.parallel_tool_calls = agent\.parallel_tool_calls === 0 \? false : true;/);
+    const attaches = chatSource.match(/requestBody\.tools = openRouterTools;/g) ?? [];
+    assert.equal(attaches.length, 2);
+    // The wave-1 gate is gone: no 400, no message, no arnict-gated tools arm.
+    assert.doesNotMatch(chatSource, /ARNICT_TOOLS_UNSUPPORTED_MESSAGE/);
+    assert.doesNotMatch(chatSource, /provider\.id === 'arnict' && openRouterTools\.length > 0/);
+    assert.doesNotMatch(chatSource, /res\.status\(400\)\.json\(\{ error: ARNICT_TOOLS_UNSUPPORTED_MESSAGE \}\);/);
   });
   ok('(C3) chat arnict turns set stream_options usage frame', () => {
     assert.match(
@@ -272,29 +278,55 @@ function seamChecks(): void {
     assert.match(chatSource, /!apiKey\?\.trim\(\) && !isCodexModel\(effectiveModel\) && !isLlamacppModel\(effectiveModel\)/);
     assert.doesNotMatch(chatSource, /isArnictModel/);
   });
+  ok('(C8) chat arnict reasoning arm via the builder (schema forces enabled:false)', () => {
+    assert.match(chatSource, /\} else if \(provider\.id === 'arnict'\) \{/);
+    assert.match(chatSource, /requestBody\.reasoning = buildArnictReasoning\(reasoningEnabled, reasoningEffort\);/);
+    assert.match(
+      chatSource,
+      /if \(responseFormat\) \{\s*\n\s*requestBody\.reasoning = \{ enabled: false \};/,
+    );
+    assert.match(chatSource, /reasoning disabled for arnict/);
+    // The arm never sends top-level fields or the agent budget knob: slice
+    // the arm and pin the absence on the `requestBody.*` write shape (the
+    // prose comment legitimately names `reasoning_max_tokens`).
+    const armAt = chatSource.indexOf("} else if (provider.id === 'arnict') {");
+    assert.ok(armAt >= 0, 'arnict reasoning arm missing');
+    const arm = chatSource.slice(armAt, armAt + 900);
+    assert.doesNotMatch(arm, /requestBody\.reasoning_effort/);
+    assert.doesNotMatch(arm, /requestBody\.thinking/);
+    assert.doesNotMatch(arm, /requestBody\.reasoningMaxTokens/);
+    assert.doesNotMatch(arm, /requestBody\.effort/);
+  });
+  ok('(C9) chat titles fall back to arnict when the OpenRouter key is absent', () => {
+    assert.match(chatSource, /generateConversationTitleWithArnict,/);
+    assert.match(chatSource, /\} else if \(titleEnabled\) \{/);
+    assert.match(chatSource, /getSettingValue\(userId, 'arnict_api_key'\)/);
+    assert.match(chatSource, /generatedTitlePromise = generateConversationTitleWithArnict\(\{/);
+  });
 
   // ---- councilExecutor.ts mirrors (GC §4/§5/§6/§7/§8) -----------------------
-  ok('(M1) council imports the arnict helpers (and no arnict reasoning/image arm)', () => {
+  ok('(M1) council imports the arnict helpers incl. the builder (guard message gone)', () => {
     assert.match(councilSource, /computeArnictCost,/);
-    assert.match(councilSource, /ARNICT_TOOLS_UNSUPPORTED_MESSAGE,/);
-    assert.doesNotMatch(councilSource, /buildArnictReasoning/);
+    assert.match(councilSource, /buildArnictReasoning,/);
+    assert.doesNotMatch(councilSource, /ARNICT_TOOLS_UNSUPPORTED_MESSAGE/);
     assert.doesNotMatch(councilSource, /isArnictLargeModel/);
   });
-  ok('(M2) council member path throws the tools guard BEFORE any network call', () => {
-    assert.match(
-      councilSource,
-      /if \(ep\.provider\.id === 'arnict' && openRouterTools\.length > 0\) \{/,
-    );
-    assert.match(councilSource, /throw new Error\(ARNICT_TOOLS_UNSUPPORTED_MESSAGE\);/);
-    const gateAt = councilSource.indexOf("ep.provider.id === 'arnict' && openRouterTools.length > 0");
-    const fetchAt = councilSource.indexOf('.fetchUpstream(');
-    assert.ok(gateAt >= 0 && fetchAt > gateAt, 'member tools guard must precede fetchUpstream');
+  ok('(M2) council member sends tools for arnict (throw gone, generic attach applies)', () => {
+    assert.doesNotMatch(councilSource, /ARNICT_TOOLS_UNSUPPORTED_MESSAGE/);
+    assert.doesNotMatch(councilSource, /ep\.provider\.id === 'arnict' && openRouterTools\.length > 0/);
+    assert.doesNotMatch(councilSource, /throw new Error\(ARNICT_TOOLS_UNSUPPORTED_MESSAGE\);/);
+    assert.match(councilSource, /requestBody\.tool_choice = 'auto';/);
+    assert.match(councilSource, /requestBody\.parallel_tool_calls = true;/);
   });
-  ok('(M3) council member + synthesis bodies set the usage frame, no reasoning arm', () => {
+  ok('(M3) council member + synthesis bodies set the usage frame + object reasoning arm', () => {
     assert.match(
       councilSource,
-      /if \(ep\.provider\.id === 'arnict'\) \{[\s\S]{0,300}?requestBody\.stream_options = \{ include_usage: true \};/,
+      /if \(ep\.provider\.id === 'arnict'\) \{[\s\S]{0,400}?requestBody\.stream_options = \{ include_usage: true \};/,
     );
+    const arms = councilSource.match(
+      /requestBody\.reasoning = buildArnictReasoning\(reasoning\.enabled, reasoning\.effort\);/g,
+    ) ?? [];
+    assert.equal(arms.length, 2);
     const frames = councilSource.match(/if \(ep\.provider\.id === 'arnict'\) \{/g) ?? [];
     assert.equal(frames.length, 2);
   });
@@ -304,8 +336,12 @@ function seamChecks(): void {
     ) ?? [];
     assert.equal(costs.length, 2);
   });
-  ok('(M5) council comparison auto-excludes arnict via the json_schema gate; chatCouncil untouched', () => {
+  ok('(M5) council comparison allows arnict via the json_schema gate + reasoning:{enabled:false}', () => {
     assert.match(councilSource, /if \(!getProviderForModel\(synthesizerModel\)\.supportsJsonSchema\) \{/);
+    assert.match(
+      councilSource,
+      /\.\.\.\(ep\.provider\.id === 'arnict' \? \{ reasoning: \{ enabled: false \} \} : \{\}\),/,
+    );
     assert.doesNotMatch(chatCouncilSource, /arnict/i);
   });
   ok('(M6) council resolveEndpoint stays generic: arnict gets no key exemption', () => {
@@ -399,6 +435,34 @@ function seamChecks(): void {
     assert.match(clientSource, /models\?: number;/);
     assert.match(clientSource, /ids\?: string\[\];/);
     assert.match(clientSource, /error\?: string;/);
+  });
+
+  // ---- UNVERIFIED (keyed recipe never proved: pinned as never-sent) --------
+  ok('(U1) no strict:false literal is ever sent (chat + council)', () => {
+    assert.doesNotMatch(chatSource, /strict:\s*false/);
+    assert.doesNotMatch(councilSource, /strict:\s*false/);
+  });
+  ok('(U2) no tool_choice object form is ever sent (chat + council)', () => {
+    assert.doesNotMatch(chatSource, /tool_choice:\s*\{/);
+    assert.doesNotMatch(chatSource, /tool_choice = \{/);
+    assert.doesNotMatch(councilSource, /tool_choice:\s*\{/);
+    assert.doesNotMatch(councilSource, /tool_choice = \{/);
+  });
+  ok('(U3) no arnict-gated tools override exists (single generic attach family)', () => {
+    assert.doesNotMatch(chatSource, /arnict[\s\S]{0,120}requestBody\.tools/);
+    assert.doesNotMatch(councilSource, /arnict[\s\S]{0,120}requestBody\.tools/);
+  });
+  ok('(U4) no video field is ever sent (chat + council)', () => {
+    assert.doesNotMatch(chatSource, /requestBody\.video/);
+    assert.doesNotMatch(chatSource, /['"]video['"]\s*:/);
+    assert.doesNotMatch(councilSource, /requestBody\.video/);
+    assert.doesNotMatch(councilSource, /['"]video['"]\s*:/);
+  });
+  ok('(U5) no http image URL fallback is ever built (chat + council)', () => {
+    assert.doesNotMatch(chatSource, /image_url[^;]*https?:\/\//);
+    assert.doesNotMatch(chatSource, /https?:\/\/[^'"]*image_url/);
+    assert.doesNotMatch(councilSource, /image_url[^;]*https?:\/\//);
+    assert.doesNotMatch(councilSource, /https?:\/\/[^'"]*image_url/);
   });
 
   // ---- forbidden (GC §11) ---------------------------------------------------
