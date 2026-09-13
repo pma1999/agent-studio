@@ -30,11 +30,12 @@ import type { OpenRouterModel as OpenRouterModelType } from '../types';
 import { useOpenRouterModels } from '../hooks/useOpenRouterModels';
 import { useDeepSeekModels } from '../hooks/useDeepSeekModels';
 import { useCodexModels } from '../hooks/useCodexModels';
+import { useAbliterationModels } from '../hooks/useAbliterationModels';
 import { useLlamaCppModels } from '../hooks/useLlamaCppModels';
 import { useFavoriteModels } from '../hooks/useFavoriteModels';
 import { useRecentModels } from '../hooks/useRecentModels';
 import { useIsMobile } from '../utils/breakpoints';
-import { DEEPSEEK_DIRECT_GROUP, CODEX_DIRECT_GROUP, LLAMACPP_GROUP, isLlamaCppModel, isRemovedLocalProviderId } from '../utils/providers';
+import { DEEPSEEK_DIRECT_GROUP, CODEX_DIRECT_GROUP, ABLITERATION_GROUP, LLAMACPP_GROUP, isLlamaCppModel, isRemovedLocalProviderId } from '../utils/providers';
 
 const ICON_MAP = { sparkles: Sparkles, zap: Zap, eye: Eye, brain: Brain };
 
@@ -82,7 +83,7 @@ export function ModelSelectorCore({
 }: ModelSelectorCoreProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [search, setSearch] = useState('');
-  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set([DEEPSEEK_DIRECT_GROUP, CODEX_DIRECT_GROUP, LLAMACPP_GROUP, 'openai', 'anthropic']));
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set([DEEPSEEK_DIRECT_GROUP, CODEX_DIRECT_GROUP, ABLITERATION_GROUP, LLAMACPP_GROUP, 'openai', 'anthropic']));
   const dropdownRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const isMobile = useIsMobile();
@@ -90,18 +91,19 @@ export function ModelSelectorCore({
   const { models: openRouterModels, loading } = useOpenRouterModels();
   const { models: deepSeekModels } = useDeepSeekModels();
   const { models: codexModels } = useCodexModels();
+  const { models: abliterationModels } = useAbliterationModels();
   const { models: llamaCppModels } = useLlamaCppModels();
   const { favorites, toggleFavorite } = useFavoriteModels();
   const { recent, addRecent } = useRecentModels();
 
-  // DeepSeek-direct, ChatGPT (Codex), and llama.cpp (local) models lead the
+  // DeepSeek-direct, ChatGPT (Codex), Abliteration-direct, and llama.cpp (local) models lead the
   // list so their groups sort to the top. Legacy removed-provider ids
   // (plan.md D8) never become pickable options — an open conversation holding
   // one still renders its history and surfaces the server error on send.
   const rawModels = useMemo<OpenRouterModelType[]>(
-    () => [...deepSeekModels, ...codexModels, ...llamaCppModels, ...openRouterModels]
+    () => [...deepSeekModels, ...codexModels, ...abliterationModels, ...llamaCppModels, ...openRouterModels]
       .filter((m) => !isRemovedLocalProviderId(m.id)),
-    [deepSeekModels, codexModels, llamaCppModels, openRouterModels]
+    [deepSeekModels, codexModels, abliterationModels, llamaCppModels, openRouterModels]
   );
 
   const models = useMemo(() => {

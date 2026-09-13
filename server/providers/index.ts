@@ -10,6 +10,7 @@
  *
  *   - OpenRouter models keep their native ids: `anthropic/claude-3.5-sonnet`, `openrouter/auto`.
  *   - DeepSeek-direct models use the `deepseek:` prefix: `deepseek:deepseek-v4-flash`.
+ *   - Abliteration-direct models use the `abliteration:` prefix: `abliteration:abliterated-model`.
  *   - ChatGPT (Codex app-server) models use the `codex:` prefix: `codex:gpt-5.1-codex`.
  *   - llama.cpp (local llama-server, spawned via the paired local agent) models use
  *     the `llamacpp:` prefix: `llamacpp:Qwen3.6-35B-A3B-UD-Q4_K_M`.
@@ -22,10 +23,12 @@
  * OpenRouter's own `deepseek/...` slugs.
  */
 
-export type ProviderId = 'openrouter' | 'deepseek' | 'codex' | 'lmstudio' | 'llamacpp';
+export type ProviderId = 'openrouter' | 'deepseek' | 'codex' | 'lmstudio' | 'llamacpp' | 'abliteration';
 
 export const DEEPSEEK_PREFIX = 'deepseek:';
 export const DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
+export const ABLITERATION_PREFIX = 'abliteration:';
+export const ABLITERATION_BASE_URL = 'https://api.abliteration.ai';
 export const CODEX_PREFIX = 'codex:';
 export const LMSTUDIO_PREFIX = 'lmstudio:';
 export const LLAMACPP_PREFIX = 'llamacpp:';
@@ -79,6 +82,21 @@ const DEEPSEEK_CONFIG: ProviderConfig = {
   supportsPlugins: false,
   supportsReasoningParam: false,
   supportsJsonSchema: false,
+};
+
+const ABLITERATION_CONFIG: ProviderConfig = {
+  id: 'abliteration',
+  label: 'Abliteration (Direct)',
+  chatCompletionsUrl: `${ABLITERATION_BASE_URL}/v1/chat/completions`,
+  apiKeySetting: 'abliteration_api_key',
+  buildHeaders: (apiKey) => ({
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${apiKey}`,
+  }),
+  supportsProviderRouting: false,
+  supportsPlugins: false,
+  supportsReasoningParam: false,
+  supportsJsonSchema: true,
 };
 
 /**
@@ -144,11 +162,13 @@ const CONFIGS: Record<ProviderId, ProviderConfig> = {
   codex: CODEX_CONFIG,
   lmstudio: LMSTUDIO_REMOVED_CONFIG,
   llamacpp: LLAMACPP_CONFIG,
+  abliteration: ABLITERATION_CONFIG,
 };
 
 /** Returns the provider that should serve a given namespaced model id. */
 export function resolveProviderId(modelId: string | null | undefined): ProviderId {
   if (typeof modelId === 'string' && modelId.startsWith(DEEPSEEK_PREFIX)) return 'deepseek';
+  if (typeof modelId === 'string' && modelId.startsWith(ABLITERATION_PREFIX)) return 'abliteration';
   if (typeof modelId === 'string' && modelId.startsWith(CODEX_PREFIX)) return 'codex';
   // D8: retained so legacy ids resolve to 'lmstudio' (rejected downstream),
   // NEVER to openrouter.
@@ -160,6 +180,7 @@ export function resolveProviderId(modelId: string | null | undefined): ProviderI
 /** Strips the provider scheme prefix, yielding the id the upstream API expects. */
 export function toUpstreamModelId(modelId: string): string {
   if (modelId.startsWith(DEEPSEEK_PREFIX)) return modelId.slice(DEEPSEEK_PREFIX.length);
+  if (modelId.startsWith(ABLITERATION_PREFIX)) return modelId.slice(ABLITERATION_PREFIX.length);
   if (modelId.startsWith(CODEX_PREFIX)) return modelId.slice(CODEX_PREFIX.length);
   if (modelId.startsWith(LMSTUDIO_PREFIX)) return modelId.slice(LMSTUDIO_PREFIX.length);
   if (modelId.startsWith(LLAMACPP_PREFIX)) return modelId.slice(LLAMACPP_PREFIX.length);
@@ -183,6 +204,20 @@ export function isLlamacppModel(modelId: string | null | undefined): boolean {
  */
 export function isLmStudioModel(modelId: string | null | undefined): boolean {
   return resolveProviderId(modelId) === 'lmstudio';
+}
+
+/** True when the model id targets the Abliteration-direct provider. */
+export function isAbliterationModel(modelId: string | null | undefined): boolean {
+  return resolveProviderId(modelId) === 'abliteration';
+}
+
+/** Exact shared guard message for text-only Abliteration large models (GC §5). */
+export const ABLITERATION_LARGE_TEXT_ONLY_MESSAGE =
+  'Abliteration large models are text-only; use abliteration:abliterated-model for image content.';
+
+/** True for the two text-only Abliteration large upstream ids (GC §5). */
+export function isAbliterationLargeModel(upstreamModelId: string | null | undefined): boolean {
+  return upstreamModelId === 'abliterated-model-large' || upstreamModelId === 'abliterated-model-large-v2';
 }
 
 export function getProviderConfig(id: ProviderId): ProviderConfig {
@@ -219,7 +254,7 @@ export function persistedModelId(
   effectiveModel: string,
   actualModelFromResponse: string | null,
 ): string {
-  if (providerId === 'deepseek' || providerId === 'lmstudio' || providerId === 'llamacpp') return effectiveModel;
+  if (providerId === 'deepseek' || providerId === 'lmstudio' || providerId === 'llamacpp' || providerId === 'abliteration') return effectiveModel;
   return actualModelFromResponse ?? effectiveModel;
 }
 
@@ -355,4 +390,109 @@ export function computeDeepSeekCost(usage: DeepSeekUsage | null | undefined, ups
 export function deepSeekCachedTokens(usage: DeepSeekUsage | null | undefined): number {
   if (!usage) return 0;
   return usage.prompt_cache_hit_tokens ?? usage.prompt_tokens_details?.cached_tokens ?? 0;
+}
+
+// ---------------------------------------------------------------------------
+// Abliteration-direct catalog / reasoning / cost (GC §§3-6, static wave-1)
+// Docs: https://abliteration.ai/pricing + docs.abliteration.ai (2026-09-02);
+// contract pinned to live spec v0.1.0. Static catalog (no per-request fetch);
+// Bearer auth; reasoning via top-level `reasoning_effort`; static per-token
+// pricing because usage frames carry no `cost` field.
+// ---------------------------------------------------------------------------
+
+export interface AbliterationCatalogModel {
+  id: string; // namespaced, e.g. 'abliteration:abliterated-model'
+  name: string;
+  description: string;
+  context_length: number;
+  pricing: { prompt: string; completion: string };
+}
+
+export const ABLITERATION_CATALOG: AbliterationCatalogModel[] = [
+  {
+    id: `${ABLITERATION_PREFIX}abliterated-model`,
+    name: 'Abliterated Model',
+    description:
+      'General multimodal default. Text + image input, text output. Fallback for image content.',
+    context_length: 262144,
+    pricing: { prompt: '0.000001', completion: '0.000003' }, // $1.00 / $3.00 per 1M
+  },
+  {
+    id: `${ABLITERATION_PREFIX}abliterated-model-large`,
+    name: 'Abliterated Model Large',
+    description:
+      'Large text-only model. Does not accept image content; use abliteration:abliterated-model for image content.',
+    context_length: 1000000,
+    pricing: { prompt: '0.000003', completion: '0.000005' }, // $3.00 / $5.00 per 1M
+  },
+  {
+    id: `${ABLITERATION_PREFIX}abliterated-model-large-v2`,
+    name: 'Abliterated Model Large V2',
+    description:
+      'Default large text-only model. Does not accept image content; use abliteration:abliterated-model for image content.',
+    context_length: 1000000,
+    pricing: { prompt: '0.000003', completion: '0.000005' }, // $3.00 / $5.00 per 1M
+  },
+];
+
+const ABLITERATION_ALLOWED_EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+
+/**
+ * Builds the Abliteration reasoning request field from the app's reasoning
+ * toggle (GC §4). Toggle on → `reasoning_effort` verbatim iff effort is an
+ * allowed value; otherwise omit (fail-safe, never 422). Never sends
+ * `ultracode`, `thinking`, `include_reasoning`, or the OpenRouter
+ * `reasoning:{}` object.
+ */
+export function buildAbliterationReasoning(
+  reasoningEnabled: boolean,
+  effort: string | null | undefined,
+): Record<string, unknown> {
+  if (!reasoningEnabled) return {};
+  if (typeof effort === 'string' && ABLITERATION_ALLOWED_EFFORTS.has(effort)) {
+    return { reasoning_effort: effort };
+  }
+  return {};
+}
+
+/** Per-1M-token pricing used to compute cost (Abliteration usage carries no `cost` field). */
+interface AbliterationPrice {
+  inHit: number; // input, cache hit (10% of miss rate)
+  inMiss: number; // input, cache miss
+  out: number; // output
+}
+
+const ABLITERATION_PRICING: Record<string, AbliterationPrice> = {
+  'abliterated-model': { inHit: 0.1, inMiss: 1.0, out: 3.0 },
+  'abliterated-model-large': { inHit: 0.3, inMiss: 3.0, out: 5.0 },
+  'abliterated-model-large-v2': { inHit: 0.3, inMiss: 3.0, out: 5.0 },
+};
+
+interface AbliterationUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  prompt_cache_hit_tokens?: number;
+  prompt_tokens_details?: { cached_tokens?: number };
+}
+
+/**
+ * Best-effort cost (USD) for an Abliteration response, using the static price
+ * table and the cache hit/miss token split. Returns 0 for unknown models.
+ */
+export function computeAbliterationCost(
+  usage: AbliterationUsage | null | undefined,
+  upstreamModelId: string,
+): number {
+  const price = ABLITERATION_PRICING[upstreamModelId];
+  if (!price || !usage) return 0;
+  const hit = usage.prompt_tokens_details?.cached_tokens ?? usage.prompt_cache_hit_tokens ?? 0;
+  const miss = Math.max((usage.prompt_tokens ?? 0) - hit, 0);
+  const out = usage.completion_tokens ?? 0;
+  return (hit * price.inHit + miss * price.inMiss + out * price.out) / 1_000_000;
+}
+
+/** Cache-hit tokens from an Abliteration usage object (for the app's cached_tokens metric). */
+export function abliterationCachedTokens(usage: AbliterationUsage | null | undefined): number {
+  if (!usage) return 0;
+  return usage.prompt_tokens_details?.cached_tokens ?? usage.prompt_cache_hit_tokens ?? 0;
 }

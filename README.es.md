@@ -2,7 +2,7 @@
 
 Espacio de trabajo personal de agentes de IA. Crea agentes con prompts de sistema propios, chatea con ellos en streaming, ejecuta herramientas reales (comandos en tu propio PC, sandbox en la nube, navegación web, ficheros), conecta servidores MCP, define **skills** reutilizables y haz deliberar a varios modelos a la vez (**Model Council**) — todo desde una interfaz oscura cuidada ("Obsidian Atelier"), responsive y pensada para escritorio y móvil.
 
-No depende de un único proveedor: puedes hablar con más de 300 modelos vía **OpenRouter**, directamente con **DeepSeek**, con los modelos de tu cuenta de **ChatGPT (Codex)** o con modelos **locales de llama.cpp** ejecutándose en tu propia máquina.
+No depende de un único proveedor: puedes hablar con más de 300 modelos vía **OpenRouter**, directamente con **DeepSeek**, con los modelos de tu cuenta de **ChatGPT (Codex)**, con modelos **locales de llama.cpp** ejecutándose en tu propia máquina, o directamente con **Abliteration**.
 
 ---
 
@@ -44,6 +44,7 @@ No depende de un único proveedor: puedes hablar con más de 300 modelos vía **
 - DeepSeek directo (clave propia, validación y saldo en vivo).
 - ChatGPT/Codex mediante inicio de sesión por código de dispositivo (*device-code*) — usa tu plan de ChatGPT, sin clave de API.
 - llama.cpp local: lanza/supervisa un `llama-server` en tu PC desde la app (presets RÁPIDO/EQUILIBRADO/PROFUNDO, muestreo por modelo, logs, descarga por inactividad).
+- Abliteration directo (clave `ak-...` en Ajustes, cifrada; 3 modelos, variantes grandes solo-texto; precios estáticos; consola en https://abliteration.ai/console).
 
 **Agentes y orquestación**
 - Estudio de agentes: emoji, prompt de sistema, modelo, temperatura/máx. tokens, razonamiento, salida estructurada (JSON schema), reparación de respuesta (*response healing*), `tool_choice`, llamadas a herramientas paralelas.
@@ -84,7 +85,7 @@ Despliegue dividido: **frontend estático en Vercel** + **API en Railway** (o to
         │ Proveedores LLM       │   │  Agente local (WS)  │   │ Servicios externos       │
         │ OpenRouter/DeepSeek/  │   │  Tu PC emparejado:  │   │ E2B · Jina Reader ·      │
         │ Codex · llama.cpp     │   │  comandos, ficheros,│   │ Exa/Brave/Tavily ·       │
-        │                       │   │  llama-server, MCP  │   │ Wayback · OpenRouter     │
+        │ Abliteration · Direct │   │  llama-server, MCP  │   │ Wayback · OpenRouter     │
         └──────────────────────┘   └────────────────────┘   └─────────────────────────┘
 ```
 
@@ -148,6 +149,7 @@ El proveedor se deduce del **prefijo del ID de modelo** (campo de texto libre):
 | *(ninguno)* | **OpenRouter** | Clave de settings (cifrada) | Ej.: `openai/gpt-4o`, `anthropic/claude-sonnet-4.5`, `openrouter/auto`. Soporta *provider routing* (fijar proveedor inferior + fallbacks), plugins PDF y *response healing*. |
 | `deepseek:` | **DeepSeek directo** | Clave de settings (cifrada) | Coste calculado localmente con tabla de precios estática; requiere `reasoning_content` en historial de turnos con herramientas. |
 | `codex:` | **ChatGPT (Codex)** | Login por device-code, usa tu plan | Sin clave API. Requiere estar en `CODEX_ALLOWED_EMAILS` (vacío = desactivado para todos). Un hilo (*thread*) persistente por conversación; un proceso `codex app-server` por usuario. |
+| `abliteration:` | **Abliteration directo** | Clave de settings (cifrada) | 3 modelos (`abliterated-model` multimodal + 2 grandes solo-texto); coste calculado localmente con tabla de precios estática; consola en https://abliteration.ai/console. |
 | `llamacpp:` | **llama.cpp local** | Ninguna (loopback) | `llama-server` se lanza en **tu PC** a través del agente emparejado (puerto por defecto 8712). Requiere `LLAMACPP_EXE_PATH` (o configurarlo en Ajustes). Escanea `.gguf` del directorio de modelos (colapsa shards divididos). Presets y muestreo editables; descarga por inactividad (45 min por defecto). |
 | `lmstudio:` | *(eliminado)* | — | Stub que siempre responde HTTP 400. LM Studio fue sustituido por llama.cpp. |
 

@@ -693,6 +693,7 @@ export const modelsApi = {
   ),
   deepseek: () => request<{ data: OpenRouterModel[] }>('/models/deepseek'),
   codex: () => request<{ data: OpenRouterModel[] }>('/models/codex'),
+  abliteration: () => request<{ data: OpenRouterModel[] }>('/models/abliteration'),
   llamacpp: () => request<{ data: LlamaCppModel[] }>('/models/llamacpp'),
   /** NEVER-THROWS §5 status payload. */
   llamacppStatus: () => request<LlamaCppStatus>('/models/llamacpp/status'),
@@ -745,6 +746,18 @@ export interface DeepSeekValidateResult {
 
 export const deepseekApi = {
   validate: () => request<DeepSeekValidateResult>('/models/deepseek/validate'),
+};
+
+// Abliteration (direct provider)
+export interface AbliterationValidateResult {
+  ok: boolean;
+  total_credits?: number;
+  total_usage?: number;
+  error?: string;
+}
+
+export const abliterationApi = {
+  validate: () => request<AbliterationValidateResult>('/models/abliteration/validate'),
 };
 
 // llama.cpp (local provider via the paired local agent) — response types

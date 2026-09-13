@@ -11,6 +11,7 @@
 
 export const DEEPSEEK_PREFIX = 'deepseek:';
 export const CODEX_PREFIX = 'codex:';
+export const ABLITERATION_PREFIX = 'abliteration:';
 export const LLAMACPP_PREFIX = 'llamacpp:';
 
 /** Synthetic author/group key used by the model selector for DeepSeek-direct models. */
@@ -18,6 +19,9 @@ export const DEEPSEEK_DIRECT_GROUP = 'deepseek-direct';
 
 /** Synthetic author/group key used by the model selector for ChatGPT (Codex) models. */
 export const CODEX_DIRECT_GROUP = 'codex-chatgpt';
+
+/** Synthetic author/group key used by the model selector for Abliteration-direct models. */
+export const ABLITERATION_GROUP = 'abliteration-direct';
 
 /** Synthetic author/group key used by the model selector for llama.cpp (local) models. */
 export const LLAMACPP_GROUP = 'llamacpp-local';
@@ -27,6 +31,9 @@ export const DEEPSEEK_ACCENT = '#4D6BFE';
 
 /** Brand accent for the ChatGPT (Codex) provider. */
 export const CODEX_ACCENT = '#10a37f';
+
+/** Brand accent for the Abliteration-direct provider. */
+export const ABLITERATION_ACCENT = '#e5489e';
 
 /** Brand accent for the llama.cpp (local) provider. */
 export const LLAMACPP_ACCENT = '#ca8a04';
@@ -45,6 +52,10 @@ export function isDeepSeekDirectModel(modelId: string | null | undefined): boole
 
 export function isCodexModel(modelId: string | null | undefined): boolean {
   return typeof modelId === 'string' && modelId.startsWith(CODEX_PREFIX);
+}
+
+export function isAbliterationModel(modelId: string | null | undefined): boolean {
+  return typeof modelId === 'string' && modelId.startsWith(ABLITERATION_PREFIX);
 }
 
 export function isLlamaCppModel(modelId: string | null | undefined): boolean {
@@ -73,6 +84,11 @@ export function stripDeepSeekPrefix(modelId: string): string {
 /** Strips the `codex:` scheme for display (e.g. `codex:gpt-5.1-codex` → `gpt-5.1-codex`). */
 export function stripCodexPrefix(modelId: string): string {
   return modelId.startsWith(CODEX_PREFIX) ? modelId.slice(CODEX_PREFIX.length) : modelId;
+}
+
+/** Strips the `abliteration:` scheme for display (e.g. `abliteration:abliterated-model-large-v2` → `abliterated-model-large-v2`). */
+export function stripAbliterationPrefix(modelId: string): string {
+  return modelId.startsWith(ABLITERATION_PREFIX) ? modelId.slice(ABLITERATION_PREFIX.length) : modelId;
 }
 
 /** Strips the `llamacpp:` scheme (e.g. `llamacpp:Qwen3.6-35B` → `Qwen3.6-35B`). */

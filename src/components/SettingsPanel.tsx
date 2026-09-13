@@ -2,9 +2,9 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { CheckCircle, AlertCircle, ExternalLink, Zap, Coins, BarChart3, Loader2, Globe, KeyRound, Database, MessageSquare, Brain, Check, ChevronDown, Sparkles, Lightbulb, SlidersHorizontal, Wrench, Plug, Layers, Link, Box, LogOut, Copy, RefreshCw } from 'lucide-react';
 import { useStore } from '../stores/store';
-import { settingsApi, toolsApi, mcpServersApi, skillsApi, deepseekApi } from '../api/client';
+import { settingsApi, toolsApi, mcpServersApi, skillsApi, deepseekApi, abliterationApi } from '../api/client';
 import type { ProviderRoutingConfig, ReasoningEffort, Tool, McpServer, Skill } from '../types';
-import { DEEPSEEK_ACCENT, CODEX_ACCENT, LLAMACPP_ACCENT } from '../utils/providers';
+import { DEEPSEEK_ACCENT, CODEX_ACCENT, LLAMACPP_ACCENT, ABLITERATION_ACCENT } from '../utils/providers';
 import { chatgptApi, type ChatgptStatus } from '../api/client';
 import { CHATGPT_STATUS_CHANGED_EVENT } from '../hooks/useCodexModels';
 import { LlamaCppSection } from './LlamaCppSection';
@@ -312,6 +312,49 @@ function DeepSeekSection() {
       helpText="Use DeepSeek models directly with your own DeepSeek API key — billed by DeepSeek, not OpenRouter. Create one at"
       helpUrl="https://platform.deepseek.com/api_keys"
       helpLabel="DeepSeek Platform"
+      onTest={handleTest}
+    />
+  );
+}
+
+/** Abliteration direct-provider API key section. Reuses ProviderKeySection with live key validation. */
+function AbliterationSection() {
+  const { abliterationApiKey, setAbliterationApiKey } = useStore();
+  const [localKey, setLocalKey] = useState('');
+
+  const hasSavedKey = !!abliterationApiKey;
+
+  const handleTest = async (): Promise<{ ok: boolean; message: string }> => {
+    try {
+      const result = await abliterationApi.validate();
+      if (result.ok) {
+        const figures: string[] = [];
+        if (result.total_credits != null) figures.push(`Total credits: ${result.total_credits}`);
+        if (result.total_usage != null) figures.push(`Used: ${result.total_usage}`);
+        const suffix = figures.length > 0 ? ` ${figures.join(' · ')}` : '';
+        return { ok: true, message: `Abliteration key is valid.${suffix}` };
+      }
+      return { ok: false, message: result.error || 'Invalid Abliteration API key' };
+    } catch (err) {
+      if (err instanceof TypeError) return { ok: false, message: 'Could not reach Abliteration' };
+      return { ok: false, message: err instanceof Error ? err.message : 'Could not reach Abliteration' };
+    }
+  };
+
+  return (
+    <ProviderKeySection
+      providerName="Abliteration"
+      providerIcon={<Sparkles size={15} />}
+      accentColor={ABLITERATION_ACCENT}
+      settingKey="abliteration_api_key"
+      localKey={localKey}
+      setLocalKey={setLocalKey}
+      savedKey={abliterationApiKey}
+      setSavedKey={setAbliterationApiKey}
+      placeholder={hasSavedKey ? `Saved: ${abliterationApiKey} — enter a new key to replace` : 'ak-...'}
+      helpText="Use Abliteration models directly with your own Abliteration API key (ak-...) — billed by Abliteration. Create one at"
+      helpUrl="https://abliteration.ai/console"
+      helpLabel="Abliteration Console"
       onTest={handleTest}
     />
   );
@@ -1993,6 +2036,12 @@ export function SettingsPanel() {
 
         {/* DeepSeek (Direct) */}
         <DeepSeekSection />
+
+        {/* Divider */}
+        <div style={{ height: '1px', background: 'var(--border)' }} />
+
+        {/* Abliteration (Direct) */}
+        <AbliterationSection />
 
         {/* Divider */}
         <div style={{ height: '1px', background: 'var(--border)' }} />

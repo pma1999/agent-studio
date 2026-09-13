@@ -2,7 +2,7 @@
 
 A self-hosted workspace for building and running AI agents. Create agents with your own system prompts, chat with them over streaming, let them run **real tools** — shell commands on your own machine, cloud sandboxes, web browsing, file operations — connect MCP servers, define reusable **skills**, and have several models deliberate on the same question at once (**Model Council**).
 
-Not tied to a single provider: talk to 300+ models through **OpenRouter**, to **DeepSeek** directly, to the models in your own **ChatGPT (Codex)** plan, or to **local llama.cpp** models running on your machine.
+Not tied to a single provider: talk to 300+ models through **OpenRouter**, to **DeepSeek** directly, to the models in your own **ChatGPT (Codex)** plan, to **local llama.cpp** models running on your machine, or to **Abliteration** models directly.
 
 > 🇪🇸 [**README completo en español**](README.es.md) — full documentation, architecture notes and deployment guide.
 
@@ -17,8 +17,8 @@ Most agent UIs give you a chat box and a model picker. The hard parts are everyw
 **Chat that survives reality**
 Real-time streaming with collapsible reasoning per message and effort control (`minimal → max`). A **message tree**: edit and re-run any user message as a sibling variant, page between variants, retry, and stop with true server-side cancellation. Generation **survives client disconnect** — the draft is persisted and recovered by polling `active_turn_id`, so closing the tab cancels nothing. PDF attachments (5 x 20 MB) with a selectable engine: auto, text extraction, Mistral OCR, or provider-native.
 
-**Four providers, one interface**
-OpenRouter (300+ models, endpoint pinning with live price/uptime, OAuth PKCE or manual key) - DeepSeek direct with live balance - ChatGPT/Codex via device-code login, using your plan rather than an API key - local llama.cpp, where the app spawns and supervises a `llama-server` on your PC with FAST/BALANCED/DEEP presets and idle unloading.
+**Five providers, one interface**
+OpenRouter (300+ models, endpoint pinning with live price/uptime, OAuth PKCE or manual key) - DeepSeek direct with live balance - ChatGPT/Codex via device-code login, using your plan rather than an API key - local llama.cpp, where the app spawns and supervises a `llama-server` on your PC with FAST/BALANCED/DEEP presets and idle unloading - Abliteration direct (`ak-...` key in Settings, encrypted; 3 models, large variants text-only; static pricing; console at https://abliteration.ai/console).
 
 **Model Council**
 Several models answer the same prompt in parallel; the results are compared for agreement, disagreement and unique findings; a synthesizer model writes the final answer. Runs are persisted and inspectable.
@@ -48,7 +48,7 @@ Split deployment: static frontend on Vercel, API on Railway — or entirely loca
         │ LLM providers          │   │ Local agent (WS)    │   │ External services         │
         │ OpenRouter · DeepSeek  │   │ Your paired PC:     │   │ E2B · Jina Reader ·       │
         │ Codex · llama.cpp      │   │ commands, files,    │   │ Exa/Brave/Tavily ·        │
-        │                        │   │ llama-server, MCP   │   │ Wayback · OpenRouter      │
+        │ Abliteration · Direct  │   │ llama-server, MCP   │   │ Wayback · OpenRouter      │
         └────────────────────────┘   └─────────────────────┘   └──────────────────────────┘
 ```
 

@@ -221,13 +221,13 @@ function seamChecks(): void {
   ok('(C7) healing exclusion names llamacpp', () => {
     assert.match(
       chatSource,
-      /useResponseHealing = !!agent\.response_healing_enabled && !!responseFormat && provider\.id !== 'codex' && provider\.id !== 'llamacpp';/,
+      /useResponseHealing = !!agent\.response_healing_enabled && !!responseFormat && provider\.id !== 'codex' && provider\.id !== 'llamacpp'( && provider\.id !== 'abliteration')?;/,
     );
   });
   ok('(C8) effort-max retry exclusion names llamacpp', () => {
     assert.match(
       chatSource,
-      /requestedMaxEffort = reasoningEnabled && reasoningEffort === 'max' && provider\.id !== 'codex' && provider\.id !== 'llamacpp';/,
+      /requestedMaxEffort = reasoningEnabled && reasoningEffort === 'max' && provider\.id !== 'codex' && provider\.id !== 'llamacpp'( && provider\.id !== 'abliteration')?;/,
     );
   });
   ok('(C9) pre-flight calls ensureLlamacppRunning under a 15 s SSE keepalive', () => {

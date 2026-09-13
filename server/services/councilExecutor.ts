@@ -21,13 +21,19 @@ import {
   getProviderForModel,
   toUpstreamModelId,
   assistantReasoningField,
+  buildAbliterationReasoning,
+  computeAbliterationCost,
   computeDeepSeekCost,
+  isAbliterationLargeModel,
+  ABLITERATION_LARGE_TEXT_ONLY_MESSAGE,
   resolveProviderId,
   type ProviderConfig,
   type ProviderId,
 } from '../providers/index.js';
 import { injectDateTimeIntoCurrentTurn } from '../dateTimeContext.js';
 import { runCodexTurn } from '../codex/chat.js';
+import db from '../db.js';
+import { getSettingValue } from '../routes/settings.js';
 import { getAgentCapabilities } from '../agentRelay/registry.js';
 import { isLegacyLmStudioModel, REMOVED_LMSTUDIO_MESSAGE } from '../providers/llamacpp.js';
 
@@ -160,6 +166,39 @@ export class CouncilExecutor {
       upstreamModel: toUpstreamModelId(modelId),
       provider,
     };
+  }
+
+  /**
+   * Resolves the app reasoning toggle/effort governing a council run (GC §4).
+   * Council carries no per-message override: the conversation's agent row wins,
+   * else the general-chat settings (same keys chat.ts uses). Fail-safe: any
+   * error resolves to off (upstream reasons by default; omitting is the
+   * off-switch — never send `thinking:false`/`include_reasoning:false`).
+   */
+  private resolveCouncilReasoning(conversationId: string, userId: string): { enabled: boolean; effort: string | null } {
+    const off = { enabled: false, effort: null as string | null };
+    try {
+      const conv = db.prepare('SELECT agent_id FROM conversations WHERE id = ? AND user_id = ?').get(conversationId, userId) as { agent_id: string | null } | undefined;
+      if (conv?.agent_id) {
+        const agent = db.prepare('SELECT reasoning_enabled, reasoning_effort FROM agents WHERE id = ? AND user_id = ?').get(conv.agent_id, userId) as { reasoning_enabled: number | null; reasoning_effort: string | null } | undefined;
+        if (agent) return { enabled: !!agent.reasoning_enabled, effort: agent.reasoning_effort ?? null };
+      }
+      const enabledRaw = getSettingValue(userId, 'general_chat_reasoning_enabled');
+      return { enabled: enabledRaw === '1' || enabledRaw === 'true', effort: getSettingValue(userId, 'general_chat_reasoning_effort') || null };
+    } catch {
+      return off;
+    }
+  }
+
+  /** True when any outgoing message carries array content with an image part. */
+  private messagesHaveImagePart(messages: Array<{ content?: string | unknown[] | null }>): boolean {
+    return messages.some((m) =>
+      Array.isArray(m.content) &&
+      (m.content as unknown[]).some((p) =>
+        typeof p === 'object' && p !== null &&
+        ((p as { type?: unknown }).type === 'image_url' || (p as { type?: unknown }).type === 'image')
+      )
+    );
   }
 
   /**
@@ -404,6 +443,12 @@ export class CouncilExecutor {
       injectDateTimeIntoCurrentTurn(messages, options.dateTimeContext);
     }
 
+    // Abliteration large models are text-only (GC §5): same guard as chat,
+    // thrown in the member path before any network call.
+    if (ep.provider.id === 'abliteration' && isAbliterationLargeModel(ep.upstreamModel) && this.messagesHaveImagePart(messages)) {
+      throw new Error(ABLITERATION_LARGE_TEXT_ONLY_MESSAGE);
+    }
+
     // Resolve tools
     const resolvedTools = options.tools || [];
     const openRouterTools = toOpenRouterTools(resolvedTools);
@@ -415,6 +460,14 @@ export class CouncilExecutor {
       max_tokens: 4096,
       stream: true,
     };
+    if (ep.provider.id === 'abliteration') {
+      // Usage frame for static cost accounting (GC §6/§7) + the custom
+      // reasoning arm (GC §4): top-level `reasoning_effort` verbatim, or
+      // nothing when the toggle is off / effort unknown.
+      requestBody.stream_options = { include_usage: true };
+      const reasoning = this.resolveCouncilReasoning(options.conversationId, options.userId);
+      Object.assign(requestBody, buildAbliterationReasoning(reasoning.enabled, reasoning.effort));
+    }
     // §10 (+ Increment 2d): council members share the chat sampling resolver —
     // the fixed temp 0.7 above is superseded for llamacpp arms by resolution
     // v3 (global row ⊕ per-model sampling for THIS upstream key; single
@@ -548,6 +601,7 @@ export class CouncilExecutor {
                 completionTokens = usage.completion_tokens ?? completionTokens;
                 if (usage.cost !== undefined) cost = usage.cost;
                 else if (ep.provider.id === 'deepseek') cost = computeDeepSeekCost(usage, ep.upstreamModel);
+                else if (ep.provider.id === 'abliteration') cost = computeAbliterationCost(usage, ep.upstreamModel);
                 if (usage.completion_tokens_details?.reasoning_tokens) {
                   reasoningTokens = usage.completion_tokens_details.reasoning_tokens;
                 }
@@ -762,6 +816,12 @@ export class CouncilExecutor {
         requestBody.provider = providerPreference;
       }
     }
+    if (ep.provider.id === 'abliteration') {
+      // Same relay contract as member bodies (GC §4/§6/§7).
+      requestBody.stream_options = { include_usage: true };
+      const reasoning = this.resolveCouncilReasoning(options.conversationId, options.userId);
+      Object.assign(requestBody, buildAbliterationReasoning(reasoning.enabled, reasoning.effort));
+    }
 
     // Notify synthesis start
     console.log(`\n🧠 SYNTHESIS STARTED`);
@@ -845,6 +905,7 @@ export class CouncilExecutor {
                 completionTokens = usage.completion_tokens ?? completionTokens;
                 if (usage.cost !== undefined) cost = usage.cost;
                 else if (ep.provider.id === 'deepseek') cost = computeDeepSeekCost(usage, ep.upstreamModel);
+                else if (ep.provider.id === 'abliteration') cost = computeAbliterationCost(usage, ep.upstreamModel);
               }
             } catch {
               // Skip malformed

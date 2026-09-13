@@ -124,6 +124,8 @@ interface AppState {
   setAutoConversationTitlesEnabled: (enabled: boolean) => void;
   deepSeekApiKey: string;
   setDeepSeekApiKey: (key: string) => void;
+  abliterationApiKey: string;
+  setAbliterationApiKey: (key: string) => void;
   loadSettings: () => Promise<void>;
 
   // OAuth PKCE callback feedback
@@ -756,6 +758,8 @@ export const useStore = create<AppState>((set, get) => ({
   setAutoConversationTitlesEnabled: (enabled) => set({ autoConversationTitlesEnabled: enabled }),
   deepSeekApiKey: '',
   setDeepSeekApiKey: (key) => set({ deepSeekApiKey: key }),
+  abliterationApiKey: '',
+  setAbliterationApiKey: (key) => set({ abliterationApiKey: key }),
   loadSettings: async () => {
     try {
       const data = await settingsApi.getAll();
@@ -763,6 +767,7 @@ export const useStore = create<AppState>((set, get) => ({
         openRouterApiKey: data.openrouter_api_key ?? '',
         autoConversationTitlesEnabled: data.auto_conversation_titles_enabled === 'true' || data.auto_conversation_titles_enabled === '1',
         deepSeekApiKey: data.deepseek_api_key ?? '',
+        abliterationApiKey: data.abliteration_api_key ?? '',
       });
     } catch (err) {
       console.error('Failed to load settings:', err);

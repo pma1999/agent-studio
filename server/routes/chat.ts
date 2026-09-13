@@ -28,9 +28,14 @@ import {
   toUpstreamModelId,
   assistantReasoningField,
   resolveAssistantHistoryContent,
+  abliterationCachedTokens,
+  buildAbliterationReasoning,
   buildDeepSeekThinking,
+  computeAbliterationCost,
   computeDeepSeekCost,
   deepSeekCachedTokens,
+  isAbliterationLargeModel,
+  ABLITERATION_LARGE_TEXT_ONLY_MESSAGE,
   isCodexModel,
   isLlamacppModel,
   persistedModelId,
@@ -625,6 +630,23 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     // system prompt — so system + history remain a stable, cacheable prefix (DeepSeek/Anthropic/OpenAI).
     injectDateTimeIntoCurrentTurn(messages, buildDateTimeContext(userTimezone));
 
+    // Abliteration large models are text-only (GC §5): reject image parts in
+    // the outgoing messages BEFORE any network call or SSE flush. Placed after
+    // the PDF-attachments gate above (messages are final only here).
+    if (provider.id === 'abliteration' && isAbliterationLargeModel(upstreamModel)) {
+      const hasImagePart = messages.some((m) =>
+        Array.isArray(m.content) &&
+        (m.content as unknown[]).some((p) =>
+          typeof p === 'object' && p !== null &&
+          ((p as { type?: unknown }).type === 'image_url' || (p as { type?: unknown }).type === 'image')
+        )
+      );
+      if (hasImagePart) {
+        res.status(400).json({ error: ABLITERATION_LARGE_TEXT_ONLY_MESSAGE });
+        return;
+      }
+    }
+
     // Resolve tools for this agent (with user context for settings)
     // Hierarchy: conversation tool/MCP override > agent/general default (no message-level tier for tools)
     const conversationToolOverride = getConversationToolOverride(conversation.id, userId);
@@ -828,6 +850,10 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       // DeepSeek toggles thinking mode via top-level `thinking` (+ optional reasoning_effort),
       // driven by the app's Reasoning switch. Default off → non-thinking (fast/cheap).
       Object.assign(requestBody, buildDeepSeekThinking(reasoningEnabled, reasoningEffort));
+    } else if (provider.id === 'abliteration') {
+      // Custom arm (GC §4): top-level `reasoning_effort` verbatim when the
+      // toggle is on with a known effort, otherwise nothing (fail-safe omit).
+      Object.assign(requestBody, buildAbliterationReasoning(reasoningEnabled, reasoningEffort));
     }
 
     if (isLlamacppModel(effectiveModel)) {
@@ -840,6 +866,14 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       // --reasoning-budget 0 is NOT).
       requestBody.stream_options = { include_usage: true };
       requestBody.chat_template_kwargs = { enable_thinking: reasoningEnabled };
+    }
+
+    if (provider.id === 'abliteration') {
+      // Usage frame required for static cost accounting (GC §6/§7). The body
+      // otherwise stays allowlisted: provider/plugins/reasoning-object never
+      // attach (supportsProviderRouting/supportsPlugins/supportsReasoningParam
+      // are all false), tools attach normally above.
+      requestBody.stream_options = { include_usage: true };
     }
 
     // Structured outputs (OpenRouter JSON Schema)
@@ -881,7 +915,9 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     // Response healing is an OpenRouter plugin: codex has no chat-completions
     // fetch and llama.cpp serves response_format json_schema natively (the
     // 'response-healing' field is meaningless upstream), so both are excluded.
-    const useResponseHealing = !!agent.response_healing_enabled && !!responseFormat && provider.id !== 'codex' && provider.id !== 'llamacpp';
+    // Abliteration is excluded too: the healing plugin is a 422 risk there
+    // (GC §2) and healing forces stream:false, which abliteration never uses.
+    const useResponseHealing = !!agent.response_healing_enabled && !!responseFormat && provider.id !== 'codex' && provider.id !== 'llamacpp' && provider.id !== 'abliteration';
     if (useResponseHealing) {
       requestBody.stream = false;
       const plugins = (requestBody.plugins as { id: string; pdf?: { engine: string } }[]) || [];
@@ -893,8 +929,9 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     // Ultra effort ('max') is model-dependent on OpenRouter: send it as-is and
     // retry once with 'xhigh' when the model rejects the value. llama.cpp never
     // receives a reasoning param, so a local model error merely mentioning
-    // "max" must never trigger this retry.
-    const requestedMaxEffort = reasoningEnabled && reasoningEffort === 'max' && provider.id !== 'codex' && provider.id !== 'llamacpp';
+    // "max" must never trigger this retry. Abliteration receives 'max' as-is
+    // with no retry (GC §4).
+    const requestedMaxEffort = reasoningEnabled && reasoningEffort === 'max' && provider.id !== 'codex' && provider.id !== 'llamacpp' && provider.id !== 'abliteration';
     let maxEffortFallbackDone = false;
     const effortMaxRejected = (msg: string): boolean =>
       /unsupported value: ?'?max|'max' is not supported|max is not supported/i.test(msg);
@@ -1308,6 +1345,13 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
           cachedTokens = deepSeekCachedTokens(u);
           if (u.cost === undefined) cost = computeDeepSeekCost(u, upstreamModel);
         }
+        if (provider.id === 'abliteration') {
+          // Static cost: upstream usage carries no `cost` (GC §6). Never
+          // overwrite an upstream cost if one ever appears.
+          const au = u as unknown as Parameters<typeof abliterationCachedTokens>[0];
+          cachedTokens = abliterationCachedTokens(au);
+          if (u.cost === undefined) cost = computeAbliterationCost(au, upstreamModel);
+        }
       }
       const dataWithModel = data as { model?: string };
       if (dataWithModel.model && typeof dataWithModel.model === 'string' && dataWithModel.model.trim()) {
@@ -1559,6 +1603,10 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
                 if (provider.id === 'deepseek') {
                   cachedTokens = deepSeekCachedTokens(usage);
                   if (usage.cost === undefined) cost = computeDeepSeekCost(usage, upstreamModel);
+                }
+                if (provider.id === 'abliteration') {
+                  cachedTokens = abliterationCachedTokens(usage);
+                  if (usage.cost === undefined) cost = computeAbliterationCost(usage, upstreamModel);
                 }
               }
 

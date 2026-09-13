@@ -4,7 +4,7 @@ import { AuthRequest } from '../middleware/auth.js';
 import db from '../db.js';
 import { getSettingValue } from './settings.js';
 import { normalizeOpenRouterEndpoints } from '../providerRouting.js';
-import { DEEPSEEK_BASE_URL, DEEPSEEK_CATALOG, LLAMACPP_PREFIX } from '../providers/index.js';
+import { ABLITERATION_BASE_URL, ABLITERATION_CATALOG, DEEPSEEK_BASE_URL, DEEPSEEK_CATALOG, LLAMACPP_PREFIX } from '../providers/index.js';
 import {
   LLAMACPP_ACTIVE_PRESET_SCHEMA,
   LLAMACPP_CANONICAL_PRESETS,
@@ -190,6 +190,11 @@ router.get('/deepseek', (_req: AuthRequest, res: Response) => {
   res.json({ data: DEEPSEEK_CATALOG });
 });
 
+// GET /api/models/abliteration - Curated Abliteration-direct catalog (static; no key needed)
+router.get('/abliteration', (_req: AuthRequest, res: Response) => {
+  res.json({ data: ABLITERATION_CATALOG });
+});
+
 // GET /api/models/codex - Models available to the user's connected ChatGPT account
 const codexModelsCache = new Map<string, { data: unknown[]; timestamp: number }>();
 const CODEX_MODELS_CACHE_TTL = 60_000; // 1 minute
@@ -255,6 +260,58 @@ router.get('/deepseek/validate', async (req: AuthRequest, res: Response) => {
   } catch (err) {
     console.error('Error validating DeepSeek key:', err);
     res.status(500).json({ ok: false, error: 'Failed to reach DeepSeek' });
+  }
+});
+// GET /api/models/abliteration/validate - Verify the saved Abliteration key via credits balance
+router.get('/abliteration/validate', async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.userId;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const apiKey = getSettingValue(userId, 'abliteration_api_key');
+    if (!apiKey?.trim()) {
+      return res.status(400).json({ error: 'Abliteration API key not configured' });
+    }
+
+    const response = await fetch(`${ABLITERATION_BASE_URL}/v1/credits`, {
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+    });
+
+    if (!response.ok) {
+      const errJson = (await response.json().catch(() => ({}))) as {
+        error?: { code?: unknown; message?: unknown };
+      };
+      const code = typeof errJson.error?.code === 'string' ? errJson.error.code : '';
+      if (code === 'missing_api_key' || code === 'invalid_api_key') {
+        return res.status(401).json({ ok: false, error: 'Invalid Abliteration API key' });
+      }
+      if (response.status === 402 || code === 'billing_error') {
+        return res.status(402).json({
+          ok: false,
+          error: 'Insufficient Abliteration credits — top up at abliteration.ai/console',
+        });
+      }
+      const message =
+        typeof errJson.error?.message === 'string' && errJson.error.message
+          ? errJson.error.message
+          : `Abliteration error (${response.status})`;
+      return res.status(response.status).json({ ok: false, error: message });
+    }
+
+    const json = (await response.json().catch(() => ({}))) as {
+      data?: { total_credits?: unknown; total_usage?: unknown };
+    };
+    res.json({
+      ok: true,
+      total_credits: json.data?.total_credits,
+      total_usage: json.data?.total_usage,
+    });
+  } catch (err) {
+    console.error('Error validating Abliteration key:', err);
+    res.status(500).json({ ok: false, error: 'Failed to reach Abliteration' });
   }
 });
 
