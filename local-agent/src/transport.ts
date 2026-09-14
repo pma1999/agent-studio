@@ -171,7 +171,7 @@ export type AgentToBackendMessage =
 export type BackendToAgentMessage =
   | { type: 'hello_ack'; agentId: string }
   | { type: 'heartbeat_ack' }
-  | { type: 'command_request'; requestId: string; command: string; cwd?: string; timeoutMs: number }
+  | { type: 'command_request'; requestId: string; command: string; cwd?: string; timeoutMs: number; stdin?: string }
   | { type: 'command_cancel'; requestId: string }
   | { type: 'read_file_request'; requestId: string; path: string; offset?: number; limit?: number }
   | { type: 'write_file_request'; requestId: string; path: string; content: string; hasBeenRead: boolean }
@@ -287,7 +287,8 @@ export function parseBackendMessage(raw: string): BackendToAgentMessage | null {
         typeof message.requestId === 'string' &&
         typeof message.command === 'string' &&
         typeof message.timeoutMs === 'number' &&
-        (message.cwd === undefined || typeof message.cwd === 'string')
+        (message.cwd === undefined || typeof message.cwd === 'string') &&
+        (message.stdin === undefined || typeof message.stdin === 'string')
       ) {
         return {
           type: 'command_request',
@@ -295,6 +296,7 @@ export function parseBackendMessage(raw: string): BackendToAgentMessage | null {
           command: message.command,
           cwd: message.cwd as string | undefined,
           timeoutMs: message.timeoutMs,
+          stdin: message.stdin as string | undefined,
         };
       }
       return null;

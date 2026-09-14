@@ -126,9 +126,49 @@ export interface MinimalChildProcess {
   readonly signalCode: NodeJS.Signals | null;
   stdout: { on(event: 'data', listener: (chunk: Buffer | string) => void): unknown } | null;
   stderr: { on(event: 'data', listener: (chunk: Buffer | string) => void): unknown } | null;
+  /**
+   * Present because `spawn()` gives every child a piped stdin whether or not
+   * anyone means to write to it — see `closeStdin()` for why that pipe has to
+   * be closed rather than left dangling.
+   */
+  stdin?: {
+    end(chunk?: string): unknown;
+    on(event: 'error', listener: (error: Error) => void): unknown;
+  } | null;
   on(event: 'close', listener: (code: number | null) => void): unknown;
   on(event: 'error', listener: (error: Error) => void): unknown;
   kill(signal?: NodeJS.Signals | number): boolean;
+}
+
+/**
+ * Writes `stdin` to the child and closes the pipe — and closes it even when
+ * there is nothing to write.
+ *
+ * That unconditional close is the important half, and it fixes a pre-existing
+ * bug rather than merely supporting the new field. `spawn()` hands every child
+ * a piped stdin, and nothing here ever wrote to or closed it, so any command
+ * that read stdin (a Python script doing `sys.stdin.read()`, `cat`, a tool
+ * prompting for confirmation) blocked on a pipe with no writer and no EOF. It
+ * did not fail: it sat there until the timeout backstop killed it, which
+ * reaches the user as a slow mystery instead of an error. Closing the pipe
+ * turns that into an immediate EOF — the command sees empty input and gets on
+ * with it, in milliseconds, saying something useful.
+ *
+ * `EPIPE` is swallowed because it is the ordinary outcome of a child that
+ * exited, or never read stdin, before the write finished: the command's own
+ * exit code and output are what matter, and losing a write race against a
+ * short-lived process is not a failure worth reporting. The listener is
+ * attached before `end()` because an unhandled `error` on a stream is a
+ * process-level crash, not a rejected promise.
+ */
+function closeStdin(child: MinimalChildProcess, stdin: string | undefined): void {
+  if (!child.stdin) return;
+  try {
+    child.stdin.on('error', () => {});
+    child.stdin.end(stdin ?? '');
+  } catch {
+    // Already destroyed, or a test fake without a usable stdin: nothing to do.
+  }
 }
 
 /**
@@ -260,6 +300,7 @@ export function createCommandExecutor(options: CommandExecutorOptions): CommandE
     const invocation = buildShellInvocation(options.shell, request.command);
     const child = spawnFn(invocation, { cwd: resolvedCwd, env: buildSafeEnv() });
     activeChildren.set(request.requestId, child);
+    closeStdin(child, request.stdin);
 
     const backstop = setTimeout(() => killTreeFn(child), request.timeoutMs);
 

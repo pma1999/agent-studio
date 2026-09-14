@@ -210,6 +210,13 @@ export function sendCommandRequest(
   cwd: string | undefined,
   timeoutMs: number,
   onOutputChunk: (chunk: { stream: 'stdout' | 'stderr'; text: string }) => void,
+  /**
+   * Optional text to write to the command's stdin. Only pass this when the
+   * connected agent declares `COMMAND_STDIN_CAPABILITY`
+   * (`getAgentCapabilities(userId)`): an older agent silently ignores the
+   * field, and a command that reads stdin then hangs until its timeout.
+   */
+  stdin?: string,
 ): Promise<CommandResult> {
   const connection = getAgentConnection(userId);
   if (!connection) {
@@ -232,7 +239,7 @@ export function sendCommandRequest(
     pending.timer = startTimeout(requestId, pending);
     pendingRequests.set(requestId, pending);
     try {
-      connection.send({ type: 'command_request', requestId, command, cwd, timeoutMs });
+      connection.send({ type: 'command_request', requestId, command, cwd, timeoutMs, stdin });
     } catch {
       clearTimeout(pending.timer);
       pendingRequests.delete(requestId);

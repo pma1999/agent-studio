@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Shell(ls -la plans/openrouter-provider-selector/ 2>&1; cat plans/openrouter-provider-selector/progress.md 2>&1 | head -n 200; echo \"===\"; cat plans/openrouter-provider-selector/plan.md 2>&1 | head -n 200)",
+      "Shell(git rev-parse HEAD && git status --short && ls plans/ 2>/dev/null; cat package.json | head -60)",
+      "Shell(npx tsx scripts/test-codex-artifact-linkage.ts)",
+      "Shell(echo \"--- shim .cmd de concurrently ---\"; ls node_modules/.bin/ | grep -i concurrently; echo \"--- tipo binario better-sqlite3 ---\"; file node_modules/better-sqlite3/build/Release/better_sqlite3.node 2>/dev/null || find node_modules/better-sqlite3/build -name \"*.node\" -exec file {} \\;; echo \"--- tipo binario bcrypt ---\"; find node_modules/bcrypt/lib/binding -name \"*.node\" -exec file {} \\; 2>/dev/null; echo \"--- deps de producción presentes? ---\"; ls node_modules/express/package.json node_modules/concurrently/package.json node_modules/wait-on/package.json 2>&1)",
+      "mcp__codegraph__codegraph_explore",
+      "Shell(npx tsc -b --noEmit 2 >& 1)"
+    ],
+    "deny": [],
+    "defaultMode": "default"
+  }
+}

@@ -1,11 +1,22 @@
 import assert from 'node:assert/strict';
 import {
+  buildRunSkillScriptTool,
   buildSkillScriptCommand,
   isValidSkillScriptPath,
   resolveScriptInterpreter,
   resolveScriptShellQuoting,
   shellQuoteArg,
 } from '../server/skills/activation.js';
+import {
+  registerAgentConnection,
+  unregisterAgentConnection,
+  type AgentConnection,
+} from '../server/agentRelay/registry.js';
+import type {
+  AgentToBackendMessage,
+  BackendToAgentMessage,
+} from '../server/agentRelay/protocol.js';
+import type { ResolvedSkill } from '../server/skills/resolve.js';
 
 // 1. Interpreter selection is explicit and platform/shell-aware.
 assert.equal(resolveScriptInterpreter('.py', 'linux', 'bash'), 'python3');
@@ -58,5 +69,73 @@ assert.throws(
   () => buildSkillScriptCommand('python', 'scripts/run.py', [adversarialArgument], 'cmd'),
   /run_skill_script is not supported when the connected local agent's shell is cmd/,
 );
+
+// 6. The `stdin` parameter is advertised only to an agent that declares it can
+// deliver it. Offering it to an older agent would be worse than withholding it:
+// the agent drops the field, the script blocks on a stdin that never closes,
+// and it dies at the timeout with nothing in the output explaining why.
+{
+  class FakeConnection implements AgentConnection {
+    private callbacks: Array<(message: AgentToBackendMessage) => void> = [];
+    private connected = true;
+    onClosed: (() => void) | undefined;
+    isConnected() { return this.connected; }
+    send(_message: BackendToAgentMessage) { /* not exercised here */ }
+    onMessage(callback: (message: AgentToBackendMessage) => void) { this.callbacks.push(callback); }
+    close() {
+      if (!this.connected) return;
+      this.connected = false;
+      this.onClosed?.();
+    }
+    getIdentity() { return { platform: 'win32', shell: { kind: 'pwsh', execPath: 'pwsh.exe' } }; }
+    receive(message: AgentToBackendMessage) {
+      for (const callback of this.callbacks) callback(message);
+    }
+  }
+
+  const skills = [{ name: 'zotero-intake', description: 'd' }] as unknown as ResolvedSkill[];
+
+  const properties = (userId: string) => {
+    const tool = buildRunSkillScriptTool(skills, userId);
+    assert.ok(tool, 'a connected agent must yield a run_skill_script tool');
+    return tool.openAIDef.function.parameters.properties as Record<string, unknown>;
+  };
+
+  const hello = (capabilities?: string[]): AgentToBackendMessage => ({
+    type: 'hello',
+    agentVersion: 'test',
+    deviceName: 'test device',
+    platform: 'win32',
+    ...(capabilities ? { capabilities } : {}),
+  });
+
+  // An agent that declares the capability gets the parameter.
+  const modern = new FakeConnection();
+  modern.onClosed = () => unregisterAgentConnection('user-modern', modern);
+  registerAgentConnection('user-modern', modern);
+  modern.receive(hello(['llamacpp', 'command-stdin']));
+  assert.ok(properties('user-modern').stdin, 'an agent declaring command-stdin must be offered stdin');
+
+  // One that connects without declaring it does not — and neither does one that
+  // sends no capabilities at all, which is how every agent paired before the
+  // capability existed presents itself.
+  for (const [userId, capabilities] of [
+    ['user-old-caps', ['llamacpp']],
+    ['user-no-caps', undefined],
+  ] as const) {
+    const legacy = new FakeConnection();
+    legacy.onClosed = () => unregisterAgentConnection(userId, legacy);
+    registerAgentConnection(userId, legacy);
+    legacy.receive(hello(capabilities as string[] | undefined));
+    const props = properties(userId);
+    assert.equal(props.stdin, undefined, `${userId} must not be offered stdin`);
+    // The rest of the tool is unaffected: only the one property is gated.
+    assert.ok(props.name && props.script_path && props.args && props.timeout_seconds);
+    legacy.close();
+  }
+
+  modern.close();
+  console.log('run_skill_script stdin capability gate: OK');
+}
 
 console.log('skill script pure functions: OK');

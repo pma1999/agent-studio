@@ -55,6 +55,22 @@ class FakeChildProcess extends EventEmitter implements MinimalChildProcess {
   signalCode: NodeJS.Signals | null = null;
   stdout = new EventEmitter();
   stderr = new EventEmitter();
+  /**
+   * Records what the executor wrote and whether it closed the pipe.
+   * `endCalls` matters as much as `stdinWritten`: closing stdin even when
+   * there is nothing to write is what gives a stdin-reading command an EOF
+   * instead of an indefinite block (see `closeStdin`).
+   */
+  stdinWritten: (string | undefined)[] = [];
+  endCalls = 0;
+  stdin = {
+    end: (chunk?: string) => {
+      this.endCalls += 1;
+      this.stdinWritten.push(chunk);
+      return true;
+    },
+    on: () => undefined,
+  };
   kill(): boolean {
     return true;
   }
@@ -426,6 +442,118 @@ async function main() {
     }
   } else {
     console.log('(skip) PYTHONIOENCODING regression check: not on win32');
+  }
+
+  // (f) stdin is handed to the child verbatim.
+  {
+    const { spawnFn, children } = makeSpawnFn();
+    const { executor, sent } = makeExecutor({ spawnFn });
+    const payload = 'TY  - JOUR\nTI  - Con acentos: ñ á «»\nER  - \n';
+    await executor.handleCommandRequest({
+      type: 'command_request',
+      requestId: 'stdin-1',
+      command: 'python read_stdin.py',
+      cwd: '.',
+      timeoutMs: 5000,
+      stdin: payload,
+    });
+    children[0].emit('close', 0);
+    assert.equal(children[0].endCalls, 1, 'stdin must be closed exactly once');
+    assert.deepEqual(children[0].stdinWritten, [payload], 'stdin must reach the child unchanged');
+    assert.equal(findResponse(sent).exitCode, 0);
+    console.log('(stdin) text reaches the child verbatim and the pipe is closed: OK');
+  }
+
+  // (g) The one that matters: with no stdin supplied, the pipe is STILL closed.
+  // Previously spawn()'s stdin pipe was never written to nor closed, so any
+  // command that read stdin blocked until the timeout backstop killed it — a
+  // hang with no error to explain it. Closing it unconditionally turns that
+  // into an immediate EOF, which is a strict improvement for every command,
+  // not only the ones that now pass input.
+  {
+    const { spawnFn, children } = makeSpawnFn();
+    const { executor } = makeExecutor({ spawnFn });
+    await executor.handleCommandRequest({
+      type: 'command_request',
+      requestId: 'stdin-2',
+      command: 'python read_stdin.py',
+      cwd: '.',
+      timeoutMs: 5000,
+    });
+    children[0].emit('close', 0);
+    assert.equal(children[0].endCalls, 1, 'stdin must be closed even with nothing to write');
+    assert.deepEqual(
+      children[0].stdinWritten,
+      [''],
+      'an absent stdin must close the pipe with empty input, never leave it open',
+    );
+    console.log('(stdin) an absent stdin still closes the pipe, so a reader gets EOF instead of hanging: OK');
+  }
+
+  // (h) Real process, end to end: a Python child actually receives the text,
+  // and — with nothing supplied — actually reaches EOF and exits rather than
+  // blocking. A fake can only show that end() was called; only a real child
+  // shows that the process on the other side unblocks.
+  if (process.platform === 'win32') {
+    const pythonLauncher = ['python', 'py'].find(
+      (candidate) => spawnSync(candidate, ['--version'], { encoding: 'utf-8' }).status === 0,
+    );
+    if (!pythonLauncher) {
+      console.log('(skip) real-process stdin check: no python launcher on PATH');
+    } else {
+      const shell = createShellDetector()();
+      const readStdin = `${pythonLauncher} -c "import sys; print('GOT:' + repr(sys.stdin.read()))"`;
+      const cases: { label: string; stdin?: string; expected: string }[] = [
+        { label: 'with stdin', stdin: 'hola mundo', expected: "GOT:'hola mundo'" },
+        { label: 'without stdin', stdin: undefined, expected: "GOT:''" },
+      ];
+
+      for (const { label, stdin, expected } of cases) {
+        const sent: AgentToBackendMessage[] = [];
+        let settle: () => void = () => {};
+        const done = new Promise<void>((resolve) => {
+          settle = resolve;
+        });
+        const executor = createCommandExecutor({
+          workspaceRoot: process.cwd(),
+          allowOutsideWorkspace: true,
+          send: (message) => {
+            sent.push(message);
+            if (message.type === 'command_response') settle();
+          },
+          confirmTier2: async () => 'approved',
+          shell,
+        });
+        const started = Date.now();
+        await executor.handleCommandRequest({
+          type: 'command_request',
+          requestId: `stdin-real-${label.replace(/\s+/g, '-')}`,
+          command: readStdin,
+          cwd: '.',
+          timeoutMs: 20000,
+          stdin,
+        });
+        await done;
+        const elapsed = Date.now() - started;
+        const response = findResponse(sent);
+        assert.equal(
+          response.exitCode,
+          0,
+          `python must exit 0 (${label}), stderr: ${response.stderr.slice(0, 300)}`,
+        );
+        assert.ok(
+          response.stdout.includes(expected),
+          `python must report ${expected} (${label}), got: ${JSON.stringify(response.stdout)}`,
+        );
+        assert.ok(
+          elapsed < 15000,
+          `python must finish promptly rather than block on stdin (${label}), took ${elapsed}ms`,
+        );
+        console.log(`(stdin) real python child, ${label}: got ${expected} in ${elapsed}ms: OK`);
+      }
+    }
+  } else {
+    console.log('(skip) real-process stdin check: not on win32');
   }
 
   console.log('\ncommandExecutor: all tests passed');

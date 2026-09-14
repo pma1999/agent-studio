@@ -313,7 +313,12 @@ async function main(): Promise<void> {
         deviceName: os.hostname(),
         platform: process.platform,
         shell,
-        capabilities: ['llamacpp'],
+        // 'command-stdin': this build writes `command_request.stdin` to the
+        // spawned process and closes the pipe. The backend only sends that
+        // field to an agent that declares it — an older agent would ignore it
+        // and leave a stdin-reading command hanging until its timeout, so the
+        // declaration is what makes version skew visible instead of mysterious.
+        capabilities: ['llamacpp', 'command-stdin'],
         onMessage: (message) => {
           dispatch(
             message,

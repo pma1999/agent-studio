@@ -2,11 +2,13 @@ import path from 'node:path';
 import { nanoid } from 'nanoid';
 import db from '../db.js';
 import {
+  getAgentCapabilities,
   getAgentShellInfo,
   isAgentConnected,
   sendCommandRequest,
   sendFileOpRequest,
 } from '../agentRelay/registry.js';
+import { COMMAND_STDIN_CAPABILITY, MAX_COMMAND_STDIN_CHARS } from '../agentRelay/protocol.js';
 import type { ResolvedTool } from '../tools/resolve.js';
 import type { RunToolResult } from '../tools/run.js';
 import { FILE_OP_TIMEOUT_MS } from '../tools/execFileOps.js';
@@ -215,6 +217,40 @@ export function buildReadSkillResourceTool(resolvedSkills: ResolvedSkill[]): Res
 export function buildRunSkillScriptTool(resolvedSkills: ResolvedSkill[], userId: string): ResolvedTool | null {
   if (resolvedSkills.length === 0 || !isAgentConnected(userId)) return null;
 
+  const properties: Record<string, unknown> = {
+    name: {
+      type: 'string',
+      enum: resolvedSkills.map((skill) => skill.name),
+      description: 'Exact name of the skill that owns this script.',
+    },
+    script_path: {
+      type: 'string',
+      description: "Relative path of the script, must start with 'scripts/', exactly as listed in the skill's <skill_resources> block.",
+    },
+    args: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'Optional command-line arguments, one per array element (not a single shell string).',
+    },
+    timeout_seconds: {
+      type: 'number',
+      description: 'Max seconds to wait (default 120, hard ceiling 1800).',
+    },
+  };
+
+  // Advertised only when the connected agent declares it can deliver it.
+  // Offering a parameter the agent on the other end would silently drop is
+  // worse than not offering it at all: the script would block on a stdin that
+  // never closes until its timeout expires, and nothing in the output would
+  // explain why. Omitting the property keeps the model from reaching for it
+  // against an agent that predates the feature.
+  if (getAgentCapabilities(userId)?.includes(COMMAND_STDIN_CAPABILITY)) {
+    properties.stdin = {
+      type: 'string',
+      description: `Optional text piped to the script's standard input, which is then closed. Use it to hand a script content you composed — a document, generated data, a patch — instead of writing a temporary file first. Max ${MAX_COMMAND_STDIN_CHARS} characters.`,
+    };
+  }
+
   return {
     id: 'skill_run_script',
     name: 'run_skill_script',
@@ -228,26 +264,7 @@ export function buildRunSkillScriptTool(resolvedSkills: ResolvedSkill[], userId:
         description: "Execute a bundled script from an activated skill's scripts/ directory on the user's connected local machine (real files, installed tools, persists across calls) and return its stdout, stderr, and exit_code. Only files under a skill's scripts/ directory can be run — not references/ or assets/. A non-zero exit_code or non-empty stderr does not necessarily mean the script failed; inspect the output. Requires a connected local agent.",
         parameters: {
           type: 'object',
-          properties: {
-            name: {
-              type: 'string',
-              enum: resolvedSkills.map((skill) => skill.name),
-              description: 'Exact name of the skill that owns this script.',
-            },
-            script_path: {
-              type: 'string',
-              description: "Relative path of the script, must start with 'scripts/', exactly as listed in the skill's <skill_resources> block.",
-            },
-            args: {
-              type: 'array',
-              items: { type: 'string' },
-              description: 'Optional command-line arguments, one per array element (not a single shell string).',
-            },
-            timeout_seconds: {
-              type: 'number',
-              description: 'Max seconds to wait (default 120, hard ceiling 1800).',
-            },
-          },
+          properties,
           required: ['name', 'script_path'],
           additionalProperties: false,
         },
@@ -428,6 +445,29 @@ async function runSkillScriptTool(
     }
     const timeoutSeconds = Math.min(rawTimeout, MAX_TIMEOUT_SECONDS);
 
+    // Re-checked here and not only when the schema was built: the tool
+    // definition was assembled at the start of the turn, and the agent can
+    // reconnect (or a different machine can take over the pairing) in between.
+    // Refusing with a reason beats sending stdin nobody will read.
+    const rawStdin = args?.stdin;
+    let stdin: string | undefined;
+    if (rawStdin !== undefined) {
+      if (typeof rawStdin !== 'string') {
+        return finish({ error: 'stdin must be a string' }, true);
+      }
+      if (!(getAgentCapabilities(context.userId)?.includes(COMMAND_STDIN_CAPABILITY))) {
+        return finish({
+          error: 'The connected local agent does not support stdin for commands. Update and restart it, or pass the content as a file path argument instead.',
+        }, true);
+      }
+      if (rawStdin.length > MAX_COMMAND_STDIN_CHARS) {
+        return finish({
+          error: `stdin exceeds the ${MAX_COMMAND_STDIN_CHARS} character limit (got ${rawStdin.length}). Write it to a file and pass the path instead.`,
+        }, true);
+      }
+      stdin = rawStdin;
+    }
+
     const row = db.prepare('SELECT storage_dir FROM skills WHERE user_id = ? AND name = ?').get(context.userId, rawName) as { storage_dir: string } | undefined;
     if (!row) return finish({ error: `Skill could not be loaded: ${rawName}` }, true);
 
@@ -519,6 +559,7 @@ async function runSkillScriptTool(
         cwd,
         timeoutSeconds * 1000,
         () => {},
+        stdin,
       );
       auditExitCode = result.exitCode ?? null;
       auditBlockedPattern = result.blockedPattern ?? null;

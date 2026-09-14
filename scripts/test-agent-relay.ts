@@ -20,6 +20,7 @@ const {
 const {
   AgentToBackendMessageSchema,
   BackendToAgentMessageSchema,
+  MAX_COMMAND_STDIN_CHARS,
   hashToken,
   validateAgentToken,
 } = await import('../server/agentRelay/protocol.js');
@@ -589,6 +590,59 @@ migrate();
     console.warn = originalWarn;
   }
   await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+}
+
+// command_request.stdin: accepted by the strict schema, relayed verbatim, and
+// bounded. The schema is `.strict()`, so an undeclared key would be rejected
+// outright — which is precisely why the field had to be added rather than just
+// sent hopefully.
+{
+  const withStdin: BackendToAgentMessage = {
+    type: 'command_request',
+    requestId: 'stdin-schema',
+    command: 'python zotero.py add --stdin',
+    cwd: '.',
+    timeoutMs: 1000,
+    stdin: 'TY  - JOUR\nER  - \n',
+  };
+  assert.deepEqual(BackendToAgentMessageSchema.parse(withStdin), withStdin);
+
+  // Omitted stays omitted: an agent predating the field sees the old shape.
+  const withoutStdin: BackendToAgentMessage = {
+    type: 'command_request',
+    requestId: 'stdin-absent',
+    command: 'whoami',
+    timeoutMs: 1000,
+  };
+  assert.deepEqual(BackendToAgentMessageSchema.parse(withoutStdin), withoutStdin);
+
+  assert.ok(
+    !BackendToAgentMessageSchema.safeParse({
+      ...withStdin,
+      stdin: 'x'.repeat(MAX_COMMAND_STDIN_CHARS + 1),
+    }).success,
+    'stdin past the cap must be rejected by the schema, not truncated silently',
+  );
+
+  const connection = connect('user-stdin');
+  const payload = 'primera linea\nsegunda linea\n';
+  // These never resolve — no agent replies to a FakeConnection — and closing it
+  // below rejects them. Swallow that: the assertion is about what went out on
+  // the wire, not about the reply that never comes.
+  const ignore = () => {};
+  sendCommandRequest('user-stdin', 'stdin-relay', 'python read.py', '.', 1000, ignore, payload).catch(ignore);
+  const relayed = connection.sent.find(
+    (m) => m.type === 'command_request' && m.requestId === 'stdin-relay',
+  ) as Extract<BackendToAgentMessage, { type: 'command_request' }> | undefined;
+  assert.equal(relayed?.stdin, payload, 'stdin must reach the agent unchanged');
+
+  // A caller that passes nothing must not put a value on the wire.
+  sendCommandRequest('user-stdin', 'stdin-relay-none', 'whoami', '.', 1000, ignore).catch(ignore);
+  const plain = connection.sent.find(
+    (m) => m.type === 'command_request' && m.requestId === 'stdin-relay-none',
+  ) as Extract<BackendToAgentMessage, { type: 'command_request' }> | undefined;
+  assert.equal(plain?.stdin, undefined);
+  connection.close();
 }
 
 db.close();

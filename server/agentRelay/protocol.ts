@@ -2,6 +2,21 @@ import crypto from 'node:crypto';
 import { z } from 'zod';
 import db from '../db.js';
 
+/**
+ * Capability an agent declares in its `hello` when it can write `stdin` to a
+ * spawned command. Checked via `getAgentCapabilities()` before any caller puts
+ * `stdin` on a `command_request` — see that field's comment for why sending it
+ * blind to an older agent produces a hang rather than a failure.
+ */
+export const COMMAND_STDIN_CAPABILITY = 'command-stdin';
+
+/**
+ * Ceiling on `command_request.stdin`, in characters. Generous for the intent
+ * (a document, a generated RIS/JSON payload, a patch) while keeping a single
+ * relay frame bounded.
+ */
+export const MAX_COMMAND_STDIN_CHARS = 1_048_576;
+
 export const AgentToBackendMessageSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('hello'),
@@ -207,6 +222,14 @@ export const BackendToAgentMessageSchema = z.discriminatedUnion('type', [
     command: z.string(),
     cwd: z.string().optional(),
     timeoutMs: z.number().int().positive(),
+    // Text written to the spawned process's stdin, which is then closed.
+    // Gated by the agent's declared `command-stdin` capability (§2 capability
+    // gate): an agent built before this field existed ignores it, and the
+    // child would sit waiting on a pipe nobody ever writes until the timeout
+    // killed it — a hang, not an error. So callers check the capability
+    // instead of sending hopefully. Capped because this rides in the same
+    // single WS text frame as the rest of the request.
+    stdin: z.string().max(MAX_COMMAND_STDIN_CHARS).optional(),
   }).strict(),
   z.object({ type: z.literal('command_cancel'), requestId: z.string() }).strict(),
   z.object({
