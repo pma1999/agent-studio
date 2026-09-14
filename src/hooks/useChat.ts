@@ -1,6 +1,7 @@
 import { useCallback, useRef } from 'react';
 import { useStore } from '../stores/store';
-import { streamChat, stopTurn, artifactsApi } from '../api/client';
+import { streamChat, stopTurn, artifactsApi, compactConversation } from '../api/client';
+import type { CompactEndedInfo, CompactFailedDetails, CompactStartedInfo } from '../api/client';
 import { conversationsApi, mcpServersApi, type McpApprovalRequiredData } from '../api/client';
 import { streamCouncilChat } from '../api/councilClient';
 import { buildThread, getTurnVariants } from '../utils/threads';
@@ -47,6 +48,18 @@ export function confirmMcpApproval(approval: McpApprovalRequiredData): boolean {
 
 /** stopTurn capped at ~3s so a hanging backend never freezes the Stop click. */
 const STOP_TURN_TIMEOUT_MS = 3_000;
+
+/** Live compaction turns by conversation (compact-ui). Module-level so the
+ *  per-conversation guard works even though progress state lives in ChatView. */
+const compactInFlightByConversation = new Set<string>();
+
+export interface CompactActiveConversationOptions {
+  model?: string;
+  signal?: AbortSignal;
+  onStarted?: (info: CompactStartedInfo) => void;
+  onEnded?: (info: CompactEndedInfo) => void;
+  onFailed?: (reason: string, details?: CompactFailedDetails) => void;
+}
 
 function stopTurnWithTimeout(conversationId: string, timeoutMs: number): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -510,6 +523,43 @@ export function useChat() {
     }
   }, [loadConversations, loadMessages]);
 
+  /**
+   * Compacts the active conversation (compact-ui). Appended alongside — never
+   * alters `sendMessage`/`sendRegularMessage`. Uses the store directly and
+   * mirrors the `sendRegularMessage` completion reconcile (`loadMessages`
+   * silent + `loadConversations`); failures leave history untouched.
+   * Progress/banner state lives in ChatView (outside `streamsByConversation`).
+   */
+  const compactActiveConversation = useCallback(async (
+    focus?: string | null,
+    opts?: CompactActiveConversationOptions,
+  ): Promise<void> => {
+    const store = useStore.getState();
+    const conversationId = store.activeConversationId;
+    // Per-conversation guard mirrors sendRegularMessage: a stream in ANOTHER
+    // conversation never blocks this one (the server 409 remains the
+    // same-conversation guard for live turns / in-flight compacts).
+    if (!conversationId || store.streamsByConversation[conversationId]) return;
+    if (compactInFlightByConversation.has(conversationId)) return;
+    compactInFlightByConversation.add(conversationId);
+    try {
+      await compactConversation(conversationId, {
+        ...(focus ? { focus } : {}),
+        ...(opts?.model ? { model: opts.model } : {}),
+        ...(opts?.signal ? { signal: opts.signal } : {}),
+        ...(opts?.onStarted ? { onStarted: opts.onStarted } : {}),
+        onEnded: async (ended) => {
+          await store.loadMessages(conversationId, { silent: true });
+          await store.loadConversations(store.selectedAgentId || undefined);
+          opts?.onEnded?.(ended);
+        },
+        ...(opts?.onFailed ? { onFailed: opts.onFailed } : {}),
+      });
+    } finally {
+      compactInFlightByConversation.delete(conversationId);
+    }
+  }, []);
+
   return {
     sendMessage,
     relaunchFromMessage,
@@ -518,5 +568,6 @@ export function useChat() {
     cancelStream,
     startNewChat,
     startGeneralChat,
+    compactActiveConversation,
   };
 }

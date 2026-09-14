@@ -3,6 +3,8 @@ import type {
   Agent,
   Conversation,
   Message,
+  CompactInfo,
+  ContextEstimate,
   View,
   OpenRouterCredits,
   UsageStats,
@@ -63,6 +65,12 @@ interface AppState {
   /** Id of the visible thread's leaf message for the active conversation (null when no tree data). */
   activeLeafId: string | null;
   setActiveLeaf: (messageId: string | null) => void;
+  /** Newest checkpoint descriptor for the ACTIVE conversation (G7 view field;
+   *  null when the visible thread has no checkpoint). Retained from the last
+   *  `loadMessages` payload so the banner renders without an extra fetch. */
+  compaction: CompactInfo | null;
+  /** Advisory context estimate for the ACTIVE conversation (G7/G12). */
+  contextEstimate: ContextEstimate | null;
 
   // Chat state — per-conversation live streams (see ConversationStreamState).
   // A conversation is "streaming" iff streamsByConversation[conversationId] exists;
@@ -272,10 +280,13 @@ export const useStore = create<AppState>((set, get) => ({
     if (id === state.activeConversationId) return state;
     // When switching conversations, seed the active leaf from the selected
     // conversation (the list already carries active_leaf_id), else reset.
+    // View fields reset here; the follow-up loadMessages repopulates them.
     const conversation = id ? state.conversations.find((c) => c.id === id) : undefined;
     return {
       activeConversationId: id,
       activeLeafId: conversation?.active_leaf_id ?? null,
+      compaction: null,
+      contextEstimate: null,
     };
   }),
   updateConversationTitle: (conversationId, title) => set((state) => ({
@@ -289,6 +300,8 @@ export const useStore = create<AppState>((set, get) => ({
   // Messages
   messages: [],
   messagesLoading: false,
+  compaction: null,
+  contextEstimate: null,
   loadMessages: async (conversationId: string, options?: { silent?: boolean }): Promise<MessagesListResponse | undefined> => {
     if (!options?.silent) {
       set({ messagesLoading: true });
@@ -327,6 +340,18 @@ export const useStore = create<AppState>((set, get) => ({
         }
       }
       set({ messages: finalMessages, activeLeafId: finalLeafId, messagesLoading: false });
+      // Retain the additive G7 view fields for the banner + suggest hint.
+      // Older payloads (or mocked fetches) may omit them — degrade to
+      // null/advisory-off rather than crashing.
+      try {
+        const raw = payload as Partial<MessagesListResponse>;
+        set({
+          compaction: (raw.compaction as CompactInfo | null) ?? null,
+          contextEstimate: (raw.context_estimate as ContextEstimate | undefined) ?? null,
+        });
+      } catch {
+        // keep previous view fields
+      }
       return payload;
     } catch (err) {
       console.error('Failed to load messages:', err);

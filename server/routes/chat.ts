@@ -171,6 +171,83 @@ export function excludeReservedSkillToolNames<T extends { name: string }>(
   ];
 }
 
+/**
+ * Compact-view model selection (compact-view task, G10).
+ *
+ * Pure function over the already-mapped thread history (root → leaf): when the
+ * thread contains `role='compaction'` rows, everything up to and including the
+ * LAST one is cut and its stored content is returned as an IN-MEMORY-ONLY
+ * synthetic `{role:'user'}` prefix row (never inserted). Threads without a
+ * compaction row pass through untouched.
+ *
+ * Dangling-head guard: after the cut, a leading `role='tool'` row is dropped,
+ * as is a leading assistant row with non-empty `tool_calls` whose tool rows
+ * were cut (no immediate `tool` rows follow it — a bare tool-calling turn
+ * must never reach the provider). The check repeats once: edits stacked after
+ * a compact can leave two dangling heads, but a turn-atomic tail can only
+ * ever produce one, so two passes are provably enough. `turn_id` is
+ * deliberately NOT consulted (it may be NULL on orphan rows).
+ */
+export interface ModelViewItem {
+  role: string;
+  content?: string | unknown[] | null;
+  tool_call_id?: string;
+  tool_calls?: unknown;
+  annotations?: unknown[];
+}
+
+function modelViewHasToolCalls(item: ModelViewItem): boolean {
+  const tc = item.tool_calls;
+  if (Array.isArray(tc)) return tc.length > 0;
+  if (typeof tc === 'string') {
+    const trimmed = tc.trim();
+    if (!trimmed || trimmed === '[]' || trimmed === 'null') return false;
+    try {
+      const parsed: unknown = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) return parsed.length > 0;
+    } catch {
+      // Non-JSON non-empty string: treat as present (fail safe = drop the orphan).
+    }
+    return true;
+  }
+  return false;
+}
+
+export function selectModelView<T extends ModelViewItem>(threadItems: T[]): {
+  prefixRow: { role: 'user'; content: string } | null;
+  viewRows: T[];
+} {
+  let lastCompIdx = -1;
+  for (let i = 0; i < threadItems.length; i++) {
+    if (threadItems[i]!.role === 'compaction') lastCompIdx = i;
+  }
+  if (lastCompIdx < 0) return { prefixRow: null, viewRows: threadItems };
+  const rawContent = (threadItems[lastCompIdx] as ModelViewItem).content;
+  const prefixContent = typeof rawContent === 'string' ? rawContent : String(rawContent ?? '');
+  let viewRows = threadItems.slice(lastCompIdx + 1);
+  for (let pass = 0; pass < 2; pass++) {
+    if (viewRows.length === 0) break;
+    const head = viewRows[0] as ModelViewItem;
+    if (head.role === 'tool') {
+      viewRows = viewRows.slice(1);
+      continue;
+    }
+    if (head.role === 'assistant' && modelViewHasToolCalls(head)) {
+      let immediateTools = 0;
+      for (let j = 1; j < viewRows.length; j++) {
+        if ((viewRows[j] as ModelViewItem).role === 'tool') immediateTools++;
+        else break;
+      }
+      if (immediateTools === 0) {
+        viewRows = viewRows.slice(1);
+        continue;
+      }
+    }
+    break;
+  }
+  return { prefixRow: { role: 'user', content: prefixContent }, viewRows };
+}
+
 export function buildToolOutputChunkEvent(
   id: string,
   chunk: { stream: 'stdout' | 'stderr'; text: string },
@@ -584,10 +661,10 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     // was just updated to the new user message; buildThreadIds falls back to
     // created_at ASC defensively if the chain is broken or the leaf is missing.
     const historyRows = db.prepare(`
-      SELECT id, parent_id, role, content, tool_call_id, tool_calls, annotations, reasoning_content
+      SELECT id, parent_id, role, content, tool_call_id, tool_calls, annotations, reasoning_content, turn_id
       FROM messages
       WHERE conversation_id = ?
-    `).all(conversation_id) as { id: string; parent_id: string | null; role: string; content: string; tool_call_id: string | null; tool_calls: string | null; annotations: string | null; reasoning_content: string | null }[];
+    `).all(conversation_id) as { id: string; parent_id: string | null; role: string; content: string; tool_call_id: string | null; tool_calls: string | null; annotations: string | null; reasoning_content: string | null; turn_id: string | null }[];
 
     const historyRowById = new Map(historyRows.map((r) => [r.id, r]));
     const freshLeaf = (db.prepare('SELECT active_leaf_id FROM conversations WHERE id = ?').get(conversation_id) as { active_leaf_id: string | null }).active_leaf_id;
@@ -615,6 +692,17 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       return { role: row.role as 'user' | 'assistant', content: row.content };
     });
 
+    // Compact-view cut (G10): threads without a compaction row pass through
+    // EXACTLY as before (selectModelView returns them untouched). After a
+    // compact, the model sees summary+tail only: the stored compaction content
+    // travels as ONE in-memory synthetic user row at index 1; the system
+    // prompt below stays byte-identical so the cache prefix is stable. The
+    // cut runs BEFORE the PDF-multimodal/datetime gates so `messages[lastIdx]`
+    // indexing still targets the current user turn. (`turn_id` is selected
+    // above per contract but intentionally unused: the dangling-head guard
+    // keys on tool presence, never on turn equality.)
+    const { prefixRow: compactionPrefixRow, viewRows: compactViewRows } = selectModelView(history);
+
     // User timezone: request body (browser) overrides stored setting; invalid values are ignored
     const userTimezone =
       (typeof bodyTimezone === 'string' ? bodyTimezone.trim() : null) ||
@@ -624,7 +712,8 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     // System prompt is kept STATIC (no volatile timestamp) so it stays a cacheable prefix.
     let messages: Array<{ role: string; content?: string | unknown[] | null; tool_call_id?: string; tool_calls?: unknown[]; annotations?: unknown[] }> = [
       { role: 'system', content: agent.system_prompt },
-      ...history,
+      ...(compactionPrefixRow ? [compactionPrefixRow] : []),
+      ...compactViewRows,
     ];
 
     // If this turn has PDF attachments, replace the last message (current user) content with OpenRouter multimodal array

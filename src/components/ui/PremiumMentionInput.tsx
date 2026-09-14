@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion';
 import { AtSign, Bot, X, Sparkles, Layers } from 'lucide-react';
 import type { Agent, Skill } from '../../types';
+import { isCompactSlashToken } from '../../utils/compactCommand';
 
 interface PremiumMentionInputProps {
   value: string;
@@ -99,6 +100,9 @@ export function PremiumMentionInput({
     let match;
     while ((match = skillRegex.exec(text)) !== null) {
       const skillName = match[1];
+      // Reserved (G11): `/compact` is a conversation command, never a skill —
+      // excluded even when a skill literally named `compact` exists.
+      if (isCompactSlashToken(skillName)) continue;
       const skill = skills.find(
         (s) => s.name.toLowerCase() === skillName.toLowerCase()
       );
@@ -201,14 +205,26 @@ export function PremiumMentionInput({
       setSkillStartPos(null);
       updateDropdownPosition();
     } else if (slashActive && (!atActive || lastSlashIndex > lastAtIndex)) {
-      setSkillQuery(textAfterSlash);
-      setSkillStartPos(lastSlashIndex);
-      setShowSkillDropdown(true);
-      setSkillHighlightedIndex(0);
-      setShowMentionDropdown(false);
-      setMentionQuery('');
-      setMentionStartPos(null);
-      updateDropdownPosition();
+      // Reserved (G11): the slash token `compact` never opens the skill
+      // dropdown. With the dropdown suppressed, Enter falls through to
+      // onSubmit via the handleKeyDown else-branch — no rewiring needed.
+      if (isCompactSlashToken(textAfterSlash)) {
+        setShowSkillDropdown(false);
+        setSkillQuery('');
+        setSkillStartPos(null);
+        setShowMentionDropdown(false);
+        setMentionQuery('');
+        setMentionStartPos(null);
+      } else {
+        setSkillQuery(textAfterSlash);
+        setSkillStartPos(lastSlashIndex);
+        setShowSkillDropdown(true);
+        setSkillHighlightedIndex(0);
+        setShowMentionDropdown(false);
+        setMentionQuery('');
+        setMentionStartPos(null);
+        updateDropdownPosition();
+      }
     } else {
       setShowMentionDropdown(false);
       setMentionQuery('');

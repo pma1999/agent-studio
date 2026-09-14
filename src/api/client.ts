@@ -3,6 +3,8 @@ import type {
   AgentFormData,
   Conversation,
   Message,
+  CompactInfo,
+  ContextEstimate,
   OpenRouterModel,
   OpenRouterEndpoint,
   UsageStats,
@@ -27,6 +29,7 @@ import type {
 // so vite never bundles from shared/. Nothing here exists yet anywhere else — single source.
 import type { ShareSnapshot, SharedMessage } from '../../shared/shareTypes';
 import type { ChatArtifact, ConversationArtifactsResponse } from '../../shared/artifactTypes';
+import { nanoid } from 'nanoid';
 
 // Node/tsx headless compatibility for store unit tests (vite provides import.meta.env at runtime;
 // tsx/node does not — this guard ensures the API_BASE line below never throws outside vite).
@@ -207,6 +210,11 @@ export const conversationsApi = {
     method: 'PUT',
     body: JSON.stringify({ message_id: messageId }),
   }),
+  /** Branches summary+tail into a new conversation (compact-ui; G7 fork shape). */
+  fork: (id: string, label?: string) => request<Conversation>(`/conversations/${id}/fork`, {
+    method: 'POST',
+    body: JSON.stringify(label ? { label } : {}),
+  }),
 };
 
 // Messages
@@ -217,6 +225,10 @@ export interface MessagesListResponse {
   /** Additive, optional (plan.md S6): id of the live generation turn, present/null
    *  when idle — clients poll for reopen reconciliation while it is set. */
   active_turn_id?: string | null;
+  /** Additive G7 view fields: newest checkpoint descriptor (null when none). */
+  compaction: CompactInfo | null;
+  /** Additive G7/G12 advisory estimate over the current model view. */
+  context_estimate: ContextEstimate;
 }
 
 export const messagesApi = {
@@ -683,6 +695,220 @@ export async function stopTurn(conversationId: string): Promise<void> {
     method: 'POST',
     body: JSON.stringify({ conversation_id: conversationId }),
   });
+}
+
+// Compaction (compact-ui; G7 shapes — dedicated SSE parse, never via streamChat)
+export interface CompactStartedInfo {
+  compaction_id: string;
+  conversation_id: string;
+}
+
+export interface CompactEndedInfo {
+  compaction_id: string;
+  conversation_id: string;
+  tail_message_ids: string[];
+  tokens_before: number;
+  tokens_after: number;
+  pre_compact_leaf_id: string | null;
+  model: string;
+  focus: string | null;
+}
+
+export interface CompactFailedDetails {
+  code?: string;
+  status?: number;
+}
+
+export interface CompactConversationOptions {
+  focus?: string | null;
+  keep_tokens?: number;
+  request_id?: string;
+  model?: string;
+  signal?: AbortSignal;
+  onStarted?: (info: CompactStartedInfo) => void;
+  onEnded?: (info: CompactEndedInfo) => void;
+  onFailed?: (reason: string, details?: CompactFailedDetails) => void;
+}
+
+/**
+ * Runs a compaction turn: `POST /api/conversations/:id/compact` with an SSE
+ * stream of `compaction.started` → terminal `compaction.ended` /
+ * `compaction.failed`. Uses a plain `fetch` (NOT the gateway-retry wrapper —
+ * a retried POST could double-execute); `request_id` is generated per
+ * invocation for server-side coalescing when the caller does not supply one.
+ * Unknown SSE fields are ignored; a stream close without a terminal event
+ * reports `onFailed('Connection closed')`.
+ */
+export async function compactConversation(
+  conversationId: string,
+  options?: CompactConversationOptions,
+): Promise<void> {
+  const onFailed = options?.onFailed;
+  const fail = (reason: string, details?: CompactFailedDetails): void => {
+    onFailed?.(reason, details);
+  };
+  try {
+    const body: Record<string, unknown> = {};
+    if (options?.focus) {
+      body.focus = options.focus;
+    }
+    if (options?.keep_tokens !== undefined) {
+      body.keep_tokens = options.keep_tokens;
+    }
+    // Generated per invocation for coalescing (never reused across calls).
+    body.request_id = options?.request_id ?? nanoid();
+    if (options?.model) {
+      body.model = options.model;
+    }
+
+    // Same fetch shape as streamChat (credentials + auth headers) but WITHOUT
+    // fetchWithGatewayRetry: the turn may have reached the API, so replaying a
+    // 502/503/504 POST could double-execute the compaction.
+    const res = await fetch(`${API_BASE}/conversations/${conversationId}/compact`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        ...getAuthHeaders(),
+      },
+      body: JSON.stringify(body),
+      signal: options?.signal,
+    });
+
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({ error: 'Compact request failed' })) as {
+        error?: string;
+        code?: string;
+      };
+      fail(error.error || `HTTP ${res.status}`, {
+        ...(typeof error.code === 'string' ? { code: error.code } : {}),
+        status: res.status,
+      });
+      return;
+    }
+
+    if (!res.body) {
+      fail('No response body');
+      return;
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let currentEvent: string | null = null;
+    let terminal = false;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) {
+          currentEvent = null;
+          continue;
+        }
+        if (trimmed.startsWith(': ')) continue;
+        if (trimmed.startsWith('event:')) {
+          currentEvent = trimmed.slice(6).trim() || null;
+          continue;
+        }
+        if (!trimmed.startsWith('data: ')) continue;
+
+        const data = trimmed.slice(6);
+        // The compact contract ends the stream after the terminal event (no
+        // `[DONE]`); a lone `[DONE]` therefore means "closed with no terminal".
+        if (data === '[DONE]') {
+          fail('Connection closed');
+          return;
+        }
+
+        try {
+          const parsed = JSON.parse(data) as Record<string, unknown>;
+          if (parsed.error && typeof parsed.error === 'string') {
+            terminal = true;
+            fail(parsed.error);
+            return;
+          }
+          if (
+            currentEvent === 'compaction.started' ||
+            (currentEvent === null &&
+              typeof parsed.compaction_id === 'string' &&
+              typeof parsed.conversation_id === 'string' &&
+              parsed.tail_message_ids === undefined &&
+              parsed.code === undefined)
+          ) {
+            if (
+              typeof parsed.compaction_id === 'string' &&
+              typeof parsed.conversation_id === 'string'
+            ) {
+              options?.onStarted?.({
+                compaction_id: parsed.compaction_id,
+                conversation_id: parsed.conversation_id,
+              });
+            }
+            currentEvent = null;
+            continue;
+          }
+          if (
+            currentEvent === 'compaction.ended' ||
+            (currentEvent === null &&
+              typeof parsed.compaction_id === 'string' &&
+              Array.isArray(parsed.tail_message_ids))
+          ) {
+            terminal = true;
+            options?.onEnded?.({
+              compaction_id: String(parsed.compaction_id ?? ''),
+              conversation_id: String(parsed.conversation_id ?? conversationId),
+              tail_message_ids: (Array.isArray(parsed.tail_message_ids) ? parsed.tail_message_ids : []).filter(
+                (id): id is string => typeof id === 'string',
+              ),
+              tokens_before: typeof parsed.tokens_before === 'number' ? parsed.tokens_before : 0,
+              tokens_after: typeof parsed.tokens_after === 'number' ? parsed.tokens_after : 0,
+              pre_compact_leaf_id:
+                typeof parsed.pre_compact_leaf_id === 'string' ? parsed.pre_compact_leaf_id : null,
+              model: typeof parsed.model === 'string' ? parsed.model : '',
+              focus: typeof parsed.focus === 'string' ? parsed.focus : null,
+            });
+            return;
+          }
+          if (
+            currentEvent === 'compaction.failed' ||
+            (currentEvent === null &&
+              typeof parsed.code === 'string' &&
+              typeof parsed.reason === 'string')
+          ) {
+            terminal = true;
+            fail(
+              typeof parsed.reason === 'string' ? parsed.reason : 'Compaction failed',
+              typeof parsed.code === 'string' ? { code: parsed.code } : undefined,
+            );
+            return;
+          }
+          // Unknown fields ignored.
+          currentEvent = null;
+        } catch {
+          // Skip unparseable chunks
+        }
+      }
+    }
+
+    // Stream ended without an explicit terminal event (e.g. cancelled).
+    if (!terminal) {
+      fail('Connection closed');
+    }
+  } catch (err) {
+    // AbortError is expected when the caller cancels via signal.
+    if (err instanceof Error && err.name === 'AbortError') {
+      fail('Aborted', { code: 'aborted' });
+      return;
+    }
+    fail(err instanceof Error ? err.message : 'Connection failed');
+  }
 }
 
 // Models

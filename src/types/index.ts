@@ -163,7 +163,7 @@ export interface MessageAttachment {
 export interface Message {
   id: string;
   conversation_id: string;
-  role: 'system' | 'user' | 'assistant' | 'tool';
+  role: 'system' | 'user' | 'assistant' | 'tool' | 'compaction';
   content: string;
   tokens_used?: number;
   prompt_tokens?: number;
@@ -191,7 +191,41 @@ export interface Message {
   /** Draft-row lifecycle status (server-side turn survival). Only ever set on
    *  draft assistant rows; NULL/absent on every other row, incl. all legacy rows. */
   generation_status?: 'streaming' | 'complete' | 'error' | 'stopped' | null;
+  /** Compaction checkpoint metadata (server `compaction_meta` JSON column).
+   *  Only ever set on `role='compaction'` rows; absent/null otherwise.
+   *  Kept as `unknown` — readers validate (plain TEXT, no DB-level JSON check). */
+  compaction_meta?: unknown;
   created_at: string;
+}
+
+/** Newest checkpoint descriptor in the visible thread (`GET :id/messages`
+ *  `compaction` view field, G7). `count` is conversation-wide. */
+export interface CompactInfo {
+  id: string;
+  created_at: unknown;
+  model: unknown;
+  tokens_before: unknown;
+  tokens_after: unknown;
+  focus: unknown;
+  pre_compact_leaf_id: unknown;
+  count: number;
+}
+
+/** Advisory context estimate (`GET :id/messages` `context_estimate`, G7/G12). */
+export interface ContextEstimate {
+  tokens: number;
+  limit: number | null;
+  pct: number | null;
+  suggest_compact: boolean;
+}
+
+/** Extended `GET /conversations/:id/messages` response (additive G7 view fields). */
+export interface MessagesListResponse {
+  messages: Message[];
+  active_leaf_id: string | null;
+  active_turn_id?: string | null;
+  compaction: CompactInfo | null;
+  context_estimate: ContextEstimate;
 }
 
 export type PDFEngine = 'pdf-text' | 'mistral-ocr' | 'native';

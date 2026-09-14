@@ -27,6 +27,7 @@ import { isLlamaCppModel, stripLlamaCppPrefix } from '../utils/providers';
 import { effectiveReasoningBudgetV2, LLAMACPP_PRESET_META, overridesForKey, parseLlamaCppActivePreset, parseLlamaCppPresetsRow } from '../utils/llamacppKnobs';
 import { PremiumMentionInput } from './ui/PremiumMentionInput';
 import { Sheet } from './ui/Sheet';
+import { parseCompactCommand } from '../utils/compactCommand';
 import { ConversationTokenSummary, StreamingTokenCounter } from './TokenCounter';
 import { ArtifactPanel } from './artifacts/ArtifactPanel';
 import { ArtifactGallery } from './artifacts/ArtifactGallery';
@@ -44,7 +45,19 @@ import type {
   ProviderRoutingConfig,
   Skill,
   Message,
+  CompactInfo,
 } from '../types';
+
+const COMPACT_FOCUS_MAX = 500;
+const COMPACT_FOCUS_NOTICE_AT = 400;
+
+function compactText(value: unknown): string | null {
+  return typeof value === 'string' && value ? value : null;
+}
+
+function compactNum(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
 
 const MAX_PDF_ATTACHMENTS = 5;
 const MAX_PDF_MB = 20;
@@ -132,7 +145,12 @@ export function ChatView() {
     councilSynthesisPhase,
     activeLeafId,
     setActiveLeaf,
+    loadMessages,
+    setActiveConversationId,
   } = useStore();
+  // Checkpoint banner + advisory hint (G7 view fields retained by loadMessages).
+  const compaction = useStore((s) => s.compaction);
+  const contextEstimate = useStore((s) => s.contextEstimate);
   // Streaming state of THE ACTIVE conversation only: switching to another
   // conversation frees its composer even while this one keeps generating.
   const activeStream = activeConversationId ? streamsByConversation[activeConversationId] : undefined;
@@ -152,7 +170,7 @@ export function ChatView() {
       ))
       .join('|')
   ), [streamingActivityEvents]);
-  const { sendMessage, cancelStream, startNewChat, startGeneralChat, relaunchFromMessage, retryLastAssistant, getActiveThread } = useChat();
+  const { sendMessage, cancelStream, startNewChat, startGeneralChat, relaunchFromMessage, retryLastAssistant, getActiveThread, compactActiveConversation } = useChat();
 
   // ----- Artifacts state (granular selectors) -----
   const artifactsByConversation = useStore((s) => s.artifactsByConversation);
@@ -288,6 +306,14 @@ export function ChatView() {
   const [invokeAgentId, setInvokeAgentId] = useState<string | undefined>(undefined);
   const [invokeSkillNames, setInvokeSkillNames] = useState<string[]>([]);
   const [skills, setSkills] = useState<Skill[]>([]);
+  // Compact-ui local state (G7/G10/G11). Progress lives here — never in
+  // streamsByConversation (reusing beginStream/endStream would fake a chat
+  // stream and trip cancelStream/reopen polling).
+  const [compactingByConversation, setCompactingByConversation] = useState<Record<string, boolean>>({});
+  const [compactNotice, setCompactNotice] = useState<string | null>(null);
+  const [compactError, setCompactError] = useState<string | null>(null);
+  const [dismissedSuggestByConversation, setDismissedSuggestByConversation] = useState<Record<string, boolean>>({});
+  const [compactBusy, setCompactBusy] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const reasoningBtnRef = useRef<HTMLButtonElement>(null);
   const reasoningPopoverRef = useRef<HTMLDivElement>(null);
@@ -636,6 +662,14 @@ export function ChatView() {
     setEditOriginalModel(null);
   }, [activeConversationId, setReasoningOverride]);
 
+  // Compact notices are per-conversation and inline; clear them on switch so
+  // a stale block/error never greets the next conversation. Dismissed suggest
+  // hints are keyed per conversation and intentionally kept.
+  useEffect(() => {
+    setCompactNotice(null);
+    setCompactError(null);
+  }, [activeConversationId]);
+
   // Tool results memo (must be before early return)
   const toolResultsByCallId = useMemo(() => {
     const map = new Map<string, string>();
@@ -867,8 +901,116 @@ export function ChatView() {
     setIsSendingFile(false);
   }, [activeConversationId, addMessage]);
 
+  // Compaction progress for THE ACTIVE conversation only (local state, never a
+  // stream entry). The composer stays disabled until the terminal SSE event.
+  const isCompacting = activeConversationId ? !!compactingByConversation[activeConversationId] : false;
+  const setActiveCompacting = useCallback((running: boolean) => {
+    const id = useStore.getState().activeConversationId;
+    if (!id) return;
+    setCompactingByConversation((prev) => {
+      if (running) return { ...prev, [id]: true };
+      if (!(id in prev)) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  }, []);
+
+  const handleUndoCompact = useCallback(async (info: CompactInfo) => {
+    const id = useStore.getState().activeConversationId;
+    const leaf = compactText(info.pre_compact_leaf_id);
+    if (!id || !leaf || compactBusy) return;
+    setCompactBusy(true);
+    setCompactError(null);
+    try {
+      await conversationsApi.setActiveLeaf(id, leaf);
+      await loadMessages(id, { silent: true });
+      // Banner dismisses on its own: the leaf no longer contains the
+      // checkpoint, so the `compaction` view field comes back null.
+    } catch (err) {
+      setCompactError(err instanceof Error ? err.message : 'Undo failed');
+    } finally {
+      setCompactBusy(false);
+    }
+  }, [compactBusy, loadMessages]);
+
+  const handleForkCompact = useCallback(async () => {
+    const id = useStore.getState().activeConversationId;
+    if (!id || compactBusy) return;
+    setCompactBusy(true);
+    setCompactError(null);
+    try {
+      const next = await conversationsApi.fork(id);
+      setActiveConversationId(next.id);
+      setCurrentView('chat');
+      await loadMessages(next.id);
+      await loadConversations();
+    } catch (err) {
+      setCompactError(err instanceof Error ? err.message : 'Fork failed');
+    } finally {
+      setCompactBusy(false);
+    }
+  }, [compactBusy, loadConversations, loadMessages, setActiveConversationId, setCurrentView]);
+
   const handleSend = useCallback(async () => {
-    if (!inputValue.trim() || isStreaming) return;
+    // `/compact` interception runs BEFORE anything else: the literal never
+    // reaches sendMessage (and so never the model), skill mentions are
+    // dropped, and the composer clears immediately.
+    const compactParsed = parseCompactCommand(inputValue);
+    if (compactParsed) {
+      if (isStreaming) {
+        setCompactNotice('Already generating — stop it first.');
+        return;
+      }
+      if (isCompacting) {
+        setCompactNotice('Compaction already running.');
+        return;
+      }
+      if (pendingAttachments.length > 0) {
+        setCompactNotice('Remove attachments before compacting.');
+        return;
+      }
+      let focus = compactParsed.focus;
+      if (focus && focus.length > COMPACT_FOCUS_MAX) {
+        focus = focus.slice(0, COMPACT_FOCUS_MAX);
+        setCompactNotice(`Focus truncated to ${COMPACT_FOCUS_MAX} characters.`);
+      } else if (focus && focus.length > COMPACT_FOCUS_NOTICE_AT) {
+        setCompactNotice('Focus is long — consider shortening it.');
+      } else {
+        setCompactNotice(null);
+      }
+      setCompactError(null);
+      const outgoingModel = effectiveConversationModel ?? defaultModelForChat;
+      setActiveCompacting(true);
+      // Composer clears at once; the literal is never sent.
+      setInputValue('');
+      setPendingAttachments([]);
+      setInvokeAgentId(undefined);
+      setInvokeSkillNames([]);
+      if (textareaRef.current) {
+        textareaRef.current.style.height = 'auto';
+      }
+      try {
+        await compactActiveConversation(focus, {
+          ...(outgoingModel ? { model: outgoingModel } : {}),
+          onFailed: (reason, details) => {
+            // 409s get the brief's exact notices; other failures surface
+            // reason (+ code) with history untouched.
+            if (details?.code === 'turn_live') {
+              setCompactError('Already generating — stop it first.');
+            } else if (details?.code === 'compact_in_progress') {
+              setCompactError('Compaction already running.');
+            } else {
+              setCompactError(details?.code ? `${reason} (${details.code})` : reason);
+            }
+          },
+        });
+      } finally {
+        setActiveCompacting(false);
+      }
+      return;
+    }
+    if (!inputValue.trim() || isStreaming || isCompacting) return;
 
     let attachmentsPayload: ChatAttachmentInput[] | undefined;
     if (pendingAttachments.length > 0) {
@@ -913,7 +1055,7 @@ export function ChatView() {
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
-  }, [inputValue, isStreaming, pendingAttachments, pdfEngine, sendMessage, invokeAgentId, invokeSkillNames, councilEnabled, councilConfig, selectedCouncilId, effectiveConversationModel, defaultModelForChat, effectiveConversationProviderRouting, defaultProviderRoutingForChat]);
+  }, [inputValue, isStreaming, isCompacting, pendingAttachments, pdfEngine, sendMessage, invokeAgentId, invokeSkillNames, councilEnabled, councilConfig, selectedCouncilId, effectiveConversationModel, defaultModelForChat, effectiveConversationProviderRouting, defaultProviderRoutingForChat, compactActiveConversation, setActiveCompacting]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -942,8 +1084,10 @@ export function ChatView() {
     );
   }
 
-  // Build the visible thread (root → active leaf), including streaming placeholders
-  const displayMessages = activeThread.filter((m) => m.role !== 'tool');
+  // Build the visible thread (root → active leaf), including streaming placeholders.
+  // `tool` rows render through the activity timeline, and `compaction`
+  // checkpoints render as the banner below (G10) — never as message bubbles.
+  const displayMessages = activeThread.filter((m) => m.role !== 'tool' && m.role !== 'compaction');
   const lastMsg = displayMessages[displayMessages.length - 1];
   // Error bubbles are temp- prefixed but carry their FINAL content — they must
   // render through the normal content path, not as an empty streaming placeholder.
@@ -1141,6 +1285,108 @@ export function ChatView() {
             </motion.div>
           ) : (
             <>
+              {/* Checkpoint banner (G10): renders from the `compaction` view
+                  field — never from SSE payload alone, and never as bubbles
+                  (compaction rows are filtered out of displayMessages). */}
+              {compaction && (() => {
+                const tokensBefore = compactNum(compaction.tokens_before);
+                const tokensAfter = compactNum(compaction.tokens_after);
+                const model = compactText(compaction.model);
+                const at = compactText(compaction.created_at);
+                const focus = compactText(compaction.focus);
+                const count = typeof compaction.count === 'number' ? compaction.count : 0;
+                const canUndo = !!compactText(compaction.pre_compact_leaf_id) && !compactBusy;
+                let when: string | null = null;
+                if (at) {
+                  try {
+                    when = new Date(at).toLocaleString();
+                  } catch {
+                    when = at;
+                  }
+                }
+                return (
+                  <div
+                    role="status"
+                    aria-label="Compaction checkpoint"
+                    style={{
+                      margin: '12px 0',
+                      padding: '10px 12px',
+                      background: 'var(--bg-surface)',
+                      border: '1px solid var(--border)',
+                      borderRadius: 'var(--radius-md)',
+                      fontSize: '0.8125rem',
+                      color: 'var(--text-secondary)',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '8px',
+                    }}
+                  >
+                    <div>
+                      <strong style={{ color: 'var(--text-primary)', fontWeight: 600 }}>
+                        Conversation compacted
+                      </strong>
+                      <span>
+                        {' · '}
+                        {tokensBefore !== null ? tokensBefore.toLocaleString() : '?'}
+                        {' → '}
+                        {tokensAfter !== null ? tokensAfter.toLocaleString() : '?'}
+                        {' tokens'}
+                        {model ? ` · ${model}` : ''}
+                        {when ? ` · ${when}` : ''}
+                        {focus ? ` · Focus: ${focus}` : ''}
+                      </span>
+                    </div>
+                    {count >= 2 && (
+                      <div style={{ color: 'var(--state-warning, var(--text-muted))' }}>
+                        Long threads and multiple compactions can make the model less accurate — start a new thread when possible.
+                      </div>
+                    )}
+                    <div style={{ color: 'var(--text-muted)' }}>
+                      Ask: summarize where we are
+                    </div>
+                    <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                      <button
+                        type="button"
+                        onClick={() => void handleUndoCompact(compaction)}
+                        disabled={!canUndo}
+                        aria-label="Undo compaction"
+                        style={{
+                          padding: '4px 10px',
+                          fontSize: '0.75rem',
+                          fontFamily: 'var(--font-body)',
+                          color: 'var(--text-secondary)',
+                          background: 'var(--bg-base)',
+                          border: '1px solid var(--border)',
+                          borderRadius: 'var(--radius-sm)',
+                          cursor: canUndo ? 'pointer' : 'not-allowed',
+                          opacity: canUndo ? 1 : 0.6,
+                        }}
+                      >
+                        {compactBusy ? 'Working…' : 'Undo'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleForkCompact()}
+                        disabled={compactBusy}
+                        aria-label="Fork compacted conversation"
+                        style={{
+                          padding: '4px 10px',
+                          fontSize: '0.75rem',
+                          fontFamily: 'var(--font-body)',
+                          color: 'var(--text-secondary)',
+                          background: 'var(--bg-base)',
+                          border: '1px solid var(--border)',
+                          borderRadius: 'var(--radius-sm)',
+                          cursor: compactBusy ? 'not-allowed' : 'pointer',
+                          opacity: compactBusy ? 0.6 : 1,
+                        }}
+                      >
+                        {compactBusy ? 'Working…' : 'Fork'}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })()}
               {/* Council Streaming View */}
               {(councilEnabled || councilMemberProgress.size > 0) && isStreaming && (
                 <CouncilStreamingView
@@ -1841,17 +2087,85 @@ export function ChatView() {
                   setInvokeAgentId(agentId);
                   setInvokeSkillNames(skillNames ?? []);
                 }}
-                disabled={isStreaming}
-                placeholder={isStreaming ? 'Waiting for response...' : 'Send a message... Use @ to mention an agent, / to invoke a skill'}
+                disabled={isStreaming || isCompacting}
+                placeholder={isStreaming || isCompacting ? 'Waiting for response...' : 'Send a message... Use @ to mention an agent, / to invoke a skill'}
                 agents={agents}
                 skills={skills}
                 onSubmit={handleSend}
-                submitDisabled={!inputValue.trim() || isStreaming}
+                submitDisabled={!inputValue.trim() || isStreaming || isCompacting}
                 onFocus={() => setComposerFocused(true)}
                 onBlur={() => setComposerFocused(false)}
                 minRows={1}
                 maxRows={10}
               />
+              {/* Compact notices + advisory hint (inline, composer-local) */}
+              {(isCompacting || compactNotice || compactError || (
+                !!contextEstimate?.suggest_compact &&
+                !!activeConversationId &&
+                !dismissedSuggestByConversation[activeConversationId] &&
+                !isCompacting
+              )) && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', padding: '8px 14px 0' }}>
+                  {isCompacting && (
+                    <span role="status" aria-live="polite" style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                      Compacting…
+                    </span>
+                  )}
+                  {compactNotice && (
+                    <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                      {compactNotice}
+                    </span>
+                  )}
+                  {compactError && (
+                    <span role="alert" style={{ fontSize: '0.75rem', color: 'var(--error)' }}>
+                      {compactError}
+                    </span>
+                  )}
+                  {!!contextEstimate?.suggest_compact &&
+                    !!activeConversationId &&
+                    !dismissedSuggestByConversation[activeConversationId] &&
+                    !isCompacting && (
+                    <span style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                      <button
+                        type="button"
+                        onClick={() => setInputValue('/compact ')}
+                        title="Fill the composer with /compact"
+                        style={{
+                          padding: 0,
+                          border: 'none',
+                          background: 'none',
+                          color: 'var(--accent)',
+                          cursor: 'pointer',
+                          fontSize: '0.75rem',
+                          fontFamily: 'var(--font-body)',
+                        }}
+                      >
+                        Consider /compact…
+                      </button>
+                      <button
+                        type="button"
+                        aria-label="Dismiss compact suggestion"
+                        onClick={() => {
+                          const id = useStore.getState().activeConversationId;
+                          if (!id) return;
+                          setDismissedSuggestByConversation((prev) => ({ ...prev, [id]: true }));
+                        }}
+                        style={{
+                          padding: 0,
+                          border: 'none',
+                          background: 'none',
+                          color: 'var(--text-muted)',
+                          cursor: 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                        }}
+                      >
+                        <X size={12} />
+                      </button>
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
             {/* Send / Stop button — Stop is offered both for a locally attached
                 stream and while reconciling a server-side turn (the rewritten
@@ -1894,15 +2208,15 @@ export function ChatView() {
                 className="chat-send-btn"
                 aria-label="Send message"
                 onClick={handleSend}
-                disabled={!inputValue.trim()}
+                disabled={!inputValue.trim() || isCompacting}
                 style={{
                   width: '44px',
                   height: '44px',
                   borderRadius: 'var(--radius-md)',
-                  background: inputValue.trim() ? 'var(--accent)' : 'var(--bg-elevated)',
+                  background: inputValue.trim() && !isCompacting ? 'var(--accent)' : 'var(--bg-elevated)',
                   border: '1px solid transparent',
-                  color: inputValue.trim() ? 'var(--text-inverse)' : 'var(--text-muted)',
-                  cursor: inputValue.trim() ? 'pointer' : 'not-allowed',
+                  color: inputValue.trim() && !isCompacting ? 'var(--text-inverse)' : 'var(--text-muted)',
+                  cursor: inputValue.trim() && !isCompacting ? 'pointer' : 'not-allowed',
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
@@ -1910,13 +2224,13 @@ export function ChatView() {
                   transition: 'all var(--transition-fast)',
                 }}
                 onMouseEnter={(e) => {
-                  if (inputValue.trim()) {
+                  if (inputValue.trim() && !isCompacting) {
                     e.currentTarget.style.background = 'var(--accent-hover)';
                     e.currentTarget.style.boxShadow = 'var(--shadow-glow)';
                   }
                 }}
                 onMouseLeave={(e) => {
-                  if (inputValue.trim()) {
+                  if (inputValue.trim() && !isCompacting) {
                     e.currentTarget.style.background = 'var(--accent)';
                     e.currentTarget.style.boxShadow = 'none';
                   }

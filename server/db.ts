@@ -1049,6 +1049,69 @@ export function migrate() {
   if (!msgColsForTurnTracking.some((c) => c.name === 'generation_status')) {
     db.exec("ALTER TABLE messages ADD COLUMN generation_status TEXT DEFAULT NULL");
   }
+  // --- Compaction checkpoints: `role='compaction'` + `compaction_meta` ---
+  // Additive migration for /compact handoff summaries. Runs after every other
+  // messages-table migration so no earlier rebuild can drop the new column,
+  // and before the boot self-heal sweep below so the sweep still runs last
+  // on the final table shape.
+  const msgColsForCompaction = db.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
+  if (!msgColsForCompaction.some((c) => c.name === 'compaction_meta')) {
+    db.exec("ALTER TABLE messages ADD COLUMN compaction_meta TEXT DEFAULT NULL");
+  }
+  // SQLite cannot ALTER a CHECK constraint, so widen the role CHECK via the
+  // guarded recreate-copy-rename pattern (precedent: the tool-role block
+  // above). DDL is built from live PRAGMA (+ foreign_key_list) so every
+  // current column, default, FK, and index survives; only the role CHECK
+  // text changes. Guarded by sqlite_master text: re-runs are a no-op.
+  const compactionTableInfo = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='messages'").get() as { sql: string } | undefined;
+  if (!compactionTableInfo?.sql?.includes("'compaction'")) {
+    type CompactionPragmaCol = { name: string; type: string; notnull: number; dflt_value: string | null; pk: number };
+    type CompactionFk = { table: string; from: string; to: string; on_update: string; on_delete: string };
+    const liveMsgCols = db.prepare("PRAGMA table_info(messages)").all() as CompactionPragmaCol[];
+    const liveMsgFks = db.prepare("PRAGMA foreign_key_list(messages)").all() as CompactionFk[];
+    const fkByFrom = new Map(liveMsgFks.map((f) => [f.from, f]));
+    const compactionColDefs = liveMsgCols.map((c) => {
+      let def = `"${c.name}" ${c.type}`;
+      if (c.pk) def += ' PRIMARY KEY';
+      if (c.notnull) def += ' NOT NULL';
+      // PRAGMA strips the parens from expression defaults (created_at reports
+      // `datetime('now')`), but SQLite only accepts a bare function call
+      // inside DEFAULT when parenthesized — re-wrap non-literals.
+      if (c.dflt_value !== null && c.dflt_value !== undefined) {
+        const dv = c.dflt_value.trim();
+        const isLiteral = /^-?(\d+(\.\d+)?|'.*')$/s.test(dv) || /^(NULL|TRUE|FALSE|CURRENT_TIME|CURRENT_DATE|CURRENT_TIMESTAMP)$/i.test(dv);
+        def += isLiteral || dv.startsWith('(') ? ` DEFAULT ${dv}` : ` DEFAULT (${dv})`;
+      }
+      const fk = fkByFrom.get(c.name);
+      if (fk) {
+        def += ` REFERENCES "${fk.table}"("${fk.to}")`;
+        if (fk.on_delete !== 'NO ACTION') def += ` ON DELETE ${fk.on_delete}`;
+        if (fk.on_update !== 'NO ACTION') def += ` ON UPDATE ${fk.on_update}`;
+      }
+      if (c.name === 'role') def += ` CHECK(role IN ('system', 'user', 'assistant', 'tool', 'compaction'))`;
+      return def;
+    });
+    const compactionColNames = liveMsgCols.map((c) => `"${c.name}"`).join(', ');
+    const compactionIndexes = (
+      db.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='messages' AND sql IS NOT NULL").all() as { sql: string }[]
+    ).map((r) => r.sql);
+    // foreign_keys must be OFF: DROP TABLE messages would otherwise fire the
+    // conversations FK cascade and wipe every message (same rationale as above).
+    db.pragma('foreign_keys = OFF');
+    try {
+      db.transaction(() => {
+        db.exec(`CREATE TABLE messages_new (${compactionColDefs.join(', ')})`);
+        db.exec(`INSERT INTO messages_new (${compactionColNames}) SELECT ${compactionColNames} FROM messages`);
+        db.exec('DROP TABLE messages');
+        db.exec('ALTER TABLE messages_new RENAME TO messages');
+        for (const sql of compactionIndexes) db.exec(sql);
+      })();
+      console.log("[Agent Studio] Migrated messages: role now allows 'compaction'");
+    } finally {
+      db.pragma('foreign_keys = ON');
+    }
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_messages_compaction_conv_created ON messages(conversation_id, created_at)');
   // Boot self-heal: a fresh process owns zero live turns, so any leftover
   // 'streaming' draft or claimed turn left by a dead process is stale.
   db.prepare("UPDATE messages SET generation_status = 'error' WHERE generation_status = 'streaming'").run();
