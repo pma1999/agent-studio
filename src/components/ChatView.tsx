@@ -28,6 +28,11 @@ import { effectiveReasoningBudgetV2, LLAMACPP_PRESET_META, overridesForKey, pars
 import { PremiumMentionInput } from './ui/PremiumMentionInput';
 import { Sheet } from './ui/Sheet';
 import { parseCompactCommand } from '../utils/compactCommand';
+import {
+  placeCheckpoints,
+  readCompactionMeta,
+  checkpointSummaryText,
+} from '../utils/compactCards';
 import { ConversationTokenSummary, StreamingTokenCounter } from './TokenCounter';
 import { ArtifactPanel } from './artifacts/ArtifactPanel';
 import { ArtifactGallery } from './artifacts/ArtifactGallery';
@@ -321,11 +326,12 @@ export function ChatView() {
   const [lastCompact, setLastCompact] = useState<{
     convId: string;
     compactionId: string;
-    tailIds: string[];
     messagesCompacted: number | null;
     at: number;
   } | null>(null);
-  const [summaryOpen, setSummaryOpen] = useState(false);
+  // Summary disclosure is per checkpoint: every checkpoint on the thread keeps
+  // its own card, so a single boolean would open/close all of them at once.
+  const [openSummaries, setOpenSummaries] = useState<Record<string, boolean>>({});
   const scrolledForRef = useRef<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const reasoningBtnRef = useRef<HTMLButtonElement>(null);
@@ -682,13 +688,8 @@ export function ChatView() {
     setCompactNotice(null);
     setCompactError(null);
     setLastCompact(null);
-    setSummaryOpen(false);
+    setOpenSummaries({});
   }, [activeConversationId]);
-
-  // Collapse an expanded summary when a different checkpoint arrives.
-  useEffect(() => {
-    setSummaryOpen(false);
-  }, [compaction?.id]);
 
   // Tool results memo (must be before early return)
   const toolResultsByCallId = useMemo(() => {
@@ -766,53 +767,26 @@ export function ChatView() {
     return map;
   }, [messages]);
 
-  // Post-compaction card derivations (compact-indicator). `activeThread` is the
-  // source of `displayMessages` (same tool/compaction filter), so `anchorIndex`
-  // matches the index inside the rendered `displayMessages` array.
+  // Post-compaction card placement (compact-indicator).
+  //
+  // Every `role='compaction'` row sits in `activeThread` at the exact point
+  // where it was created (its `parent_id` is the pre-compact leaf), so the
+  // cards are rendered FROM the thread itself: one per checkpoint, at its own
+  // position, all of them coexisting. Nothing is anchored off
+  // `tail_message_ids` any more — there is no verbatim tail to anchor to.
   const fresh = useMemo(() => (
     !!compaction && !!lastCompact && !!activeConversationId &&
     lastCompact.convId === activeConversationId &&
     lastCompact.compactionId === compaction.id
   ), [compaction, lastCompact, activeConversationId]);
 
-  const descTail = useMemo(() => {
-    if (!compaction) return null;
-    const raw = compaction.tail_message_ids;
-    if (!Array.isArray(raw)) return null;
-    return raw.filter((x): x is string => typeof x === 'string');
-  }, [compaction]);
-
-  const anchorIds = useMemo(() => (
-    descTail ?? (fresh && lastCompact ? lastCompact.tailIds : null)
-  ), [descTail, fresh, lastCompact]);
-
-  const anchorIndex = useMemo(() => {
-    if (!anchorIds || anchorIds.length === 0) return -1;
-    const set = new Set(anchorIds);
-    const visible = activeThread.filter((m) => m.role !== 'tool' && m.role !== 'compaction');
-    return visible.findIndex((m) => set.has(m.id));
-  }, [anchorIds, activeThread]);
-
-  const archived = useMemo(() => (
-    compaction
-      ? (compactNum(compaction.messages_compacted) ?? (fresh && lastCompact ? lastCompact.messagesCompacted : null))
-      : null
-  ), [compaction, fresh, lastCompact]);
-
-  const kept = useMemo(() => (anchorIds?.length ?? null), [anchorIds]);
-
-  const summaryText = useMemo(() => {
-    if (!compaction) return null;
-    const row = messages.find((m) => m.role === 'compaction' && m.id === compaction.id);
-    const content = row?.content;
-    if (typeof content !== 'string' || !content) return null;
-    // Local copy of SUMMARY_PREFIX (server/compaction/prompt.ts L12-13), cited
-    // not imported: server modules must never leak into the client bundle.
-    const SUMMARY_PREFIX_LOCAL =
-      'Another language model summarized this conversation so it could continue in a smaller context. Use the summary as prior state; the verbatim tail after it is newest. Do not duplicate completed work. Summary:\n';
-    if (content.startsWith(SUMMARY_PREFIX_LOCAL)) return content.slice(SUMMARY_PREFIX_LOCAL.length);
-    return content;
-  }, [compaction, messages]);
+  /**
+   * Checkpoints of the visible thread, keyed by the index (inside
+   * `displayMessages`) of the first message rendered AFTER them. Checkpoints
+   * with no message after them — the normal case right after compacting —
+   * collect in `trailing` and render at the bottom of the list.
+   */
+  const checkpointPlacement = useMemo(() => placeCheckpoints(activeThread), [activeThread]);
 
   // One auto-scroll per fresh compaction (guarded by id; `fresh` already gates
   // on the active conversation, and the guard key makes a switch-back safe).
@@ -1076,7 +1050,6 @@ export function ChatView() {
             setLastCompact({
               convId: cur,
               compactionId: ended.compaction_id,
-              tailIds: (ended.tail_message_ids ?? []).filter((x): x is string => typeof x === 'string'),
               messagesCompacted: typeof ended.messages_compacted === 'number' &&
                 Number.isFinite(ended.messages_compacted) ? ended.messages_compacted : null,
               at: Date.now(),
@@ -1182,17 +1155,28 @@ export function ChatView() {
   // render through the normal content path, not as an empty streaming placeholder.
   const isLastMsgStreamingPlaceholder = lastMsg && lastMsg.role === 'assistant' && lastMsg.id.startsWith('temp-') && !lastMsg.id.startsWith('temp-error-');
 
-  // Post-compaction inline card (compact-indicator): persistent stats derived
-  // from `compaction` (+ fresh `lastCompact` fallback) with the checkpoint text
-  // read from the `role='compaction'` row in `messages[]`. Complements the
-  // banner above — no Undo/Fork, no precision notice (banner property).
-  const compactCard = (() => {
-    if (!compaction) return null;
-    const tokensBefore = compactNum(compaction.tokens_before);
-    const tokensAfter = compactNum(compaction.tokens_after);
-    const model = compactText(compaction.model);
-    const at = compactText(compaction.created_at);
-    const focus = compactText(compaction.focus);
+  // Post-compaction inline card (compact-indicator): ONE card per checkpoint
+  // row of the visible thread, rendered at that row's own position. Stats come
+  // from the row's own `compaction_meta` (so old checkpoints keep their own
+  // numbers instead of borrowing the newest ones); the newest checkpoint falls
+  // back to the `compaction` view field and, while fresh, to `lastCompact`.
+  // Complements the banner above — no Undo/Fork, no precision notice (banner
+  // property).
+  const renderCompactCard = (row: Message) => {
+    const meta = readCompactionMeta(row.compaction_meta);
+    const isNewest = !!compaction && compaction.id === row.id;
+    const isFresh = isNewest && fresh;
+    const tokensBefore =
+      compactNum(meta.tokens_before) ?? (isNewest ? compactNum(compaction?.tokens_before) : null);
+    const tokensAfter =
+      compactNum(meta.tokens_after) ?? (isNewest ? compactNum(compaction?.tokens_after) : null);
+    const archived =
+      compactNum(meta.messages_compacted) ??
+      (isNewest ? compactNum(compaction?.messages_compacted) : null) ??
+      (isFresh && lastCompact ? lastCompact.messagesCompacted : null);
+    const model = compactText(meta.model) ?? compactText(row.model) ?? (isNewest ? compactText(compaction?.model) : null);
+    const at = compactText(row.created_at) ?? (isNewest ? compactText(compaction?.created_at) : null);
+    const focus = compactText(meta.focus) ?? (isNewest ? compactText(compaction?.focus) : null);
     let when: string | null = null;
     if (at) {
       try {
@@ -1201,19 +1185,22 @@ export function ChatView() {
         when = at;
       }
     }
-    const summaryId = `compact-summary-${compaction.id}`;
+    const summaryText = checkpointSummaryText(row.content);
+    const summaryId = `compact-summary-${row.id}`;
+    const summaryOpen = !!openSummaries[row.id];
     return (
       <motion.div
+        key={`compact-card-${row.id}`}
         role="status"
         aria-label="Compaction summary"
-        initial={fresh && !prefersReducedMotion ? { opacity: 0, y: 6 } : false}
+        initial={isFresh && !prefersReducedMotion ? { opacity: 0, y: 6 } : false}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.25, ease: [0.4, 0, 0.2, 1] }}
         style={{
           margin: '12px 0',
           padding: '10px 12px',
           background: 'var(--bg-surface)',
-          border: `1px solid ${fresh ? 'var(--border-accent)' : 'var(--border)'}`,
+          border: `1px solid ${isFresh ? 'var(--border-accent)' : 'var(--border)'}`,
           borderRadius: 'var(--radius-md)',
           fontSize: '0.8125rem',
           color: 'var(--text-secondary)',
@@ -1235,13 +1222,12 @@ export function ChatView() {
               {tokensAfter !== null ? tokensAfter.toLocaleString() : '?'}
               {' tokens'}
               {archived !== null ? ` · ${archived.toLocaleString()} archived` : ''}
-              {kept !== null ? ` · ${kept.toLocaleString()} kept` : ''}
               {model ? ` · ${model}` : ''}
               {when ? ` · ${when}` : ''}
               {focus ? ` · Focus: ${focus}` : ''}
             </span>
           </span>
-          {fresh && (
+          {isFresh && (
             <span
               style={{
                 fontSize: '0.6875rem',
@@ -1265,7 +1251,7 @@ export function ChatView() {
               className="message-older-variant-banner-link"
               aria-expanded={summaryOpen}
               aria-controls={summaryId}
-              onClick={() => setSummaryOpen((v) => !v)}
+              onClick={() => setOpenSummaries((prev) => ({ ...prev, [row.id]: !prev[row.id] }))}
               style={{
                 background: 'none',
                 border: 'none',
@@ -1296,7 +1282,7 @@ export function ChatView() {
         )}
       </motion.div>
     );
-  })();
+  };
 
   return (
     <div
@@ -1592,9 +1578,6 @@ export function ChatView() {
                   </div>
                 );
               })()}
-              {/* Post-compaction card fallback: anchor unresolved (old payload,
-                  variant changed) → pinned under the banner, never duplicated. */}
-              {anchorIndex === -1 && compactCard}
               {/* Council Streaming View */}
               {(councilEnabled || councilMemberProgress.size > 0) && isStreaming && (
                 <CouncilStreamingView
@@ -1638,7 +1621,7 @@ export function ChatView() {
                 i === displayMessages.length - 1;
               return (
                 <React.Fragment key={msg.id}>
-                  {i === anchorIndex && compactCard}
+                  {checkpointPlacement.before.get(i)?.map(renderCompactCard)}
                   <MessageBubble
                   message={msg}
                   isStreaming={isLiveMsg}
@@ -1675,6 +1658,9 @@ export function ChatView() {
                 </React.Fragment>
               );
             })}
+            {/* Checkpoints with nothing after them yet — i.e. a compaction that
+                just ran: the card lands where it happened, at the bottom. */}
+            {checkpointPlacement.trailing.map(renderCompactCard)}
             </>
           )}
 

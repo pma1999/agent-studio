@@ -6,9 +6,6 @@ import {
   buildCompactionPrompt,
 } from '../server/compaction/prompt.js';
 import {
-  DEFAULT_KEEP_TOKENS,
-  KEEP_MIN,
-  KEEP_MAX,
   COMPACTION_BUFFER,
   TOOL_OUTPUT_MAX_CHARS,
   SUMMARY_MAX_TOKENS,
@@ -152,9 +149,7 @@ test('serialized head is embedded', () => {
 
 // --- policy constants ---
 test('policy budget constants', () => {
-  assert.equal(DEFAULT_KEEP_TOKENS, 8000);
-  assert.equal(KEEP_MIN, 2000);
-  assert.equal(KEEP_MAX, 15000);
+  // No keep-budget constants: a checkpoint archives the whole visible slice.
   assert.equal(COMPACTION_BUFFER, 20000);
   assert.equal(TOOL_OUTPUT_MAX_CHARS, 2000);
   assert.equal(SUMMARY_MAX_TOKENS, 4096);

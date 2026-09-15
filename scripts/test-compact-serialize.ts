@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 
 import {
   estimateTokens,
-  selectTail,
   serializeHead,
   validateSummaryTemplate,
   type CompactRow,
@@ -155,114 +154,6 @@ test('array content flattens to text parts with file/image descriptors', () => {
 
 test('null content contributes no text line', () => {
   assert.equal(serializeHead([userRow('u1', null)]), '');
-});
-
-// --- selectTail ---
-test('newest turn always kept whole even when over a tiny (clamped) budget', () => {
-  const rows = [
-    userRow('u1', 'old question', 't1'),
-    assistantRow('a1', 'old answer', 't1'),
-    userRow('u2', 'n'.repeat(9000), 't2'),
-    assistantRow('a2', 'new answer', 't2'),
-  ];
-  const sel = selectTail(rows, 100); // clamps to 2000; newest turn alone is ~2250+ tokens
-  assert.deepEqual(sel.tailIds, ['u2', 'a2']);
-  assert.deepEqual(
-    sel.tailRows.map((r) => r.id),
-    ['u2', 'a2'],
-  );
-  assert.ok(sel.estimatedTokens > 2000, `expected over-budget tail, got ${sel.estimatedTokens}`);
-});
-
-test('assistant tool_calls + tool rows in one turn travel together (included)', () => {
-  const rows = [
-    userRow('u0', 'o'.repeat(9000), 't0'), // ~2250t, too old to fit
-    assistantRow('a1', '', 't1', { tool_calls: TOOL_CALLS_JSON }),
-    toolRow('t1r', 'tool says hi', 't1'),
-    userRow('u2', 'new q', 't2'),
-    assistantRow('a2', 'new a', 't2'),
-  ];
-  const sel = selectTail(rows, 2000);
-  assert.deepEqual(sel.tailIds, ['a1', 't1r', 'u2', 'a2']);
-});
-
-test('oversized tool pair excluded as a unit (never half a pair)', () => {
-  const rows = [
-    assistantRow('a1', '', 't1', { tool_calls: TOOL_CALLS_JSON }),
-    toolRow('t1r', 'z'.repeat(9000), 't1'), // pair alone ~2250t
-    userRow('u2', 'new q', 't2'),
-  ];
-  const sel = selectTail(rows, 2000);
-  assert.deepEqual(sel.tailIds, ['u2']);
-});
-
-test('oversized newest tool pair kept whole via the newest-turn floor', () => {
-  const rows = [
-    userRow('u0', 'old', 't0'),
-    assistantRow('a1', '', 't1', { tool_calls: TOOL_CALLS_JSON }),
-    toolRow('t1r', 'z'.repeat(9000), 't1'),
-  ];
-  const sel = selectTail(rows, 2000);
-  assert.deepEqual(sel.tailIds, ['a1', 't1r']);
-});
-
-test('rows with null turn_id are never selected', () => {
-  const rows = [
-    row({ id: 's1', role: 'system', content: 'orphan system row', turn_id: null }),
-    userRow('u1', 'hello', 't1'),
-    assistantRow('a1', 'hi', 't1'),
-  ];
-  const sel = selectTail(rows, 99999);
-  assert.deepEqual(sel.tailIds, ['u1', 'a1']);
-});
-
-test('compaction rows are skipped by selectTail', () => {
-  const rows = [
-    row({ id: 'c1', role: 'compaction', content: 'old summary', turn_id: 'tc' }),
-    userRow('u1', 'hello', 't1'),
-  ];
-  const sel = selectTail(rows, 8000);
-  assert.deepEqual(sel.tailIds, ['u1']);
-});
-
-test('clamp floor: 1500 behaves as 2000', () => {
-  const rows = [
-    userRow('u1', 'm'.repeat(7000), 't1'), // ~1752t
-    userRow('u2', 'new q', 't2'), // ~27t; 1779 total fits 2000 but not 1500
-    assistantRow('a2', 'new a', 't2'),
-  ];
-  const sel = selectTail(rows, 1500);
-  assert.deepEqual(sel.tailIds, ['u1', 'u2', 'a2']);
-});
-
-test('clamp ceiling: 99999 behaves as 15000', () => {
-  const rows: CompactRow[] = [];
-  for (let i = 0; i < 10; i++) {
-    rows.push(userRow(`u${i}`, 'q'.repeat(3500), `t${i}`));
-    rows.push(assistantRow(`a${i}`, 'a'.repeat(3500), `t${i}`));
-  }
-  const sel = selectTail(rows, 99999);
-  // ~1750 tokens/turn raw: newest 8 turns = ~14000 fit, 9th would exceed 15000
-  assert.equal(sel.tailIds.length, 16);
-  assert.deepEqual(sel.tailIds.slice(0, 2), ['u2', 'a2']);
-  assert.deepEqual(sel.tailIds.slice(-2), ['u9', 'a9']);
-  const perTurn = 2 * Math.ceil(3500 / 4);
-  assert.equal(sel.estimatedTokens, 8 * perTurn);
-});
-
-test('empty input selects nothing', () => {
-  assert.deepEqual(selectTail([], 8000), { tailRows: [], tailIds: [], estimatedTokens: 0 });
-});
-
-test('tailIds are root-to-leaf with matching rows and token sum', () => {
-  const rows = [userRow('u1', 'hello', 't1'), assistantRow('a1', 'hi', 't1')];
-  const sel = selectTail(rows, 8000);
-  assert.deepEqual(sel.tailIds, ['u1', 'a1']);
-  assert.deepEqual(
-    sel.tailRows.map((r) => r.id),
-    sel.tailIds,
-  );
-  assert.equal(sel.estimatedTokens, estimateTokens('hello') + estimateTokens('hi'));
 });
 
 // --- validateSummaryTemplate ---

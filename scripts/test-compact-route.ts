@@ -128,6 +128,22 @@ function seedTwoTurns(convId: string) {
   insertAsst(convId, `${convId}-a2`, 'second reply', `${convId}-u2`, `${convId}-u2`);
   setLeaf(convId, `${convId}-a2`);
 }
+function seedGenuineTurns(convId: string) {
+  // Four large turns (~2.5k tokens each, ceil(chars/4)). Since a checkpoint
+  // archives the WHOLE visible slice, size no longer decides whether a compact
+  // is vacuous (any slice with a user turn archives) — these fixtures stay big
+  // only to keep the token assertions meaningful.
+  const big = (marker: string) => `${marker} ` + 'x'.repeat(5000) + ` ${marker}-tail`;
+  let parent: string | null = null;
+  ['GEN-A', 'GEN-B', 'GEN-C', 'GEN-D'].forEach((m, i) => {
+    const u = `${convId}-g${i}u`;
+    const a = `${convId}-g${i}a`;
+    insertUser(convId, u, big(m), parent, u);
+    insertAsst(convId, a, big(`${m}-A`), u, u);
+    parent = a;
+  });
+  setLeaf(convId, parent);
+}
 
 try {
   await test('401 without user', async () => {
@@ -155,6 +171,90 @@ try {
     } finally { setSummarizeFetchImplForTests(null); }
   });
 
+  await test('tiny thread archives the WHOLE slice (last turn + its answer included)', async () => {
+    const conv = newConv(USER_A, AGENT_A);
+    seedTwoTurns(conv);
+    const preLeaf = (db.prepare('SELECT active_leaf_id FROM conversations WHERE id=?').get(conv) as any).active_leaf_id;
+    const counter = { n: 0 };
+    const prompts: string[] = [];
+    const capture = (async (_u: any, init: any) => {
+      counter.n++;
+      try {
+        const body = JSON.parse(String((init as any)?.body ?? '{}'));
+        const um = Array.isArray(body?.messages) ? body.messages.find((m: any) => m?.role === 'user') : null;
+        if (um?.content) prompts.push(String(um.content));
+      } catch { /* ignore */ }
+      return new Response(JSON.stringify({ choices: [{ message: { content: VALID_SUMMARY } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as unknown as typeof fetch;
+    setSummarizeFetchImplForTests(capture);
+    try {
+      const r = await call('POST', `/${conv}/compact`, { user: USER_A, body: {} });
+      assert.equal(r.status, 200);
+      const ended = parseSSE(r.text).at(-1)!.data;
+      assert.equal(parseSSE(r.text).at(-1)!.event, 'compaction.ended');
+      assert.equal(counter.n, 1);
+      // All four rows archived, nothing kept verbatim.
+      assert.equal(ended.messages_compacted, 4);
+      assert.deepEqual(ended.tail_message_ids, []);
+      const meta = JSON.parse((db.prepare('SELECT compaction_meta FROM messages WHERE id=?').get(ended.compaction_id) as any).compaction_meta);
+      assert.deepEqual(meta.archived_message_ids, [`${conv}-u1`, `${conv}-a1`, `${conv}-u2`, `${conv}-a2`]);
+      assert.equal(meta.keep_tokens, 0);
+      // The LAST user turn and its answer are in the summarized head.
+      const prompt = prompts.at(-1) ?? '';
+      assert.ok(prompt.includes('second question about auth bug'), 'last user message must be summarized');
+      assert.ok(prompt.includes('second reply'), 'last assistant answer must be summarized');
+      // Checkpoint lands at the END of the thread (card renders where it happened).
+      const row = db.prepare('SELECT parent_id FROM messages WHERE id=?').get(ended.compaction_id) as any;
+      assert.equal(row.parent_id, preLeaf);
+      assert.equal((db.prepare('SELECT active_leaf_id FROM conversations WHERE id=?').get(conv) as any).active_leaf_id, ended.compaction_id);
+    } finally { setSummarizeFetchImplForTests(null); }
+  });
+
+  await test('400 nothing_to_compact with no new turn after a checkpoint (prior checkpoint, leaf and count untouched)', async () => {
+    const conv = newConv(USER_A, AGENT_A);
+    seedGenuineTurns(conv);
+    const counter = { n: 0 };
+    setSummarizeFetchImplForTests(stubFetchOk(counter));
+    let firstId = '';
+    try {
+      const r1 = await call('POST', `/${conv}/compact`, { user: USER_A, body: {} });
+      assert.equal(r1.status, 200);
+      assert.equal(parseSSE(r1.text).at(-1)!.event, 'compaction.ended');
+      firstId = parseSSE(r1.text).at(-1)!.data.compaction_id;
+    } finally { setSummarizeFetchImplForTests(null); }
+    // Compacting again with nothing new: no user turn since the checkpoint.
+    const c2 = { n: 0 };
+    setSummarizeFetchImplForTests(stubFetchOk(c2));
+    try {
+      const r2 = await call('POST', `/${conv}/compact`, { user: USER_A, body: {} });
+      assert.equal(r2.status, 400);
+      assert.equal(r2.json?.code, 'nothing_to_compact');
+      assert.equal(r2.json?.error, 'Nothing new to compact — no messages since the last checkpoint.');
+      assert.equal(c2.n, 0);
+      const compactions = (db.prepare(`SELECT id FROM messages WHERE conversation_id=? AND role='compaction'`).all(conv) as any[]);
+      assert.equal(compactions.length, 1);
+      assert.equal(compactions[0]!.id, firstId);
+      assert.equal((db.prepare('SELECT active_leaf_id FROM conversations WHERE id=?').get(conv) as any).active_leaf_id, firstId);
+    } finally { setSummarizeFetchImplForTests(null); }
+    // A single tiny follow-up turn IS archivable now (no keep budget).
+    insertUser(conv, `${conv}-t-u`, 'tiny follow-up', firstId, `${conv}-t-u`);
+    insertAsst(conv, `${conv}-t-a`, 'tiny answer', `${conv}-t-u`, `${conv}-t-u`);
+    db.prepare('UPDATE conversations SET active_leaf_id=? WHERE id=?').run(`${conv}-t-a`, conv);
+    const c3 = { n: 0 };
+    setSummarizeFetchImplForTests(stubFetchOk(c3));
+    try {
+      const r3 = await call('POST', `/${conv}/compact`, { user: USER_A, body: {} });
+      assert.equal(r3.status, 200);
+      const e3 = parseSSE(r3.text).at(-1)!.data;
+      assert.equal(parseSSE(r3.text).at(-1)!.event, 'compaction.ended');
+      assert.equal(e3.messages_compacted, 2);
+      assert.deepEqual(e3.tail_message_ids, []);
+      const m3 = JSON.parse((db.prepare('SELECT compaction_meta FROM messages WHERE id=?').get(e3.compaction_id) as any).compaction_meta);
+      assert.deepEqual(m3.archived_message_ids, [`${conv}-t-u`, `${conv}-t-a`]);
+      assert.equal(m3.supersedes, firstId);
+    } finally { setSummarizeFetchImplForTests(null); }
+  });
+
   await test('409 turn_live when active_turn_id preset', async () => {
     const conv = newConv(USER_A, AGENT_A);
     seedTwoTurns(conv);
@@ -175,7 +275,7 @@ try {
   await test('SSE started->ended order + DB persist shape', async () => {
     const conv = newConv(USER_A, AGENT_A, 'Orig title');
     db.prepare('UPDATE conversations SET codex_thread_id=? WHERE id=?').run('thread-123', conv);
-    seedTwoTurns(conv);
+    seedGenuineTurns(conv);
     const preLeaf = (db.prepare('SELECT active_leaf_id FROM conversations WHERE id=?').get(conv) as any).active_leaf_id;
     const counter = { n: 0 };
     setSummarizeFetchImplForTests(stubFetchOk(counter));
@@ -200,9 +300,11 @@ try {
       assert.equal(ended.pre_compact_leaf_id, preLeaf);
       assert.equal(ended.focus, 'auth');
       assert.equal(ended.compaction_id, evts[0]!.data.compaction_id);
-      assert.ok(Array.isArray(ended.tail_message_ids) && ended.tail_message_ids.length > 0);
+      // No verbatim tail survives a checkpoint any more.
+      assert.deepEqual(ended.tail_message_ids, []);
       assert.equal(typeof ended.messages_compacted, 'number');
       assert.ok(Number.isFinite(ended.messages_compacted));
+      assert.ok(ended.messages_compacted > 0, 'compact must archive something (vacuous compacts are 400)');
       assert.equal(counter.n, 1);
       // DB asserts
       const row = db.prepare('SELECT * FROM messages WHERE id=?').get(ended.compaction_id) as any;
@@ -213,11 +315,14 @@ try {
       assert.equal(row.turn_id, ended.compaction_id);
       assert.equal(row.variant_seq, 1);
       const meta = JSON.parse(row.compaction_meta);
-      for (const k of ['v', 'model', 'provider', 'focus', 'keep_tokens', 'tokens_before', 'tokens_after', 'messages_compacted', 'tail_message_ids', 'pre_compact_leaf_id', 'supersedes', 'compacted_at']) {
+      for (const k of ['v', 'model', 'provider', 'focus', 'keep_tokens', 'tokens_before', 'tokens_after', 'messages_compacted', 'tail_message_ids', 'archived_message_ids', 'pre_compact_leaf_id', 'supersedes', 'compacted_at']) {
         assert.ok(k in meta, `meta missing ${k}`);
       }
       assert.equal(meta.v, 1);
       assert.deepEqual(meta.tail_message_ids, ended.tail_message_ids);
+      assert.equal(meta.keep_tokens, 0);
+      // Whole visible slice archived: every non-checkpoint row of the thread.
+      assert.equal(meta.archived_message_ids.length, ended.messages_compacted);
       assert.equal(ended.messages_compacted, meta.messages_compacted);
       assert.equal(meta.pre_compact_leaf_id, preLeaf);
       assert.equal(meta.supersedes, null);
@@ -230,7 +335,7 @@ try {
 
   await test('failure stub leaves history untouched', async () => {
     const conv = newConv(USER_A, AGENT_A);
-    seedTwoTurns(conv);
+    seedGenuineTurns(conv);
     const preLeaf = (db.prepare('SELECT active_leaf_id FROM conversations WHERE id=?').get(conv) as any).active_leaf_id;
     const beforeCount = (db.prepare('SELECT COUNT(*) as c FROM messages WHERE conversation_id=?').get(conv) as any).c;
     const failFetch = (async () => new Response(JSON.stringify({ error: { message: 'boom' } }), { status: 500, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
@@ -252,7 +357,7 @@ try {
 
   await test('same request_id in-flight coalesces to one execution', async () => {
     const conv = newConv(USER_A, AGENT_A);
-    seedTwoTurns(conv);
+    seedGenuineTurns(conv);
     const counter = { n: 0 };
     const slow = (async (_u: any, _i: any) => {
       counter.n++;
@@ -276,7 +381,7 @@ try {
 
   await test('completed request_id replays without LLM', async () => {
     const conv = newConv(USER_A, AGENT_A);
-    seedTwoTurns(conv);
+    seedGenuineTurns(conv);
     const counter = { n: 0 };
     setSummarizeFetchImplForTests(stubFetchOk(counter));
     const first = await call('POST', `/${conv}/compact`, { user: USER_A, body: { request_id: 'req-replay-1' } });
@@ -300,7 +405,7 @@ try {
 
   await test('fork copies summary+tail as fresh chain', async () => {
     const conv = newConv(USER_A, AGENT_A, 'Orig title');
-    seedTwoTurns(conv);
+    seedGenuineTurns(conv);
     // need a checkpoint first
     const counter = { n: 0 };
     setSummarizeFetchImplForTests(stubFetchOk(counter));
@@ -354,7 +459,7 @@ try {
 
   await test('409 compact_in_progress for different request while one runs', async () => {
     const conv = newConv(USER_A, AGENT_A);
-    seedTwoTurns(conv);
+    seedGenuineTurns(conv);
     const slow = (async () => {
       await new Promise((r) => setTimeout(r, 500));
       return new Response(JSON.stringify({ choices: [{ message: { content: VALID_SUMMARY } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
@@ -391,7 +496,7 @@ try {
 
   await test('template_invalid after two bad summaries leaves history untouched', async () => {
     const conv = newConv(USER_A, AGENT_A);
-    seedTwoTurns(conv);
+    seedGenuineTurns(conv);
     const preLeaf = (db.prepare('SELECT active_leaf_id FROM conversations WHERE id=?').get(conv) as any).active_leaf_id;
     const before = (db.prepare('SELECT COUNT(*) as c FROM messages WHERE conversation_id=?').get(conv) as any).c;
     const counter = { n: 0 };
@@ -414,7 +519,7 @@ try {
 
   await test('re-ask success: first invalid then valid persists', async () => {
     const conv = newConv(USER_A, AGENT_A);
-    seedTwoTurns(conv);
+    seedGenuineTurns(conv);
     const counter = { n: 0 };
     const seq = (async () => {
       counter.n++;
@@ -432,7 +537,7 @@ try {
 
   await test('context-exceeded halves head and retries once', async () => {
     const conv = newConv(USER_A, AGENT_A);
-    seedTwoTurns(conv);
+    seedGenuineTurns(conv);
     const counter = { n: 0 };
     const flaky = (async () => {
       counter.n++;
@@ -452,7 +557,7 @@ try {
 
   await test('second compaction supersedes first', async () => {
     const conv = newConv(USER_A, AGENT_A);
-    seedTwoTurns(conv);
+    seedGenuineTurns(conv);
     const counter = { n: 0 };
     setSummarizeFetchImplForTests(stubFetchOk(counter));
     let firstId = '';
@@ -460,14 +565,20 @@ try {
       const r1 = await call('POST', `/${conv}/compact`, { user: USER_A, body: {} });
       firstId = parseSSE(r1.text).at(-1)!.data.compaction_id;
     } finally { setSummarizeFetchImplForTests(null); }
-    // post-compact turn
+    // post-compact turns: FOUR large turns (~10k tokens). One would be enough
+    // now (the whole slice is archived), but the bigger fixture also exercises
+    // the token math.
     const leaf = (db.prepare('SELECT active_leaf_id FROM conversations WHERE id=?').get(conv) as any).active_leaf_id;
-    const nu = `${conv}-s2-u`;
-    const na = `${conv}-s2-a`;
-    insertUser(conv, nu, 'follow-up question after first compact', leaf, nu);
-    db.prepare('UPDATE conversations SET active_leaf_id=? WHERE id=?').run(nu, conv);
-    insertAsst(conv, na, 'follow-up answer', nu, nu);
-    db.prepare('UPDATE conversations SET active_leaf_id=? WHERE id=?').run(na, conv);
+    const big2 = (marker: string) => `${marker} ` + 'x'.repeat(5000) + ` ${marker}-tail`;
+    let parent2: string | null = leaf;
+    ['FOLLOW-A', 'FOLLOW-B', 'FOLLOW-C', 'FOLLOW-D'].forEach((m, i) => {
+      const u = `${conv}-s2-u${i}`;
+      const a = `${conv}-s2-a${i}`;
+      insertUser(conv, u, big2(m), parent2, u);
+      insertAsst(conv, a, big2(`${m}-A`), u, u);
+      parent2 = a;
+    });
+    db.prepare('UPDATE conversations SET active_leaf_id=? WHERE id=?').run(parent2, conv);
     const c2 = { n: 0 };
     setSummarizeFetchImplForTests(stubFetchOk(c2));
     try {
@@ -479,9 +590,103 @@ try {
     } finally { setSummarizeFetchImplForTests(null); }
   });
 
+  await test('Undo + new turn + compact re-archives what the Undo made live again', async () => {
+    // Undo moves the leaf before a checkpoint, so that checkpoint is OFF the
+    // thread: its summary is no longer injected and the rows it had archived
+    // are live in the model view again. The next compact must therefore
+    // re-summarize them — skipping them (the old cross-branch exclusion) drops
+    // their content from the model view entirely.
+    const conv = newConv(USER_A, AGENT_A);
+    const big = (marker: string) => `${marker} ` + 'x'.repeat(5000) + ` ${marker}-tail`;
+    const prompts: string[] = [];
+    const capture = (async (_u: any, init: any) => {
+      try {
+        const body = JSON.parse(String((init as any)?.body ?? '{}'));
+        const msgs = (body as any)?.messages;
+        const um = Array.isArray(msgs) ? msgs.find((m: any) => m?.role === 'user') : null;
+        if (um?.content) prompts.push(String(um.content));
+      } catch { /* ignore */ }
+      return new Response(JSON.stringify({ choices: [{ message: { content: VALID_SUMMARY } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as unknown as typeof fetch;
+    // PRE epoch: 2 large turns
+    insertUser(conv, `${conv}-p1u`, big('QUINOA-ALPHA'), null, `${conv}-p1u`);
+    insertAsst(conv, `${conv}-p1a`, big('QUINOA-ALPHA-A'), `${conv}-p1u`, `${conv}-p1u`);
+    insertUser(conv, `${conv}-p2u`, big('TUNGSTEN-BETA'), `${conv}-p1a`, `${conv}-p2u`);
+    insertAsst(conv, `${conv}-p2a`, big('TUNGSTEN-BETA-A'), `${conv}-p2u`, `${conv}-p2u`);
+    setLeaf(conv, `${conv}-p2a`);
+    setSummarizeFetchImplForTests(capture);
+    let c1id = '';
+    try {
+      const r1 = await call('POST', `/${conv}/compact`, { user: USER_A, body: {} });
+      const e1 = parseSSE(r1.text).at(-1)!.data;
+      assert.equal(parseSSE(r1.text).at(-1)!.event, 'compaction.ended');
+      assert.equal(e1.messages_compacted, 4);
+      assert.deepEqual(e1.tail_message_ids, []);
+      c1id = e1.compaction_id;
+      const m1 = JSON.parse((db.prepare('SELECT compaction_meta FROM messages WHERE id=?').get(c1id) as any).compaction_meta);
+      assert.deepEqual(m1.archived_message_ids, [`${conv}-p1u`, `${conv}-p1a`, `${conv}-p2u`, `${conv}-p2a`]);
+      assert.ok((prompts.at(-1) ?? '').includes('TUNGSTEN-BETA'), 'head#1 must include the newest turn');
+    } finally { setSummarizeFetchImplForTests(null); }
+    // POST epoch: 2 large turns on top of comp#1
+    const leaf1 = (db.prepare('SELECT active_leaf_id FROM conversations WHERE id=?').get(conv) as any).active_leaf_id;
+    assert.equal(leaf1, c1id);
+    insertUser(conv, `${conv}-q1u`, big('OBSIDIAN-GAMMA'), leaf1, `${conv}-q1u`);
+    insertAsst(conv, `${conv}-q1a`, big('OBSIDIAN-GAMMA-A'), `${conv}-q1u`, `${conv}-q1u`);
+    insertUser(conv, `${conv}-q2u`, big('VANADIUM-DELTA'), `${conv}-q1a`, `${conv}-q2u`);
+    insertAsst(conv, `${conv}-q2a`, big('VANADIUM-DELTA-A'), `${conv}-q2u`, `${conv}-q2u`);
+    db.prepare('UPDATE conversations SET active_leaf_id=? WHERE id=?').run(`${conv}-q2a`, conv);
+    prompts.length = 0;
+    setSummarizeFetchImplForTests(capture);
+    let c2id = '';
+    let pre2 = '';
+    try {
+      const r2 = await call('POST', `/${conv}/compact`, { user: USER_A, body: {} });
+      const e2 = parseSSE(r2.text).at(-1)!.data;
+      assert.equal(e2.messages_compacted, 4);
+      assert.deepEqual(e2.tail_message_ids, []);
+      c2id = e2.compaction_id;
+      pre2 = e2.pre_compact_leaf_id;
+      assert.equal(pre2, `${conv}-q2a`);
+      const m2 = JSON.parse((db.prepare('SELECT compaction_meta FROM messages WHERE id=?').get(c2id) as any).compaction_meta);
+      assert.deepEqual(m2.archived_message_ids, [`${conv}-q1u`, `${conv}-q1a`, `${conv}-q2u`, `${conv}-q2a`]);
+      assert.equal(m2.supersedes, c1id);
+      // Head#2 starts AFTER checkpoint#1; #1's own summary travels as prior.
+      const p2 = prompts.at(-1) ?? '';
+      assert.ok(p2.includes('OBSIDIAN-GAMMA') && p2.includes('VANADIUM-DELTA'), 'head#2 is its own epoch');
+      assert.ok(!p2.includes('QUINOA-ALPHA'), 'head#2 must not re-read rows already behind checkpoint#1');
+    } finally { setSummarizeFetchImplForTests(null); }
+    // Undo to pre#2 (checkpoint#2 abandoned) + one new large turn (R1)
+    db.prepare('UPDATE conversations SET active_leaf_id=? WHERE id=?').run(pre2, conv);
+    insertUser(conv, `${conv}-r1u`, big('RADON-EPSILON'), pre2, `${conv}-r1u`);
+    insertAsst(conv, `${conv}-r1a`, big('RADON-EPSILON-A'), `${conv}-r1u`, `${conv}-r1u`);
+    db.prepare('UPDATE conversations SET active_leaf_id=? WHERE id=?').run(`${conv}-r1a`, conv);
+    prompts.length = 0;
+    setSummarizeFetchImplForTests(capture);
+    try {
+      const r3 = await call('POST', `/${conv}/compact`, { user: USER_A, body: {} });
+      assert.equal(r3.status, 200, `Undo must not brick compaction: ${r3.text.slice(0, 200)}`);
+      const e3 = parseSSE(r3.text).at(-1)!.data;
+      assert.equal(parseSSE(r3.text).at(-1)!.event, 'compaction.ended');
+      // Slice = everything after checkpoint#1 on THIS branch: q1, q2 (live
+      // again after the Undo) + r1.
+      assert.equal(e3.messages_compacted, 6);
+      const m3 = JSON.parse((db.prepare('SELECT compaction_meta FROM messages WHERE id=?').get(e3.compaction_id) as any).compaction_meta);
+      assert.deepEqual(m3.archived_message_ids, [
+        `${conv}-q1u`, `${conv}-q1a`, `${conv}-q2u`, `${conv}-q2a`, `${conv}-r1u`, `${conv}-r1a`,
+      ]);
+      // Supersedes the ON-THREAD checkpoint (#1), not the abandoned #2.
+      assert.equal(m3.supersedes, c1id);
+      const p3 = prompts.at(-1) ?? '';
+      assert.ok(p3.includes('OBSIDIAN-GAMMA'), 'rows the Undo made live again must be re-summarized');
+      assert.ok(p3.includes('RADON-EPSILON'), 'summary#3 must cover the newest turn');
+      assert.ok(!p3.includes('QUINOA-ALPHA'), 'rows behind checkpoint#1 stay behind it');
+      void c2id;
+    } finally { setSummarizeFetchImplForTests(null); }
+  });
+
   await test('fork default title + same agent/model + 404 foreign', async () => {
     const conv = newConv(USER_A, AGENT_A, 'My chat');
-    seedTwoTurns(conv);
+    seedGenuineTurns(conv);
     const counter = { n: 0 };
     setSummarizeFetchImplForTests(stubFetchOk(counter));
     try { await call('POST', `/${conv}/compact`, { user: USER_A, body: {} }); }

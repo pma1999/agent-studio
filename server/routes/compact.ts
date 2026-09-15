@@ -10,16 +10,10 @@ import {
 } from '../compaction/prompt.js';
 import {
   serializeHead,
-  selectTail,
   validateSummaryTemplate,
   estimateTokens,
   type CompactRow,
 } from '../compaction/serialize.js';
-import {
-  DEFAULT_KEEP_TOKENS,
-  KEEP_MIN,
-  KEEP_MAX,
-} from '../compaction/policy.js';
 import {
   getProviderForModel,
   toUpstreamModelId,
@@ -125,13 +119,14 @@ router.post('/:id/compact', async (req: AuthRequest, res: Response): Promise<voi
     }
     requestId = body.request_id;
   }
-  let keepTokens = DEFAULT_KEEP_TOKENS;
+  // `keep_tokens` is accepted (and still type-validated) for wire
+  // compatibility, but a checkpoint now archives the whole visible slice: no
+  // verbatim tail is kept, so there is no budget to spend. Meta records 0.
   if (body.keep_tokens !== undefined && body.keep_tokens !== null) {
     if (typeof body.keep_tokens !== 'number' || !Number.isFinite(body.keep_tokens)) {
       res.status(400).json({ code: 'invalid_keep_tokens', error: 'keep_tokens must be a number' });
       return;
     }
-    keepTokens = Math.min(KEEP_MAX, Math.max(KEEP_MIN, Math.floor(body.keep_tokens)));
   }
   let focus: string | null = null;
   if (body.focus !== undefined && body.focus !== null) {
@@ -247,9 +242,17 @@ router.post('/:id/compact', async (req: AuthRequest, res: Response): Promise<voi
     priorSummary = content.startsWith(SUMMARY_PREFIX) ? content.slice(SUMMARY_PREFIX.length) : content;
   }
   const visibleDbRows = lastCompIdx >= 0 ? threadRows.slice(lastCompIdx + 1) : threadRows;
+  // Nothing to compact = no user turn since the previous checkpoint. With the
+  // whole slice archived, this is the ONLY vacuous case left: any slice with a
+  // user turn produces a non-empty head, so no post-summary emptiness check is
+  // needed (and compacting twice in a row lands here instead of burning a
+  // summary call on an empty head).
   const userTurns = visibleDbRows.filter((r) => r['role'] === 'user');
   if (userTurns.length === 0) {
-    res.status(400).json({ code: 'nothing_to_compact', error: 'Not enough messages to compact' });
+    res.status(400).json({
+      code: 'nothing_to_compact',
+      error: 'Nothing new to compact — no messages since the last checkpoint.',
+    });
     return;
   }
   const preCompactLeafId = threadIds.length > 0 ? threadIds[threadIds.length - 1]! : null;
@@ -283,13 +286,25 @@ router.post('/:id/compact', async (req: AuthRequest, res: Response): Promise<voi
   const provider = getProviderForModel(effectiveModel);
   void toUpstreamModelId(effectiveModel);
 
-  // --- tail + head ---
+  // --- head = the WHOLE visible slice ---
+  // The checkpoint row is inserted at the END of the thread (parent_id =
+  // pre-compact leaf) and the chat builder cuts everything up to and including
+  // it (G10 `selectModelView`). So anything left out of the head here is lost
+  // from the model view entirely: it is neither summarized nor replayed. The
+  // head is therefore every visible row since the previous ON-THREAD
+  // checkpoint (whose own summary travels as `priorSummary`) — the user's last
+  // turn and its answer included. No verbatim tail is kept.
+  //
+  // Deliberately NO cross-branch exclusion by `archived_message_ids`: rows
+  // archived by an abandoned checkpoint (Undo moved the leaf before it) are
+  // live in the model view again, so they must be re-summarized or their
+  // content vanishes. An exclusion scoped to on-thread ancestors would be a
+  // no-op anyway — the `lastCompIdx` slice above already drops those rows.
   const compactRows = visibleDbRows.map(toCompactRow);
-  const tail = selectTail(compactRows, keepTokens);
-  const tailIdSet = new Set(tail.tailIds);
-  const headRows = compactRows.filter((r) => !tailIdSet.has(r.id));
+  const headRows = compactRows;
+  const archivedMessageIds = headRows.map((r) => r.id);
   const serializedHead = serializeHead(headRows);
-  const tokensBefore = estimateTokens(serializedHead) + tail.estimatedTokens;
+  const tokensBefore = estimateTokens(serializedHead);
   const messagesCompacted = headRows.length;
   const compactedAtBase = new Date().toISOString();
 
@@ -484,18 +499,23 @@ router.post('/:id/compact', async (req: AuthRequest, res: Response): Promise<voi
       }
     }
 
-    const tokensAfter = estimateTokens(SUMMARY_PREFIX + summary) + tail.estimatedTokens;
+    // Nothing is kept verbatim, so the post-compaction view is exactly the
+    // stored checkpoint content.
+    const tokensAfter = estimateTokens(SUMMARY_PREFIX + summary);
     const compactedAt = new Date().toISOString();
     const meta = {
       v: 1,
       model: effectiveModel,
       provider: provider.id,
       focus,
-      keep_tokens: keepTokens,
+      keep_tokens: 0,
       tokens_before: tokensBefore,
       tokens_after: tokensAfter,
       messages_compacted: messagesCompacted,
-      tail_message_ids: tail.tailIds,
+      // Always empty now (no verbatim tail); kept in the payload so the
+      // documented SSE/meta shape does not change under old readers.
+      tail_message_ids: [] as string[],
+      archived_message_ids: archivedMessageIds,
       pre_compact_leaf_id: preCompactLeafId,
       supersedes,
       compacted_at: compactedAt,
@@ -518,7 +538,7 @@ router.post('/:id/compact', async (req: AuthRequest, res: Response): Promise<voi
     const ended = {
       compaction_id: compactionId,
       conversation_id: conversationId,
-      tail_message_ids: tail.tailIds,
+      tail_message_ids: [] as string[],
       tokens_before: tokensBefore,
       tokens_after: tokensAfter,
       messages_compacted: messagesCompacted,

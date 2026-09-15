@@ -60,10 +60,11 @@ interface CompactionThreadRow {
 
 /**
  * Newest checkpoint descriptor in the VISIBLE thread (root → leaf order),
- * or null when the thread has no `role='compaction'` row. `totalCount`
- * counts ALL checkpoint rows in the conversation (not thread-scoped).
- * Field values come from the row + parsed meta; corrupt meta degrades to
- * null fields, never throws.
+ * or null when the thread has no `role='compaction'` row. `totalCount` is
+ * supplied by the caller and surfaces as `count` — the route passes the number
+ * of checkpoints ON THIS THREAD (checkpoints abandoned by an Undo are off-thread
+ * and must not be counted). Field values come from the row + parsed meta;
+ * corrupt meta degrades to null fields, never throws.
  */
 export function selectVisibleCompaction(
   threadRowsInOrder: CompactionThreadRow[],
@@ -227,9 +228,11 @@ router.get('/:id/messages', async (req: AuthRequest, res: Response) => {
       const threadRows = threadIds
         .map((id) => byId.get(id))
         .filter((r): r is Record<string, unknown> => !!r);
-      const totalCount = (
-        db.prepare(`SELECT COUNT(*) as n FROM messages WHERE conversation_id = ? AND role = 'compaction'`).get(req.params.id) as { n: number }
-      ).n;
+      // Checkpoints ON THE VISIBLE THREAD, not conversation-wide: an Undone
+      // checkpoint hangs off an abandoned branch, is invisible in the UI, and
+      // must not inflate the count that drives the multi-compaction accuracy
+      // warning (the client now renders exactly one card per thread checkpoint).
+      const totalCount = threadRows.reduce((n, r) => (String(r.role) === 'compaction' ? n + 1 : n), 0);
       compaction = selectVisibleCompaction(
         threadRows.map((r) => ({
           id: String(r.id),

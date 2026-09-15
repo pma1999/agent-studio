@@ -3,8 +3,15 @@
  *
  * No db/network imports: the caller (compact-route) passes visible-thread
  * rows in root→leaf order. Contracts: G5 (head line format, 2000-char cut,
- * attachment descriptors, ceil(chars/4) estimate), G6 (turn-granular tail,
- * clamp [2000,15000], newest-turn floor), G3 (template heading validation).
+ * attachment descriptors, ceil(chars/4) estimate), G3 (template heading
+ * validation).
+ *
+ * G6 (turn-granular verbatim tail) is GONE on purpose: the checkpoint row is
+ * inserted at the END of the thread (`parent_id` = pre-compact leaf) and the
+ * chat builder cuts everything up to and including it (G10,
+ * `selectModelView`), so a "kept tail" sat BEFORE the cut and never reached
+ * the provider — those rows were neither summarized nor sent. The head is now
+ * the whole visible slice since the last on-thread checkpoint.
  */
 
 export interface CompactRow {
@@ -23,9 +30,6 @@ export interface CompactRow {
 export const TOOL_OUTPUT_MAX_CHARS = 2000;
 /** Assistant tool-call `arguments` truncation threshold (chars). */
 export const TOOL_ARGS_MAX_CHARS = 500;
-/** G6: keep_tokens clamp bounds. The 8000 default is applied by the CALLER. */
-export const KEEP_TOKENS_MIN = 2000;
-export const KEEP_TOKENS_MAX = 15000;
 
 /** G3: canonical template headings in order (also the `missing` report vocabulary). */
 const TEMPLATE_HEADINGS = [
@@ -177,21 +181,6 @@ function attachmentLines(raw: string | null | undefined): string[] {
   }
 }
 
-/**
- * G6 per-row token weight. Estimated from the row's RAW field chars — the
- * tail travels VERBATIM to the provider, so the truncated head serialization
- * (tool output cut at 2000 chars) would systematically undercount large tool
- * outputs against the keep_tokens budget.
- */
-function rowTokenCost(row: CompactRow): number {
-  let cost = estimateTokens(flattenText(row.content));
-  if (row.reasoning_content) cost += estimateTokens(row.reasoning_content);
-  if (row.tool_calls) cost += estimateTokens(row.tool_calls);
-  if (row.annotations) cost += estimateTokens(row.annotations);
-  if (row.attachments) cost += estimateTokens(row.attachments);
-  return cost;
-}
-
 function roleLabel(role: string): string {
   return `[${role.charAt(0).toUpperCase()}${role.slice(1)}]`;
 }
@@ -250,71 +239,6 @@ export function serializeHead(rows: CompactRow[]): string {
   const lines: string[] = [];
   for (const row of rows) lines.push(...serializeRow(row));
   return lines.join('\n');
-}
-
-export interface TailSelection {
-  tailRows: CompactRow[];
-  /** root→leaf. */
-  tailIds: string[];
-  estimatedTokens: number;
-}
-
-/**
- * G6: group visible-thread rows by `turn_id` (thread order), walk
- * newest→oldest including whole turns while `ceil(chars/4)` fits. ALWAYS
- * includes the newest turn. Rows with null/empty `turn_id` (e.g. orphan
- * system rows — the system prompt is re-injected anyway) form singleton
- * groups that are never selected. `keepTokens` is clamped to [2000,15000];
- * the 8000 default is applied by the CALLER, not here.
- */
-export function selectTail(rows: CompactRow[], keepTokens: number): TailSelection {
-  const empty: TailSelection = { tailRows: [], tailIds: [], estimatedTokens: 0 };
-  const keep = Number.isFinite(keepTokens)
-    ? Math.min(KEEP_TOKENS_MAX, Math.max(KEEP_TOKENS_MIN, Math.floor(keepTokens)))
-    : 8000;
-
-  const visible = rows.filter((r) => r.role !== 'compaction');
-  if (visible.length === 0) return empty;
-
-  // Consecutive runs share a turn; null/empty turn_id rows are singletons.
-  const groups: { key: string | null; rows: CompactRow[]; cost: number }[] = [];
-  for (const row of visible) {
-    const turn = typeof row.turn_id === 'string' && row.turn_id ? row.turn_id : null;
-    const last = groups[groups.length - 1];
-    if (turn !== null && last && last.key === turn) {
-      last.rows.push(row);
-    } else {
-      groups.push({ key: turn, rows: [row], cost: 0 });
-    }
-  }
-  for (const g of groups) {
-    g.cost = g.rows.reduce((sum, r) => sum + rowTokenCost(r), 0);
-  }
-
-  const selectable: number[] = [];
-  for (let i = 0; i < groups.length; i++) {
-    if (groups[i]!.key !== null) selectable.push(i);
-  }
-  if (selectable.length === 0) return empty;
-
-  const included = new Set<number>();
-  let running = 0;
-  for (let s = selectable.length - 1; s >= 0; s--) {
-    const gi = selectable[s]!;
-    if (s === selectable.length - 1) {
-      // Newest-turn floor: always kept, even when already over budget.
-      included.add(gi);
-      running += groups[gi]!.cost;
-    } else if (running + groups[gi]!.cost <= keep) {
-      included.add(gi);
-      running += groups[gi]!.cost;
-    } else {
-      break;
-    }
-  }
-
-  const tailRows = groups.filter((_, i) => included.has(i)).flatMap((g) => g.rows);
-  return { tailRows, tailIds: tailRows.map((r) => r.id), estimatedTokens: running };
 }
 
 function escapeRegExp(s: string): string {

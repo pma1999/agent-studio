@@ -6,10 +6,11 @@
  * ARNICT_CATALOG) — read from source, not from memory.
  */
 
-// OpenCode numbers: keep.tokens default 8000, clamp 2000–15000 (G6).
-export const DEFAULT_KEEP_TOKENS = 8000;
-export const KEEP_MIN = 2000;
-export const KEEP_MAX = 15000;
+// NOTE: the OpenCode keep-budget constants (default 8000, clamp 2000–15000)
+// are gone with the verbatim tail — a checkpoint now archives the WHOLE
+// visible slice since the previous on-thread checkpoint (see
+// server/compaction/serialize.ts header). `keep_tokens` stays accepted on the
+// route for wire compatibility, but it no longer selects anything.
 
 // OpenCode safety reserve below the explicit input limit (G12/§6.4).
 export const COMPACTION_BUFFER = 20000;
