@@ -288,7 +288,22 @@ function buildCouncilGoResponsesBody(opts: {
   };
   if (instructionTexts.length > 0) body.instructions = instructionTexts.join('\n\n');
   if (opts.includeTools && opts.openRouterTools.length > 0) {
-    body.tools = opts.openRouterTools;
+    // Same flat Responses wire form as `buildOpencodeGoResponsesBody` in
+    // chat.ts (see note there): no nested `function`, no `strict`.
+    body.tools = opts.openRouterTools.map((t, i) => {
+      const name = t.function?.name;
+      if (typeof name !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(name)) {
+        throw new Error(
+          `OpenCode Go responses: tool at index ${i} has an invalid or missing name (expected /^[A-Za-z0-9_-]{1,128}$/)`,
+        );
+      }
+      return {
+        type: 'function',
+        name,
+        description: t.function.description,
+        parameters: t.function.parameters,
+      };
+    });
   }
   return body;
 }

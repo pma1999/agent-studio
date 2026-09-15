@@ -344,7 +344,24 @@ export function buildOpencodeGoResponsesBody(opts: {
   };
   if (instructionTexts.length > 0) body.instructions = instructionTexts.join('\n\n');
   if (opts.openRouterTools.length > 0 && opts.toolChoice !== 'none') {
-    body.tools = opts.openRouterTools;
+    // Responses wire form is flat ({type,name,description,parameters}), not
+    // the Chat shape ({type,function:{…}}): a nested `function` leaves
+    // `tools[0].name` missing and the gateway answers 400. `strict` stays
+    // omitted (gateway default; unverified live — see T6).
+    body.tools = opts.openRouterTools.map((t, i) => {
+      const name = t.function?.name;
+      if (typeof name !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(name)) {
+        throw new Error(
+          `OpenCode Go responses: tool at index ${i} has an invalid or missing name (expected /^[A-Za-z0-9_-]{1,128}$/)`,
+        );
+      }
+      return {
+        type: 'function',
+        name,
+        description: t.function.description,
+        parameters: t.function.parameters,
+      };
+    });
   }
   return body;
 }

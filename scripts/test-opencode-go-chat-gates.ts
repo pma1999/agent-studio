@@ -617,9 +617,80 @@ function t5Checks(): void {
   });
 }
 
+// ===========================================================================
+// T6 — responses tools in flat Responses form (400 `tools[0] missing required
+// field name` fix). Both responses builders map each Chat-form tool
+// {type:'function',function:{name,description,parameters}} to the flat
+// Responses wire {type:'function',name,description,parameters} (no nested
+// `function`, no `input_schema`, no `strict`, no tool_choice/
+// parallel_tool_calls/stream_options on this wire); invalid names fail locally
+// naming the tool index, before any POST. Messages mapping + the
+// none/includeTools:false omissions stay intact.
+// ===========================================================================
+function t6Checks(): void {
+  const chatResponsesAt = chatSource.indexOf('export function buildOpencodeGoResponsesBody');
+  assert.ok(chatResponsesAt >= 0, 'chat responses builder missing');
+  const chatResponsesEnd = chatSource.indexOf('export interface OpencodeGoResponsesUsage', chatResponsesAt);
+  assert.ok(chatResponsesEnd > chatResponsesAt, 'chat responses builder bounds missing');
+  const chatResponsesBody = chatSource.slice(chatResponsesAt, chatResponsesEnd);
+  const councilResponsesAt = councilSource.indexOf('function buildCouncilGoResponsesBody');
+  assert.ok(councilResponsesAt >= 0, 'council responses builder missing');
+  const councilResponsesEnd = councilSource.indexOf('interface CouncilGoResponsesUsage', councilResponsesAt);
+  assert.ok(councilResponsesEnd > councilResponsesAt, 'council responses builder bounds missing');
+  const councilResponsesBody = councilSource.slice(councilResponsesAt, councilResponsesEnd);
+
+  ok('(T6-1) chat responses builder flattens tools to the Responses wire form', () => {
+    assert.match(chatResponsesBody, /body\.tools = opts\.openRouterTools\.map\(\(t/);
+    assert.match(chatResponsesBody, /type: 'function',/);
+    assert.match(chatResponsesBody, /t\.function\?\.name|t\.function\.name/);
+    assert.match(chatResponsesBody, /description: t\.function\.description,/);
+    assert.match(chatResponsesBody, /parameters: t\.function\.parameters,/);
+    assert.doesNotMatch(chatResponsesBody, /body\.tools = opts\.openRouterTools;/);
+    assert.doesNotMatch(chatResponsesBody, /input_schema/);
+    assert.doesNotMatch(chatResponsesBody, /strict\s*:/);
+    assert.doesNotMatch(chatResponsesBody, /tool_choice|parallel_tool_calls|stream_options/);
+  });
+  ok('(T6-2) council responses builder mirrors the flat wire form', () => {
+    assert.match(councilResponsesBody, /body\.tools = opts\.openRouterTools\.map\(\(t/);
+    assert.match(councilResponsesBody, /type: 'function',/);
+    assert.match(councilResponsesBody, /t\.function\?\.name|t\.function\.name/);
+    assert.match(councilResponsesBody, /description: t\.function\.description,/);
+    assert.match(councilResponsesBody, /parameters: t\.function\.parameters,/);
+    assert.doesNotMatch(councilResponsesBody, /body\.tools = opts\.openRouterTools;/);
+    assert.doesNotMatch(councilResponsesBody, /input_schema/);
+    assert.doesNotMatch(councilResponsesBody, /strict\s*:/);
+    assert.doesNotMatch(councilResponsesBody, /tool_choice|parallel_tool_calls|stream_options/);
+  });
+  ok('(T6-3) invalid tool names fail locally naming the tool index (both builders)', () => {
+    for (const [name, src] of [['chat', chatResponsesBody], ['council', councilResponsesBody]] as const) {
+      assert.match(src, /A-Za-z0-9_-/, `${name} responses builder must pin the tool-name pattern`);
+      assert.match(src, /1,128/, `${name} responses builder must pin the tool-name length`);
+      assert.match(src, /tool at index/, `${name} responses builder must name the tool index`);
+      assert.match(src, /throw new Error/, `${name} responses builder must fail before any POST`);
+    }
+  });
+  ok("(T6-4) toolChoice==='none' (chat) / includeTools:false (council) still omit the tools key", () => {
+    assert.match(chatResponsesBody, /toolChoice !== 'none'/);
+    assert.match(councilResponsesBody, /includeTools &&/);
+  });
+  ok('(T6-5) Messages mapping stays intact (regression pin)', () => {
+    const chatMessagesAt = chatSource.indexOf('export function buildOpencodeGoMessagesBody');
+    assert.ok(chatMessagesAt >= 0, 'chat messages builder missing');
+    const chatMessagesBody = chatSource.slice(chatMessagesAt, chatResponsesAt);
+    assert.match(chatMessagesBody, /input_schema: t\.function\.parameters,/);
+    assert.match(chatMessagesBody, /toolChoice !== 'none'/);
+    const councilMessagesAt = councilSource.indexOf('function buildCouncilGoMessagesBody');
+    assert.ok(councilMessagesAt >= 0, 'council messages builder missing');
+    const councilMessagesBody = councilSource.slice(councilMessagesAt, councilResponsesAt);
+    assert.match(councilMessagesBody, /input_schema: t\.function\.parameters,/);
+    assert.match(councilMessagesBody, /includeTools &&/);
+  });
+}
+
 stabilityChecks();
 seamChecks();
 t4Checks();
 t5Checks();
+t6Checks();
 
 console.log(`opencode-go chat-gates guardrail: OK (${checks} checks)`);
