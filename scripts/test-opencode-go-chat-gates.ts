@@ -189,11 +189,23 @@ function seamChecks(): void {
 
   // ---- models.ts: static catalog + validate probe (GC §3 + §7) -------------
   ok('(R1) models.ts imports the Go catalog + URL + validate model + UA', () => {
-    assert.match(modelsSource, /OPENCODE_GO_CATALOG, OPENCODE_GO_CHAT_COMPLETIONS_URL, OPENCODE_GO_USER_AGENT, OPENCODE_GO_VALIDATE_MODEL/);
+    assert.match(modelsSource, /OPENCODE_GO_CATALOG,/);
+    assert.match(modelsSource, /OPENCODE_GO_CHAT_COMPLETIONS_URL,/);
+    assert.match(modelsSource, /OPENCODE_GO_USER_AGENT,/);
+    assert.match(modelsSource, /OPENCODE_GO_VALIDATE_MODEL/);
+    assert.match(modelsSource, /OPENCODE_GO_CATALOG_VERSION/);
+    assert.match(modelsSource, /OPENCODE_GO_BASE_URL/);
   });
-  ok('(R2) GET /opencodego returns the static catalog with no key gate', () => {
+  ok('(R2) GET /opencodego returns the static catalog with versioned meta (no key gate)', () => {
     assert.match(modelsSource, /router\.get\('\/opencodego',/);
-    assert.match(modelsSource, /res\.json\(\{ data: OPENCODE_GO_CATALOG \}\);/);
+    assert.match(modelsSource, /res\.json\(\{\s*\n?\s*data: OPENCODE_GO_CATALOG,\s*\n?\s*meta:/);
+    assert.match(modelsSource, /version: OPENCODE_GO_CATALOG_VERSION,/);
+    assert.match(modelsSource, /count: OPENCODE_GO_CATALOG\.length,/);
+    assert.match(modelsSource, /fetchedAt: new Date\(\)\.toISOString\(\),/);
+    assert.match(modelsSource, /OPENCODE_GO_DRIFT_TTL_MS = 60 \* 60 \* 1000/);
+    assert.match(modelsSource, /maybeLogOpencodeGoDrift/);
+    assert.match(modelsSource, /`\$\{OPENCODE_GO_BASE_URL\}\/models`/);
+    assert.match(modelsSource, /drift detected \(version/);
   });
   ok('(R3) GET /opencodego/validate probes a 1-token POST behind the key gate', () => {
     assert.match(modelsSource, /router\.get\('\/opencodego\/validate',/);
@@ -217,21 +229,21 @@ function seamChecks(): void {
   });
 
   // ---- chat.ts (GC §4/§5/§6/§7/§8) -----------------------------------------
-  ok('(C1) chat imports the six Go helpers and grants no key exemption', () => {
+  ok('(C1) chat imports the five Go helpers and grants no key exemption', () => {
     assert.match(chatSource, /computeOpencodeGoCost,/);
     assert.match(chatSource, /opencodeGoCachedTokens,/);
     assert.match(chatSource, /opencodeGoFormatMismatchMessage,/);
     assert.match(chatSource, /opencodeGoHistoryReasoningField,/);
     assert.match(chatSource, /opencodeGoTransportFor,/);
-    assert.match(chatSource, /opencodeGoWrongTransportMessage,/);
+    // T5: the phase-2 hard-fail is retired (both transports send), so the
+    // wrong-transport helper is no longer imported by the sender.
+    assert.doesNotMatch(chatSource, /opencodeGoWrongTransportMessage/);
     assert.doesNotMatch(chatSource, /isOpencodeGoModel/);
   });
-  ok('(C2) chat wrong-transport guard fires 400 before the key lookup', () => {
-    assert.match(chatSource, /const goTransport = opencodeGoTransportFor\(upstreamModel\);/);
-    assert.match(chatSource, /res\.status\(400\)\.json\(\{ error: opencodeGoWrongTransportMessage\(upstreamModel, goTransport\) \}\);/);
-    const guardAt = chatSource.indexOf("if (provider.id === 'opencode-go') {");
-    const keyAt = chatSource.indexOf('const apiKey = getSettingValue(userId, provider.apiKeySetting);');
-    assert.ok(guardAt >= 0 && keyAt > guardAt, 'transport guard must precede the key lookup');
+  ok('(C2) chat has no wrong-transport guard: every known transport sends behind the generic key gate', () => {
+    assert.doesNotMatch(chatSource, /opencodeGoWrongTransportMessage/);
+    assert.doesNotMatch(chatSource, /const goTransport = opencodeGoTransportFor\(upstreamModel\);/);
+    assert.match(chatSource, /const apiKey = getSettingValue\(userId, provider\.apiKeySetting\);/);
   });
   ok('(C3) chat replays history per-model in both sites (map + tool-loop push)', () => {
     const replays = chatSource.match(
@@ -253,10 +265,10 @@ function seamChecks(): void {
     assert.doesNotMatch(arm, /requestBody\.thinking/);
     assert.doesNotMatch(arm, /requestBody\.effort/);
   });
-  ok('(C6) chat Go turns set the stream_options usage frame', () => {
+  ok('(C6) chat Go turns set the stream_options usage frame (chat transport; messages/responses carry usage in-band)', () => {
     assert.match(
       chatSource,
-      /if \(provider\.id === 'opencode-go'\) \{[\s\S]{0,400}?requestBody\.stream_options = \{ include_usage: true \};/,
+      /if \(provider\.id === 'opencode-go' && !isGoMessages && !isGoResponses\) \{[\s\S]{0,600}?requestBody\.stream_options = \{ include_usage: true \};/,
     );
   });
   ok('(C7) chat healing + effort-max exclusions name opencode-go', () => {
@@ -289,28 +301,32 @@ function seamChecks(): void {
     assert.match(councilSource, /opencodeGoFormatMismatchMessage,/);
     assert.match(councilSource, /opencodeGoHistoryReasoningField,/);
     assert.match(councilSource, /opencodeGoTransportFor,/);
-    assert.match(councilSource, /opencodeGoWrongTransportMessage,/);
+    // T5: no hard-fail left (both phase-2 transports send), so the
+    // wrong-transport helper is no longer imported by the executor.
+    assert.doesNotMatch(councilSource, /opencodeGoWrongTransportMessage/);
     assert.doesNotMatch(councilSource, /isOpencodeGoModel/);
   });
-  ok('(M2) council member + synthesis guards fail named before network', () => {
-    const guards = councilSource.match(/const goTransport = opencodeGoTransportFor\(ep\.upstreamModel\);/g) ?? [];
-    assert.equal(guards.length, 2);
-    const throws = councilSource.match(/throw new Error\(opencodeGoWrongTransportMessage\(ep\.upstreamModel, goTransport\)\);/g) ?? [];
-    assert.equal(throws.length, 2);
+  ok('(M2) council member + synthesis have no wrong-transport guard (both transports send)', () => {
+    assert.doesNotMatch(councilSource, /const goTransport = opencodeGoTransportFor\(ep\.upstreamModel\);/);
+    assert.doesNotMatch(councilSource, /opencodeGoWrongTransportMessage/);
+    const responsesFlags = councilSource.match(/const isGoResponses = ep\.provider\.id === 'opencode-go' && opencodeGoTransportFor\(ep\.upstreamModel\) === 'responses';/g) ?? [];
+    assert.equal(responsesFlags.length, 2);
   });
   ok('(M3) council member + synthesis map the fail-open mismatch', () => {
     const maps = councilSource.match(
       /if \(ep\.provider\.id === 'opencode-go' && \/not supported for format\|oa-compat\/i\.test\(errorText\)\) \{/g,
     ) ?? [];
     assert.equal(maps.length, 2);
+    // T4: the messages branches reuse the same frozen helper (member +
+    // synthesis), so the helper call appears 4x total (2 chat + 2 messages).
     const throws = councilSource.match(
       /throw new Error\(opencodeGoFormatMismatchMessage\(ep\.upstreamModel, errorText\.slice\(0, 200\)\)\);/g,
     ) ?? [];
-    assert.equal(throws.length, 2);
+    assert.equal(throws.length, 4);
   });
-  ok('(M4) council member + synthesis usage blocks compute static cost', () => {
+  ok('(M4) council member + synthesis usage blocks compute static cost (chat transport; messages via mappedUsage)', () => {
     const costs = councilSource.match(
-      /else if \(ep\.provider\.id === 'opencode-go'\) cost = computeOpencodeGoCost\(usage, ep\.upstreamModel\);/g,
+      /else if \(ep\.provider\.id === 'opencode-go' && !isGoMessages\) cost = computeOpencodeGoCost\(usage, ep\.upstreamModel\);/g,
     ) ?? [];
     assert.equal(costs.length, 2);
   });
@@ -356,7 +372,11 @@ function seamChecks(): void {
     assert.ok(arnAt >= 0 && goAt > arnAt && llamaAt > goAt, 'priority slot must sit after arnict, before llamacpp');
   });
   ok('(F4) API client hits both Go routes with the frozen validate shape', () => {
-    assert.match(clientSource, /opencodego: \(\) => request<\{ data: OpenRouterModel\[\] \}>\('\/models\/opencodego'\),/);
+    assert.match(clientSource, /opencodego: \(\) => request<\{ data: OpenRouterModel\[\]; meta\?: OpencodeGoListMeta \}>\('\/models\/opencodego'\),/);
+    assert.match(clientSource, /export interface OpencodeGoListMeta \{/);
+    assert.match(clientSource, /version: string;/);
+    assert.match(clientSource, /count: number;/);
+    assert.match(clientSource, /fetchedAt: string;/);
     assert.match(clientSource, /validate: \(\) => request<OpencodeGoValidateResult>\('\/models\/opencodego\/validate'\),/);
     assert.match(clientSource, /export interface OpencodeGoValidateResult \{/);
     assert.match(clientSource, /ok: boolean;/);
@@ -365,9 +385,12 @@ function seamChecks(): void {
     assert.match(clientSource, /error\?: string;/);
   });
   ok('(F5) catalog hook is module-cached and fail-soft', () => {
-    assert.match(hookSource, /export function useOpencodeGoModels\(/);
+    assert.match(hookSource, /export const OPENCODE_GO_STATUS_CHANGED_EVENT = 'opencode-go:status-changed';/);
+    assert.match(hookSource, /SWR_TTL_MS/);
     assert.match(hookSource, /modelsApi\s*\n?\s*\.opencodego\(\)/);
-    assert.match(hookSource, /return \{ models, loading, error \};/);
+    assert.match(hookSource, /window\.addEventListener\(OPENCODE_GO_STATUS_CHANGED_EVENT,/);
+    assert.match(hookSource, /window\.removeEventListener\(OPENCODE_GO_STATUS_CHANGED_EVENT,/);
+    assert.match(hookSource, /return \{ models, loading, error, meta, refresh \};/);
   });
   ok('(F6) picker spreads Go models between arnict and llamacpp + expands the group', () => {
     assert.match(selectorSource, /import \{ useOpencodeGoModels \} from '\.\.\/hooks\/useOpencodeGoModels';/);
@@ -392,6 +415,8 @@ function seamChecks(): void {
     const goAt = settingsSource.indexOf('<OpenCodeGoSection />');
     const codexAt = settingsSource.indexOf('<ChatGPTSection />');
     assert.ok(arnAt >= 0 && goAt > arnAt && codexAt > goAt, 'card must mount between Arnict and ChatGPT');
+    assert.match(settingsSource, /OPENCODE_GO_STATUS_CHANGED_EVENT/);
+    assert.match(settingsSource, /window\.dispatchEvent\(new Event\(OPENCODE_GO_STATUS_CHANGED_EVENT\)\)/);
   });
   ok('(F9) frontend never calls the upstream directly (backend relay only)', () => {
     for (const [name, src] of [
@@ -462,7 +487,139 @@ function seamChecks(): void {
   });
 }
 
+// ===========================================================================
+// T4 — messages transport sender (Anthropic shape, T3 VERIFIED-shape with the
+// x-api-key auth divergence). responses still hard-fails, unknown still
+// fail-opens; the §7 literals and 401/402/429 texts are shared with chat.
+// ===========================================================================
+function t4Checks(): void {
+  ok('(T4-1) chat has no wrong-transport guard left (messages sends since T4, responses since T5)', () => {
+    assert.doesNotMatch(chatSource, /if \(goTransport === 'responses'\) \{/);
+    assert.doesNotMatch(chatSource, /goTransport === 'messages' \|\| goTransport === 'responses'/);
+    assert.doesNotMatch(chatSource, /goTransport/);
+  });
+  ok('(T4-2) chat messages sender posts to OPENCODE_GO_MESSAGES_URL with model bare + max_tokens + stream', () => {
+    assert.match(chatSource, /OPENCODE_GO_MESSAGES_URL/);
+    assert.match(chatSource, /buildOpencodeGoMessagesBody/);
+    assert.match(chatSource, /stream: true/);
+  });
+  ok('(T4-3) chat messages sender sets anthropic-version + x-api-key (T3 divergence, Bearer kept)', () => {
+    assert.match(chatSource, /OPENCODE_GO_ANTHROPIC_VERSION/);
+    assert.match(chatSource, /'anthropic-version'/);
+    assert.match(chatSource, /'x-api-key'/);
+  });
+  ok('(T4-4) chat maps tools to the Anthropic native form (never the OpenAI shape)', () => {
+    assert.match(chatSource, /input_schema/);
+    assert.match(chatSource, /tool_use/);
+    assert.match(chatSource, /tool_result/);
+  });
+  ok('(T4-5) chat parses the Anthropic SSE sequence (content_block_delta + message_delta)', () => {
+    assert.match(chatSource, /content_block_delta/);
+    assert.match(chatSource, /message_delta/);
+    assert.match(chatSource, /content_block_start/);
+    assert.match(chatSource, /message_stop/);
+  });
+  ok('(T4-6) chat maps Anthropic usage to computeOpencodeGoCost (hit=cache_read, write=cache_creation, contextTokens; upstream cost wins)', () => {
+    assert.match(chatSource, /cache_read_input_tokens/);
+    assert.match(chatSource, /cache_creation_input_tokens/);
+    assert.match(chatSource, /prompt_cache_write_tokens/);
+    assert.match(chatSource, /contextTokens/);
+    assert.match(chatSource, /computeOpencodeGoCost\(mappedUsage, upstreamModel, \{ contextTokens/);
+  });
+  ok('(T4-7) chat messages errors reuse the frozen 401/402/429 + mismatch literals (Content-Type lie read as text)', () => {
+    assert.match(chatSource, /await apiResponse\.text\(\)/);
+    assert.match(chatSource, /errorMsg = 'Invalid OpenCode Go API key\. Check your key in Settings → OpenCode Go\.';/);
+    assert.match(chatSource, /errorMsg = 'OpenCode Go usage limit reached for this model/);
+    assert.match(chatSource, /errorMsg = opencodeGoFormatMismatchMessage\(upstreamModel, goPrefix/);
+  });
+  ok('(T4-8) council member + synthesis have no wrong-transport guard left (both transports send)', () => {
+    assert.doesNotMatch(councilSource, /if \(goTransport === 'responses'\) \{/);
+    assert.doesNotMatch(councilSource, /goTransport === 'messages' \|\| goTransport === 'responses'/);
+    assert.doesNotMatch(councilSource, /goTransport/);
+  });
+  ok('(T4-9) council messages sender mirrors chat (URL + version + x-api-key + Anthropic SSE + cost)', () => {
+    assert.match(councilSource, /OPENCODE_GO_MESSAGES_URL/);
+    assert.match(councilSource, /OPENCODE_GO_ANTHROPIC_VERSION/);
+    assert.match(councilSource, /'anthropic-version'/);
+    assert.match(councilSource, /'x-api-key'/);
+    assert.match(councilSource, /content_block_delta/);
+    assert.match(councilSource, /message_delta/);
+    assert.match(councilSource, /cache_read_input_tokens/);
+    assert.match(councilSource, /cache_creation_input_tokens/);
+    assert.match(councilSource, /contextTokens/);
+    assert.match(councilSource, /input_schema/);
+  });
+  ok('(T4-10) no transport hard-fails and unknown still fail-opens (§7 intact)', () => {
+    assert.doesNotMatch(chatSource, /opencodeGoWrongTransportMessage/);
+    assert.doesNotMatch(councilSource, /opencodeGoWrongTransportMessage/);
+    assert.match(chatSource, /opencodeGoFormatMismatchMessage\(upstreamModel, goPrefix/);
+  });
+}
+
+// ===========================================================================
+// T5 — responses transport sender (Responses API, T3 VERIFIED GO Bearer-only).
+// Both phase-2 transports send now; `unknown` still fail-opens; the §7
+// literals and 401/402/429 texts are shared with chat/messages.
+// ===========================================================================
+function t5Checks(): void {
+  ok('(T5-1) chat responses sender posts to OPENCODE_GO_RESPONSES_URL with model bare + input + stream', () => {
+    assert.match(chatSource, /OPENCODE_GO_RESPONSES_URL/);
+    assert.match(chatSource, /buildOpencodeGoResponsesBody/);
+    assert.match(chatSource, /mapOpencodeGoResponsesUsage/);
+  });
+  ok('(T5-2) chat responses auth is Bearer-only (no x-api-key, no anthropic-version on the responses path)', () => {
+    assert.match(chatSource, /const isGoResponses = provider\.id === 'opencode-go' && opencodeGoTransportFor\(upstreamModel\) === 'responses';/);
+    assert.match(chatSource, /apiUrl = OPENCODE_GO_RESPONSES_URL;/);
+    const apiKeySets = chatSource.match(/headers\['x-api-key'\]/g) ?? [];
+    assert.equal(apiKeySets.length, 1);
+  });
+  ok('(T5-3) chat responses body caps reasoning/output (T3 high-by-default burns window) and ignores the app toggle', () => {
+    assert.match(chatSource, /reasoning: \{ effort: 'low' \}/);
+    assert.match(chatSource, /max_output_tokens/);
+    assert.match(chatSource, /instructions/);
+    const fnAt = chatSource.indexOf('export function buildOpencodeGoResponsesBody');
+    assert.ok(fnAt >= 0, 'responses body builder missing');
+    const fnBody = chatSource.slice(fnAt, fnAt + 2600);
+    assert.doesNotMatch(fnBody, /reasoningEffort/);
+    assert.doesNotMatch(fnBody, /reasoningEnabled/);
+  });
+  ok('(T5-4) chat parses the Responses SSE sequence (output_text deltas + response.completed + ping cost)', () => {
+    assert.match(chatSource, /output_text\.delta/);
+    assert.match(chatSource, /response\.completed/);
+    assert.match(chatSource, /function_call/);
+  });
+  ok('(T5-5) chat maps Responses usage to computeOpencodeGoCost (hit=cached_tokens, miss=in-cached, tier by contextTokens; upstream cost wins)', () => {
+    assert.match(chatSource, /input_tokens_details/);
+    assert.match(chatSource, /cached_tokens/);
+    assert.match(chatSource, /reasoning_tokens/);
+    assert.match(chatSource, /computeOpencodeGoCost\(mappedResponsesUsage, upstreamModel, \{ contextTokens/);
+  });
+  ok('(T5-6) chat responses errors reuse the frozen 401/402/429 + mismatch literals (Content-Type lie read as text)', () => {
+    assert.match(chatSource, /await apiResponse\.text\(\)/);
+    assert.match(chatSource, /errorMsg = 'Invalid OpenCode Go API key\. Check your key in Settings → OpenCode Go\.';/);
+    assert.match(chatSource, /errorMsg = 'OpenCode Go usage limit reached for this model/);
+    assert.match(chatSource, /errorMsg = opencodeGoFormatMismatchMessage\(upstreamModel, goPrefix/);
+  });
+  ok('(T5-7) council member + synthesis mirror chat on the responses path (URL + Bearer-only + SSE + cost)', () => {
+    assert.match(councilSource, /OPENCODE_GO_RESPONSES_URL/);
+    assert.match(councilSource, /buildCouncilGoResponsesBody/);
+    assert.match(councilSource, /mapCouncilGoResponsesUsage/);
+    assert.match(councilSource, /output_text\.delta/);
+    assert.match(councilSource, /response\.completed/);
+    assert.match(councilSource, /input_tokens_details/);
+    assert.match(councilSource, /contextTokens/);
+  });
+  ok('(T5-8) council responses paths add no x-api-key (Bearer-only per T3; the 2 messages sets stay)', () => {
+    const apiKeySets = councilSource.match(/ep\.headers\['x-api-key'\]/g) ?? [];
+    assert.equal(apiKeySets.length, 2);
+    const versions = councilSource.match(/ep\.headers\['anthropic-version'\]/g) ?? [];
+    assert.equal(versions.length, 2);
+  });
+}
+
 stabilityChecks();
 seamChecks();
+t4Checks();
+t5Checks();
 
 console.log(`opencode-go chat-gates guardrail: OK (${checks} checks)`);

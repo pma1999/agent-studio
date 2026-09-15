@@ -7,6 +7,7 @@ import type { ProviderRoutingConfig, ReasoningEffort, Tool, McpServer, Skill } f
 import { DEEPSEEK_ACCENT, CODEX_ACCENT, LLAMACPP_ACCENT, ABLITERATION_ACCENT, ARNICT_ACCENT, OPENCODE_GO_ACCENT } from '../utils/providers';
 import { chatgptApi, type ChatgptStatus } from '../api/client';
 import { CHATGPT_STATUS_CHANGED_EVENT } from '../hooks/useCodexModels';
+import { OPENCODE_GO_STATUS_CHANGED_EVENT } from '../hooks/useOpencodeGoModels';
 import { LlamaCppSection } from './LlamaCppSection';
 import { Modal } from './ui/Modal';
 import { Input } from './ui/Input';
@@ -410,7 +411,8 @@ function OpenCodeGoSection() {
     try {
       const result = await opencodeGoApi.validate();
       if (result.ok) {
-        return { ok: true, message: `OpenCode Go key is valid (probe model: ${result.model ?? 'kimi-k3'}).` };
+        window.dispatchEvent(new Event(OPENCODE_GO_STATUS_CHANGED_EVENT));
+        return { ok: true, message: `OpenCode Go key is valid (probe model: ${result.model ?? 'mimo-v2.5'}).` };
       }
       return { ok: false, message: result.error || 'Invalid OpenCode Go API key' };
     } catch (err) {
@@ -428,7 +430,10 @@ function OpenCodeGoSection() {
       localKey={localKey}
       setLocalKey={setLocalKey}
       savedKey={opencodeGoApiKey}
-      setSavedKey={setOpencodeGoApiKey}
+      setSavedKey={(v: string) => {
+        setOpencodeGoApiKey(v);
+        window.dispatchEvent(new Event(OPENCODE_GO_STATUS_CHANGED_EVENT));
+      }}
       placeholder={hasSavedKey ? `Saved: ${opencodeGoApiKey} — enter a new key to replace` : 'Paste your OpenCode Go API key'}
       helpText="Requires an OpenCode Go subscription — a Zen key without Go will not work. Test Connection spends a ~1-token probe. Phase 1 supports chat-transport models only. See"
       helpUrl="https://opencode.ai/docs/go/"

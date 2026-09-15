@@ -40,7 +40,7 @@ export const OPENCODE_GO_BASE_URL = 'https://opencode.ai/zen/go/v1';
 export const OPENCODE_GO_CHAT_COMPLETIONS_URL = `${OPENCODE_GO_BASE_URL}/chat/completions`;
 export const OPENCODE_GO_USER_AGENT = 'agent-studio/1.0';
 export const OPENCODE_GO_DOCS_URL = 'https://opencode.ai/docs/go/';
-export const OPENCODE_GO_VALIDATE_MODEL = 'kimi-k3';
+export const OPENCODE_GO_VALIDATE_MODEL = 'mimo-v2.5';
 
 export interface ProviderConfig {
   id: ProviderId;
@@ -684,17 +684,31 @@ export function arnictCachedTokens(usage: ArnictUsage | null | undefined): numbe
 // Pricing: docs "Usage limits" price table ($ per 1M tokens, same fetch);
 // per-token decimals = $/1M / 1M. DeepSeek peak/off-peak rows are booked at
 // the off-peak (base) rate (R3/D10: windows are dollar-based, usage carries
-// no `cost`). Static catalog: only chat-transport ids with a sourced price
+// no `cost`). Phase-2 tranche (T1): 8 `messages` + 5 `responses` rows from the
+// docs endpoint table in docs order (`grok-4.5` api.json-only, last) with
+// api.json `limit.context` + docs base-rate price + docs $/mo limit per row
+// (`grok-4.5`: no known limit → `priceNote`, no `monthlyLimitUsd`).
+// 29-vs-38: the 9 ids with no sendable transport stay out of the catalog in
+// `OPENCODE_GO_LIST_EXCLUDED` with reason (fail-closed list); 29 = 38 − 9.
+// Static catalog: only chat-transport ids with a sourced price
 // (fail-closed catalog, GC §3); unknown `opencode-go:` ids fail OPEN on send
 // with the §7 mismatch mapping (T3).
 // ---------------------------------------------------------------------------
+
+export const OPENCODE_GO_MESSAGES_URL = `${OPENCODE_GO_BASE_URL}/messages`;
+export const OPENCODE_GO_RESPONSES_URL = `${OPENCODE_GO_BASE_URL}/responses`;
+/** `anthropic-version` header value required on `POST /messages` (docs prose, VERIFIED 401-shape 2026-09-15). */
+export const OPENCODE_GO_ANTHROPIC_VERSION = '2023-06-01';
+/** Catalog version: `YYYY-MM-DD.N` per entry count (GC; bump on every catalog change). */
+export const OPENCODE_GO_CATALOG_VERSION = '2026-09-15.29';
 
 export type OpenCodeGoTransport = 'chat' | 'messages' | 'responses';
 
 /**
  * Bare chat-transport ids (fase-1 allowlist): docs endpoint-table rows on
- * `POST /chat/completions` ∩ api.json — `kimi-k3` is chat, so
- * `OPENCODE_GO_VALIDATE_MODEL` stays `'kimi-k3'`.
+ * `POST /chat/completions` ∩ api.json — `mimo-v2.5` is chat and the
+ * cheapest chat-transport id by the static price table (output $0.28/1M,
+ * then input $0.14/1M), so `OPENCODE_GO_VALIDATE_MODEL` is `'mimo-v2.5'`.
  */
 export const OPENCODE_GO_CHAT_TRANSPORT_MODELS: ReadonlySet<string> = new Set([
   'glm-5.3-flash',
@@ -768,6 +782,12 @@ export interface OpencodeGoCatalogModel {
   description: string;
   context_length: number;
   pricing: { prompt: string; completion: string };
+  transport: OpenCodeGoTransport;
+  /** True only once the transport is send-enabled (chat: T1; messages: T4; responses: T5). */
+  sendable: boolean;
+  /** Docs $/mes limit; absent only when unknown (`grok-4.5`) — then `priceNote` explains. */
+  monthlyLimitUsd?: number;
+  priceNote?: string;
 }
 
 export const OPENCODE_GO_CATALOG: OpencodeGoCatalogModel[] = [
@@ -778,6 +798,9 @@ export const OPENCODE_GO_CATALOG: OpencodeGoCatalogModel[] = [
       'Fast low-cost GLM. 1M context, tool calls.',
     context_length: 1000000,
     pricing: { prompt: '0.00000015', completion: '0.0000005' }, // $0.15 / $0.50 per 1M
+    transport: 'chat',
+    sendable: true,
+    monthlyLimitUsd: 60, // docs usage-limits $/mes limit
   },
   {
     id: `${OPENCODE_GO_PREFIX}glm-5.3`,
@@ -786,6 +809,9 @@ export const OPENCODE_GO_CATALOG: OpencodeGoCatalogModel[] = [
       'Flagship GLM. 1M context, tool calls.',
     context_length: 1000000,
     pricing: { prompt: '0.0000014', completion: '0.0000044' }, // $1.40 / $4.40 per 1M
+    transport: 'chat',
+    sendable: true,
+    monthlyLimitUsd: 15, // docs usage-limits $/mes limit
   },
   {
     id: `${OPENCODE_GO_PREFIX}glm-5.2`,
@@ -794,6 +820,9 @@ export const OPENCODE_GO_CATALOG: OpencodeGoCatalogModel[] = [
       'GLM generation. 1M context, tool calls.',
     context_length: 1000000,
     pricing: { prompt: '0.0000014', completion: '0.0000044' }, // $1.40 / $4.40 per 1M
+    transport: 'chat',
+    sendable: true,
+    monthlyLimitUsd: 60, // docs usage-limits $/mes limit
   },
   {
     id: `${OPENCODE_GO_PREFIX}glm-5.1`,
@@ -802,6 +831,9 @@ export const OPENCODE_GO_CATALOG: OpencodeGoCatalogModel[] = [
       'GLM generation. 202K context, tool calls.',
     context_length: 202752,
     pricing: { prompt: '0.0000014', completion: '0.0000044' }, // $1.40 / $4.40 per 1M
+    transport: 'chat',
+    sendable: true,
+    monthlyLimitUsd: 60, // docs usage-limits $/mes limit
   },
   {
     id: `${OPENCODE_GO_PREFIX}kimi-k3`,
@@ -810,6 +842,9 @@ export const OPENCODE_GO_CATALOG: OpencodeGoCatalogModel[] = [
       'Flagship Kimi. 1M context, tool calls.',
     context_length: 1048576,
     pricing: { prompt: '0.000003', completion: '0.000015' }, // $3.00 / $15.00 per 1M
+    transport: 'chat',
+    sendable: true,
+    monthlyLimitUsd: 15, // docs usage-limits $/mes limit
   },
   {
     id: `${OPENCODE_GO_PREFIX}kimi-k2.7-code`,
@@ -818,6 +853,9 @@ export const OPENCODE_GO_CATALOG: OpencodeGoCatalogModel[] = [
       'Kimi coding model. 256K context, tool calls.',
     context_length: 262144,
     pricing: { prompt: '0.00000095', completion: '0.000004' }, // $0.95 / $4.00 per 1M
+    transport: 'chat',
+    sendable: true,
+    monthlyLimitUsd: 60, // docs usage-limits $/mes limit
   },
   {
     id: `${OPENCODE_GO_PREFIX}kimi-k2.6`,
@@ -826,6 +864,9 @@ export const OPENCODE_GO_CATALOG: OpencodeGoCatalogModel[] = [
       'Kimi generation. 256K context, tool calls.',
     context_length: 262144,
     pricing: { prompt: '0.00000095', completion: '0.000004' }, // $0.95 / $4.00 per 1M
+    transport: 'chat',
+    sendable: true,
+    monthlyLimitUsd: 60, // docs usage-limits $/mes limit
   },
   {
     id: `${OPENCODE_GO_PREFIX}longcat-2.0`,
@@ -834,6 +875,9 @@ export const OPENCODE_GO_CATALOG: OpencodeGoCatalogModel[] = [
       'Long-context model. 1M context, tool calls.',
     context_length: 1000000,
     pricing: { prompt: '0.0000003', completion: '0.0000012' }, // $0.30 / $1.20 per 1M
+    transport: 'chat',
+    sendable: true,
+    monthlyLimitUsd: 60, // docs usage-limits $/mes limit
   },
   {
     id: `${OPENCODE_GO_PREFIX}deepseek-v4.1-flash`,
@@ -842,6 +886,9 @@ export const OPENCODE_GO_CATALOG: OpencodeGoCatalogModel[] = [
       'Fast DeepSeek V4. 1M context, tool calls. Peak/off-peak billed at base rate.',
     context_length: 1000000,
     pricing: { prompt: '0.00000015', completion: '0.0000006' }, // $0.15 / $0.60 per 1M off-peak (base)
+    transport: 'chat',
+    sendable: true,
+    monthlyLimitUsd: 15, // docs usage-limits $/mes limit
   },
   {
     id: `${OPENCODE_GO_PREFIX}deepseek-v4-pro`,
@@ -850,6 +897,9 @@ export const OPENCODE_GO_CATALOG: OpencodeGoCatalogModel[] = [
       'Highest-quality DeepSeek V4. 1M context, tool calls. Peak/off-peak billed at base rate.',
     context_length: 1000000,
     pricing: { prompt: '0.00000066', completion: '0.00000198' }, // $0.66 / $1.98 per 1M off-peak (base)
+    transport: 'chat',
+    sendable: true,
+    monthlyLimitUsd: 15, // docs usage-limits $/mes limit
   },
   {
     id: `${OPENCODE_GO_PREFIX}deepseek-v4-flash`,
@@ -858,6 +908,9 @@ export const OPENCODE_GO_CATALOG: OpencodeGoCatalogModel[] = [
       'Fast, low-cost DeepSeek V4. 1M context, tool calls. Peak/off-peak billed at base rate.',
     context_length: 1000000,
     pricing: { prompt: '0.00000015', completion: '0.0000006' }, // $0.15 / $0.60 per 1M off-peak (base)
+    transport: 'chat',
+    sendable: true,
+    monthlyLimitUsd: 30, // docs usage-limits $/mes limit
   },
   {
     id: `${OPENCODE_GO_PREFIX}deepseek-v4-flash-vision-exp`,
@@ -866,6 +919,9 @@ export const OPENCODE_GO_CATALOG: OpencodeGoCatalogModel[] = [
       'DeepSeek V4 Flash with vision. 1M context, tool calls. Peak/off-peak billed at base rate.',
     context_length: 1000000,
     pricing: { prompt: '0.00000015', completion: '0.0000006' }, // $0.15 / $0.60 per 1M off-peak (base)
+    transport: 'chat',
+    sendable: true,
+    monthlyLimitUsd: 15, // docs usage-limits $/mes limit
   },
   {
     id: `${OPENCODE_GO_PREFIX}mimo-v2.5`,
@@ -874,6 +930,9 @@ export const OPENCODE_GO_CATALOG: OpencodeGoCatalogModel[] = [
       'MiMo generation. 1M context, tool calls.',
     context_length: 1000000,
     pricing: { prompt: '0.00000014', completion: '0.00000028' }, // $0.14 / $0.28 per 1M
+    transport: 'chat',
+    sendable: true,
+    monthlyLimitUsd: 60, // docs usage-limits $/mes limit
   },
   {
     id: `${OPENCODE_GO_PREFIX}mimo-v2.5-pro`,
@@ -882,6 +941,9 @@ export const OPENCODE_GO_CATALOG: OpencodeGoCatalogModel[] = [
       'MiMo pro generation. 1M context, tool calls.',
     context_length: 1048576,
     pricing: { prompt: '0.000000435', completion: '0.00000087' }, // $0.435 / $0.87 per 1M
+    transport: 'chat',
+    sendable: true,
+    monthlyLimitUsd: 15, // docs usage-limits $/mes limit
   },
   {
     id: `${OPENCODE_GO_PREFIX}hy4-preview`,
@@ -890,6 +952,9 @@ export const OPENCODE_GO_CATALOG: OpencodeGoCatalogModel[] = [
       'Hy preview model. 1M context, tool calls.',
     context_length: 1024000,
     pricing: { prompt: '0.000000834', completion: '0.000002501' }, // $0.834 / $2.501 per 1M
+    transport: 'chat',
+    sendable: true,
+    monthlyLimitUsd: 30, // docs usage-limits $/mes limit
   },
   {
     id: `${OPENCODE_GO_PREFIX}hy3`,
@@ -898,17 +963,199 @@ export const OPENCODE_GO_CATALOG: OpencodeGoCatalogModel[] = [
       'Hy generation. 256K context, tool calls.',
     context_length: 256000,
     pricing: { prompt: '0.00000014', completion: '0.00000058' }, // $0.14 / $0.58 per 1M
+    transport: 'chat',
+    sendable: true,
+    monthlyLimitUsd: 60, // docs usage-limits $/mes limit
+  },
+  // -- Phase-2 tranche (T1 catalog; T4 send-enables the 8 messages rows,
+  // T5 the 5 responses rows): docs endpoint-table
+  // order, 8 messages + 5 responses (`grok-4.5` api.json-only, last). Context
+  // from api.json `limit.context`, pricing = docs base/off-peak $/1M rate,
+  // limit = docs $/mes. Tiered rows book the base tier (T2 models write/tiers).
+  {
+    id: `${OPENCODE_GO_PREFIX}minimax-m3`,
+    name: 'MiniMax M3',
+    description:
+      'MiniMax generation. 1M context, messages transport (phase-2).',
+    context_length: 1000000,
+    pricing: { prompt: '0.0000003', completion: '0.0000012' }, // $0.30 / $1.20 per 1M
+    transport: 'messages',
+    sendable: true,
+    monthlyLimitUsd: 60, // docs usage-limits $/mes limit (>512K x2, T2)
+  },
+  {
+    id: `${OPENCODE_GO_PREFIX}minimax-m2.7`,
+    name: 'MiniMax M2.7',
+    description:
+      'MiniMax generation. 200K context, messages transport (phase-2).',
+    context_length: 204800,
+    pricing: { prompt: '0.0000003', completion: '0.0000012' }, // $0.30 / $1.20 per 1M
+    transport: 'messages',
+    sendable: true,
+    monthlyLimitUsd: 60, // docs usage-limits $/mes limit
+  },
+  {
+    id: `${OPENCODE_GO_PREFIX}minimax-m2.5`,
+    name: 'MiniMax M2.5',
+    description:
+      'MiniMax generation. 200K context, messages transport (phase-2).',
+    context_length: 204800,
+    pricing: { prompt: '0.0000003', completion: '0.0000012' }, // $0.30 / $1.20 per 1M (docs read wins: 0.06)
+    transport: 'messages',
+    sendable: true,
+    monthlyLimitUsd: 60, // docs usage-limits $/mes limit
+  },
+  {
+    id: `${OPENCODE_GO_PREFIX}qwen3.8-max`,
+    name: 'Qwen3.8 Max',
+    description:
+      'Qwen generation. 1M context, messages transport (phase-2).',
+    context_length: 1000000,
+    pricing: { prompt: '0.000002', completion: '0.000006' }, // $2.00 / $6.00 per 1M
+    transport: 'messages',
+    sendable: true,
+    monthlyLimitUsd: 15, // docs usage-limits $/mes limit
+  },
+  {
+    id: `${OPENCODE_GO_PREFIX}qwen3.8-flash`,
+    name: 'Qwen3.8 Flash',
+    description:
+      'Fast Qwen generation. 1M context, messages transport (phase-2).',
+    context_length: 1000000,
+    pricing: { prompt: '0.00000015', completion: '0.00000047' }, // $0.15 / $0.47 per 1M
+    transport: 'messages',
+    sendable: true,
+    monthlyLimitUsd: 30, // docs usage-limits $/mes limit
+  },
+  {
+    id: `${OPENCODE_GO_PREFIX}qwen3.7-max`,
+    name: 'Qwen3.7 Max',
+    description:
+      'Qwen generation. 1M context, messages transport (phase-2).',
+    context_length: 1000000,
+    pricing: { prompt: '0.0000025', completion: '0.0000075' }, // $2.50 / $7.50 per 1M
+    transport: 'messages',
+    sendable: true,
+    monthlyLimitUsd: 30, // docs usage-limits $/mes limit
+  },
+  {
+    id: `${OPENCODE_GO_PREFIX}qwen3.7-plus`,
+    name: 'Qwen3.7 Plus',
+    description:
+      'Qwen generation. 1M context, messages transport (phase-2).',
+    context_length: 1000000,
+    pricing: { prompt: '0.0000004', completion: '0.0000016' }, // base tier <=256K $0.40 / $1.60 per 1M
+    transport: 'messages',
+    sendable: true,
+    monthlyLimitUsd: 60, // docs usage-limits $/mes limit (>256K 1.20/4.80, T2)
+  },
+  {
+    id: `${OPENCODE_GO_PREFIX}qwen3.6-plus`,
+    name: 'Qwen3.6 Plus',
+    description:
+      'Qwen generation. 1M context, messages transport (phase-2).',
+    context_length: 1000000,
+    pricing: { prompt: '0.0000005', completion: '0.000003' }, // base tier <=256K $0.50 / $3.00 per 1M
+    transport: 'messages',
+    sendable: true,
+    monthlyLimitUsd: 60, // docs usage-limits $/mes limit (>256K 2.00/6.00, T2)
+  },
+  {
+    id: `${OPENCODE_GO_PREFIX}grok-4.6`,
+    name: 'Grok-4.6',
+    description:
+      'Grok generation. 500K context, responses transport (phase-2).',
+    context_length: 500000,
+    pricing: { prompt: '0.000002', completion: '0.000006' }, // base tier <=200K $2.00 / $6.00 per 1M
+    transport: 'responses',
+    sendable: true,
+    monthlyLimitUsd: 15, // docs usage-limits $/mes limit (>200K x2, T2)
+  },
+  {
+    id: `${OPENCODE_GO_PREFIX}gpt-5.6-luna`,
+    name: 'GPT-5.6 Luna',
+    description:
+      'GPT Luna generation. 1M context, responses transport (phase-2).',
+    context_length: 1050000,
+    pricing: { prompt: '0.0000002', completion: '0.0000012' }, // base tier <=272K $0.20 / $1.20 per 1M
+    transport: 'responses',
+    sendable: true,
+    monthlyLimitUsd: 15, // docs usage-limits $/mes limit (>272K 0.40/1.80, T2)
+  },
+  {
+    id: `${OPENCODE_GO_PREFIX}muse-spark-1.3-contributor`,
+    name: 'Muse Spark 1.3 Contributor',
+    description:
+      'Muse Spark contributor build. 1M context, responses transport (phase-2).',
+    context_length: 1048576,
+    pricing: { prompt: '0.0000001', completion: '0.0000002' }, // $0.10 / $0.20 per 1M
+    transport: 'responses',
+    sendable: true,
+    monthlyLimitUsd: 60, // docs usage-limits $/mes limit
+  },
+  {
+    id: `${OPENCODE_GO_PREFIX}muse-spark-1.2-contributor`,
+    name: 'Muse Spark 1.2 Contributor',
+    description:
+      'Muse Spark contributor build. 1M context, responses transport (phase-2).',
+    context_length: 1048576,
+    pricing: { prompt: '0.0000001', completion: '0.0000002' }, // $0.10 / $0.20 per 1M
+    transport: 'responses',
+    sendable: true,
+    monthlyLimitUsd: 60, // docs usage-limits $/mes limit
+  },
+  {
+    id: `${OPENCODE_GO_PREFIX}grok-4.5`,
+    name: 'Grok-4.5',
+    description:
+      'Grok generation. 500K context, responses transport (phase-2).',
+    context_length: 500000,
+    pricing: { prompt: '0.000002', completion: '0.000006' }, // api.json base tier <=200K $2 / $6 per 1M
+    transport: 'responses',
+    sendable: true,
+    priceNote: 'Deprecated upstream, sin fila en docs: limite $ mensual desconocido (UNVERIFIED, probe T3 pendiente)',
   },
 ];
 
-/** Per-1M-token pricing used to compute cost (Go usage frames carry no `cost` field). */
-interface OpencodeGoPrice {
+/**
+ * Bare ids observable but NOT listable: deprecated api.json rows with no docs
+ * endpoint-table row, one api.json-only id missing from live, and two
+ * live-only ids with no official metadata. Inventing them context or price is
+ * forbidden — they resolve `unknown` (fail-open) until a keyed T3 probe.
+ */
+export const OPENCODE_GO_LIST_EXCLUDED: ReadonlyMap<string, string> = new Map([
+  ['glm-5', 'deprecated en api.json, sin fila en docs endpoint table (UNVERIFIED, probe T3 pendiente)'],
+  ['kimi-k2.5', 'deprecated en api.json, sin fila en docs endpoint table (UNVERIFIED, probe T3 pendiente)'],
+  ['mimo-v2-omni', 'deprecated en api.json, sin fila en docs endpoint table (UNVERIFIED, probe T3 pendiente)'],
+  ['mimo-v2-pro', 'deprecated en api.json, sin fila en docs endpoint table (UNVERIFIED, probe T3 pendiente)'],
+  ['omen-alpha', 'deprecated en api.json, sin fila en docs endpoint table (UNVERIFIED, probe T3 pendiente)'],
+  ['qwen3.5-plus', 'deprecated en api.json, sin fila en docs endpoint table (UNVERIFIED, probe T3 pendiente)'],
+  ['ox-alpha-free', 'deprecated en api.json ($0 "Unlimited"), ausente en live /v1/models: posible retirado (UNVERIFIED, probe T3 pendiente)'],
+  ['deepseek-flash', 'sin metadata oficial (UNVERIFIED, probe T3 pendiente)'],
+  ['hy3-preview', 'sin metadata oficial (UNVERIFIED, probe T3 pendiente)'],
+]);
+
+/** Per-1M-token pricing used to compute cost (Go usage frames carry no `cost` field).
+ * Base rows are docs "Usage limits" off-peak $/1M (docs win over api.json:
+ * `minimax-m2.5` cached-read 0.06), re-checked live 2026-09-15 ("Last updated:
+ * Sep 14, 2026"; DeepSeek V4.1 promo "4x · Ends Sep 20" still active, billed
+ * at base until expiry). `write` = docs "Cached Write" $/1M where declared.
+ * `tier` = absolute above-threshold row (contextTokens > upToTokens bills
+ * `above`; the edge belongs to the base tier; absent contextTokens bills base).
+ * Tiers are absolute rows, not one multiplier: qwen3.6-plus is in x4 but out
+ * x2, gpt-5.6-luna is out x1.5 but in/read/write x2. `peakDoubles` marks the 4
+ * DeepSeek chat rows whose Peak tariff is exactly x2 in/out/read (docs Peak
+ * rows VERIFIED live); only those rows read `opts.peak`. */
+export interface OpencodeGoPrice {
   inHit: number; // input, cache hit (docs "Cached Read" $/1M)
   inMiss: number; // input, cache miss (docs "Input" $/1M, base rate)
   out: number; // output (docs "Output" $/1M, base rate)
+  write?: number; // input creating a cache entry (docs "Cached Write" $/1M)
+  tier?: { upToTokens: number; above: { inHit: number; inMiss: number; out: number; write?: number } };
+  peakDoubles?: boolean; // DeepSeek only: opts.peak bills in/out/read x2
 }
 
-const OPENCODE_GO_PRICING: Record<string, OpencodeGoPrice> = {
+export const OPENCODE_GO_PRICING: Record<string, OpencodeGoPrice> = {
   'glm-5.3-flash': { inHit: 0.03, inMiss: 0.15, out: 0.5 },
   'glm-5.3': { inHit: 0.26, inMiss: 1.4, out: 4.4 },
   'glm-5.2': { inHit: 0.26, inMiss: 1.4, out: 4.4 },
@@ -917,14 +1164,45 @@ const OPENCODE_GO_PRICING: Record<string, OpencodeGoPrice> = {
   'kimi-k2.7-code': { inHit: 0.19, inMiss: 0.95, out: 4.0 },
   'kimi-k2.6': { inHit: 0.16, inMiss: 0.95, out: 4.0 },
   'longcat-2.0': { inHit: 0.006, inMiss: 0.3, out: 1.2 },
-  'deepseek-v4.1-flash': { inHit: 0.003, inMiss: 0.15, out: 0.6 },
-  'deepseek-v4-pro': { inHit: 0.022, inMiss: 0.66, out: 1.98 },
-  'deepseek-v4-flash': { inHit: 0.003, inMiss: 0.15, out: 0.6 },
-  'deepseek-v4-flash-vision-exp': { inHit: 0.003, inMiss: 0.15, out: 0.6 },
+  'deepseek-v4.1-flash': { inHit: 0.003, inMiss: 0.15, out: 0.6, peakDoubles: true },
+  'deepseek-v4-pro': { inHit: 0.022, inMiss: 0.66, out: 1.98, peakDoubles: true },
+  'deepseek-v4-flash': { inHit: 0.003, inMiss: 0.15, out: 0.6, peakDoubles: true },
+  'deepseek-v4-flash-vision-exp': { inHit: 0.003, inMiss: 0.15, out: 0.6, peakDoubles: true },
   'mimo-v2.5': { inHit: 0.0028, inMiss: 0.14, out: 0.28 },
   'mimo-v2.5-pro': { inHit: 0.003625, inMiss: 0.435, out: 0.87 },
   'hy4-preview': { inHit: 0.042, inMiss: 0.834, out: 2.501 },
   'hy3': { inHit: 0.035, inMiss: 0.14, out: 0.58 },
+  'minimax-m3': {
+    inHit: 0.06, inMiss: 0.3, out: 1.2,
+    tier: { upToTokens: 512000, above: { inHit: 0.12, inMiss: 0.6, out: 2.4 } }, // recipe >512K x2
+  },
+  'minimax-m2.7': { inHit: 0.06, inMiss: 0.3, out: 1.2, write: 0.375 },
+  'minimax-m2.5': { inHit: 0.06, inMiss: 0.3, out: 1.2, write: 0.375 },
+  'qwen3.8-max': { inHit: 0.25, inMiss: 2.0, out: 6.0, write: 2.5 },
+  'qwen3.8-flash': { inHit: 0.016, inMiss: 0.15, out: 0.47, write: 0.2 },
+  'qwen3.7-max': { inHit: 0.5, inMiss: 2.5, out: 7.5, write: 3.125 },
+  'qwen3.7-plus': {
+    inHit: 0.04, inMiss: 0.4, out: 1.6, write: 0.5,
+    tier: { upToTokens: 256000, above: { inHit: 0.12, inMiss: 1.2, out: 4.8, write: 1.5 } },
+  },
+  'qwen3.6-plus': {
+    inHit: 0.05, inMiss: 0.5, out: 3.0, write: 0.625,
+    tier: { upToTokens: 256000, above: { inHit: 0.2, inMiss: 2.0, out: 6.0, write: 2.5 } },
+  },
+  'grok-4.6': {
+    inHit: 0.5, inMiss: 2.0, out: 6.0,
+    tier: { upToTokens: 200000, above: { inHit: 1.0, inMiss: 4.0, out: 12.0 } },
+  },
+  'gpt-5.6-luna': {
+    inHit: 0.02, inMiss: 0.2, out: 1.2, write: 0.25,
+    tier: { upToTokens: 272000, above: { inHit: 0.04, inMiss: 0.4, out: 1.8, write: 0.5 } },
+  },
+  'muse-spark-1.3-contributor': { inHit: 0.002, inMiss: 0.1, out: 0.2 },
+  'muse-spark-1.2-contributor': { inHit: 0.002, inMiss: 0.1, out: 0.2 },
+  'grok-4.5': {
+    inHit: 0.3, inMiss: 2.0, out: 6.0, // api.json-only, no docs row (UNVERIFIED, probe T3 pendiente)
+    tier: { upToTokens: 200000, above: { inHit: 0.6, inMiss: 4.0, out: 12.0 } },
+  },
 };
 
 export interface OpencodeGoUsage {
@@ -933,24 +1211,49 @@ export interface OpencodeGoUsage {
   prompt_cache_hit_tokens?: number;
   prompt_cache_miss_tokens?: number;
   prompt_tokens_details?: { cached_tokens?: number };
+  prompt_cache_write_tokens?: number; // input tokens creating a cache entry (T4/T5 map Anthropic cache_creation_input_tokens here)
+}
+
+export interface OpencodeGoCostOpts {
+  contextTokens?: number; // request context size: picks the tier (absent = base tier, never fails)
+  peak?: boolean; // DeepSeek Peak window: x2 in/out/read on peakDoubles rows, ignored elsewhere
 }
 
 /**
  * Best-effort cost (USD) for an OpenCode Go response, using the static price
- * table and the cache hit/miss token split. Returns 0 for unknown models or
+ * table and the cache hit/miss/write token split. Write tokens are input that
+ * created cache (priced at the row `write` rate, else at `inMiss`) and are
+ * never double-counted inside miss. Returns 0 for unknown models or
  * absent usage. Callers only use it when `usage.cost === undefined` — the
  * upstream value, if ever present, is never overwritten.
  */
 export function computeOpencodeGoCost(
   usage: OpencodeGoUsage | null | undefined,
   upstreamModel: string,
+  opts?: OpencodeGoCostOpts,
 ): number {
   const price = OPENCODE_GO_PRICING[upstreamModel];
   if (!price || !usage) return 0;
+  let inHit = price.inHit;
+  let inMiss = price.inMiss;
+  let out = price.out;
+  let write = price.write;
+  if (price.tier && opts?.contextTokens !== undefined && opts.contextTokens > price.tier.upToTokens) {
+    inHit = price.tier.above.inHit;
+    inMiss = price.tier.above.inMiss;
+    out = price.tier.above.out;
+    write = price.tier.above.write;
+  }
+  if (price.peakDoubles && opts?.peak) {
+    inHit *= 2;
+    inMiss *= 2;
+    out *= 2;
+  }
   const hit = usage.prompt_cache_hit_tokens ?? usage.prompt_tokens_details?.cached_tokens ?? 0;
-  const miss = usage.prompt_cache_miss_tokens ?? Math.max((usage.prompt_tokens ?? 0) - hit, 0);
-  const out = usage.completion_tokens ?? 0;
-  return (hit * price.inHit + miss * price.inMiss + out * price.out) / 1_000_000;
+  const created = Math.max(usage.prompt_cache_write_tokens ?? 0, 0);
+  const miss = usage.prompt_cache_miss_tokens ?? Math.max((usage.prompt_tokens ?? 0) - hit - created, 0);
+  const outTokens = usage.completion_tokens ?? 0;
+  return (hit * inHit + miss * inMiss + created * (write ?? inMiss) + outTokens * out) / 1_000_000;
 }
 
 /** Cache-hit tokens from a Go usage object (for the app's cached_tokens metric). */

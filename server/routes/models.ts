@@ -4,7 +4,7 @@ import { AuthRequest } from '../middleware/auth.js';
 import db from '../db.js';
 import { getSettingValue } from './settings.js';
 import { normalizeOpenRouterEndpoints } from '../providerRouting.js';
-import { ABLITERATION_BASE_URL, ABLITERATION_CATALOG, ARNICT_BASE_URL, ARNICT_CATALOG, DEEPSEEK_BASE_URL, DEEPSEEK_CATALOG, LLAMACPP_PREFIX, OPENCODE_GO_CATALOG, OPENCODE_GO_CHAT_COMPLETIONS_URL, OPENCODE_GO_USER_AGENT, OPENCODE_GO_VALIDATE_MODEL } from '../providers/index.js';
+import { ABLITERATION_BASE_URL, ABLITERATION_CATALOG, ARNICT_BASE_URL, ARNICT_CATALOG, DEEPSEEK_BASE_URL, DEEPSEEK_CATALOG, LLAMACPP_PREFIX, OPENCODE_GO_BASE_URL, OPENCODE_GO_CATALOG, OPENCODE_GO_CATALOG_VERSION, OPENCODE_GO_CHAT_COMPLETIONS_URL, OPENCODE_GO_PREFIX, OPENCODE_GO_USER_AGENT, OPENCODE_GO_VALIDATE_MODEL } from '../providers/index.js';
 import {
   LLAMACPP_ACTIVE_PRESET_SCHEMA,
   LLAMACPP_CANONICAL_PRESETS,
@@ -38,6 +38,72 @@ let modelsCache: { data: any[]; timestamp: number } | null = null;
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 const ENDPOINTS_CACHE_TTL = 60 * 1000; // 1 minute
 const endpointsCache = new Map<string, { data: unknown[]; timestamp: number }>();
+
+// OpenCode Go drift monitor (T6): compares the live keyless `GET /v1/models`
+// id set against the frozen `OPENCODE_GO_CATALOG` and logs new/missing ids.
+// Info-only: never mutates `data`, never sends a key or query params, single
+// page, throttled to one check per hour, fail-open (degraded warn, never 500).
+const OPENCODE_GO_DRIFT_TTL_MS = 60 * 60 * 1000; // 1 hour (soft throttle)
+const OPENCODE_GO_DRIFT_TIMEOUT_MS = 5_000;
+let opencodeGoDriftLastCheck = 0;
+
+async function maybeLogOpencodeGoDrift(): Promise<void> {
+  const now = Date.now();
+  if (now - opencodeGoDriftLastCheck < OPENCODE_GO_DRIFT_TTL_MS) return;
+  opencodeGoDriftLastCheck = now;
+  const version = OPENCODE_GO_CATALOG_VERSION;
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), OPENCODE_GO_DRIFT_TIMEOUT_MS);
+    try {
+      const res = await fetch(`${OPENCODE_GO_BASE_URL}/models`, { signal: ctrl.signal });
+      if (!res.ok) {
+        console.warn(`[opencode-go] drift check degraded (version ${version}): live list HTTP ${res.status}`);
+        return;
+      }
+      // Upstream lies about Content-Type (text/plain on JSON bodies): read as
+      // text first, then parse by content, not by header.
+      const raw = await res.text();
+      let json: { data?: unknown };
+      try {
+        json = JSON.parse(raw) as { data?: unknown };
+      } catch {
+        console.warn(`[opencode-go] drift check degraded (version ${version}): live body is not JSON`);
+        return;
+      }
+      const liveIds = Array.isArray(json.data)
+        ? json.data
+            .map((entry) =>
+              entry !== null && typeof entry === 'object' && 'id' in entry
+                ? (entry as { id?: unknown }).id
+                : undefined,
+            )
+            .filter((id): id is string => typeof id === 'string')
+        : [];
+      const catalogBare = new Set(
+        OPENCODE_GO_CATALOG.map((entry) =>
+          entry.id.startsWith(OPENCODE_GO_PREFIX)
+            ? entry.id.slice(OPENCODE_GO_PREFIX.length)
+            : entry.id,
+        ),
+      );
+      const liveSet = new Set(liveIds);
+      const added = liveIds.filter((id) => !catalogBare.has(id));
+      const missing = [...catalogBare].filter((id) => !liveSet.has(id));
+      if (added.length === 0 && missing.length === 0) {
+        console.info(`[opencode-go] drift check ok (version ${version}): live matches catalog (${liveIds.length} ids)`);
+      } else {
+        console.info(
+          `[opencode-go] drift detected (version ${version}): new [${added.join(', ')}] missing [${missing.join(', ')}]`,
+        );
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch (err) {
+    console.warn(`[opencode-go] drift check degraded (version ${version}): ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
 
 /**
  * Pure mapper for one upstream catalog entry. Verbatim passthrough of
@@ -201,8 +267,17 @@ router.get('/arnict', (_req: AuthRequest, res: Response) => {
 });
 
 // GET /api/models/opencodego - Curated OpenCode Go catalog (static; no key needed)
+// `meta` is additive (version/count/fetchedAt); old clients reading only `data` keep working.
 router.get('/opencodego', (_req: AuthRequest, res: Response) => {
-  res.json({ data: OPENCODE_GO_CATALOG });
+  void maybeLogOpencodeGoDrift();
+  res.json({
+    data: OPENCODE_GO_CATALOG,
+    meta: {
+      version: OPENCODE_GO_CATALOG_VERSION,
+      count: OPENCODE_GO_CATALOG.length,
+      fetchedAt: new Date().toISOString(),
+    },
+  });
 });
 
 // GET /api/models/codex - Models available to the user's connected ChatGPT account

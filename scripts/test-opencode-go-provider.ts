@@ -20,14 +20,20 @@
  */
 import assert from 'node:assert/strict';
 import {
+  OPENCODE_GO_ANTHROPIC_VERSION,
   OPENCODE_GO_BASE_URL,
   OPENCODE_GO_CATALOG,
+  OPENCODE_GO_CATALOG_VERSION,
   OPENCODE_GO_CHAT_COMPLETIONS_URL,
   OPENCODE_GO_CHAT_TRANSPORT_MODELS,
   OPENCODE_GO_DOCS_URL,
+  OPENCODE_GO_LIST_EXCLUDED,
+  OPENCODE_GO_MESSAGES_URL,
   OPENCODE_GO_NON_CHAT_TRANSPORT,
   OPENCODE_GO_PREFIX,
+  OPENCODE_GO_PRICING,
   OPENCODE_GO_REASONING_CONTENT_MODELS,
+  OPENCODE_GO_RESPONSES_URL,
   OPENCODE_GO_USER_AGENT,
   OPENCODE_GO_VALIDATE_MODEL,
   assistantReasoningField,
@@ -128,7 +134,7 @@ ok('opencode-go URL constants are frozen (canonical /zen/go/v1, no trailing slas
   assert.equal(OPENCODE_GO_CHAT_COMPLETIONS_URL, 'https://opencode.ai/zen/go/v1/chat/completions');
   assert.equal(OPENCODE_GO_USER_AGENT, 'agent-studio/1.0');
   assert.equal(OPENCODE_GO_DOCS_URL, 'https://opencode.ai/docs/go/');
-  assert.equal(OPENCODE_GO_VALIDATE_MODEL, 'kimi-k3');
+  assert.equal(OPENCODE_GO_VALIDATE_MODEL, 'mimo-v2.5');
 });
 
 ok('opencode-go headers are Bearer + User-Agent (no x-api-key/Referer/Title)', () => {
@@ -142,12 +148,13 @@ ok('opencode-go headers are Bearer + User-Agent (no x-api-key/Referer/Title)', (
 });
 
 // ---------------------------------------------------------------------------
-// Catalog (GC §3 frozen static table: 16 chat-transport ids with sourced prices)
+// Catalog (GC §3 frozen static table: T1 29 = 16 chat + 8 messages + 5
+// responses; the 16 chat rows stay byte-identical below, scoped via slice)
 // ---------------------------------------------------------------------------
 
 ok('catalog carries exactly the 16 frozen chat-transport ids in order', () => {
   assert.deepEqual(
-    OPENCODE_GO_CATALOG.map((m) => m.id),
+    OPENCODE_GO_CATALOG.slice(0, 16).map((m) => m.id),
     [
       'opencode-go:glm-5.3-flash',
       'opencode-go:glm-5.3',
@@ -171,7 +178,7 @@ ok('catalog carries exactly the 16 frozen chat-transport ids in order', () => {
 
 ok('catalog names are frozen', () => {
   assert.deepEqual(
-    OPENCODE_GO_CATALOG.map((m) => m.name),
+    OPENCODE_GO_CATALOG.slice(0, 16).map((m) => m.name),
     [
       'GLM-5.3-Flash',
       'GLM-5.3',
@@ -195,7 +202,7 @@ ok('catalog names are frozen', () => {
 
 ok('catalog contexts are frozen (api.json limit.context per model)', () => {
   assert.deepEqual(
-    OPENCODE_GO_CATALOG.map((m) => m.context_length),
+    OPENCODE_GO_CATALOG.slice(0, 16).map((m) => m.context_length),
     [
       1000000,
       1000000,
@@ -219,7 +226,7 @@ ok('catalog contexts are frozen (api.json limit.context per model)', () => {
 
 ok('catalog pricing is frozen (docs $/1M table per-token decimals)', () => {
   assert.deepEqual(
-    OPENCODE_GO_CATALOG.map((m) => m.pricing),
+    OPENCODE_GO_CATALOG.slice(0, 16).map((m) => m.pricing),
     [
       { prompt: '0.00000015', completion: '0.0000005' },
       { prompt: '0.0000014', completion: '0.0000044' },
@@ -247,10 +254,10 @@ ok('catalog descriptions promise no structured-output/reasoning controls', () =>
   }
 });
 
-ok('every catalog bare id is a chat-transport id (fail-closed catalog)', () => {
+ok('every chat catalog bare id is a chat-transport id (fail-closed catalog)', () => {
   assert.equal(OPENCODE_GO_CHAT_TRANSPORT_MODELS.size, 16);
   assert.equal(OPENCODE_GO_NON_CHAT_TRANSPORT.size, 13);
-  for (const m of OPENCODE_GO_CATALOG) {
+  for (const m of OPENCODE_GO_CATALOG.slice(0, 16)) {
     const bare = toUpstreamModelId(m.id);
     assert.equal(OPENCODE_GO_CHAT_TRANSPORT_MODELS.has(bare), true, `${m.id} must be chat-transport`);
     assert.equal(OPENCODE_GO_NON_CHAT_TRANSPORT.has(bare), false, `${m.id} must not be phase-2`);
@@ -417,6 +424,313 @@ ok('ultracode and total_credits never appear in the catalog', () => {
   for (const m of OPENCODE_GO_CATALOG) {
     assert.doesNotMatch(m.id, /ultracode/);
   }
+});
+
+// ---------------------------------------------------------------------------
+// T1 full catalog: 29 ids in frozen order (16 chat + 8 messages in docs-table
+// order + 5 responses in docs-table order with grok-4.5 last), transport +
+// sendable per entry, monthly limits, 9 exclusions with reason, version.
+// ---------------------------------------------------------------------------
+
+const T1_PHASE2_IDS = [
+  'opencode-go:minimax-m3',
+  'opencode-go:minimax-m2.7',
+  'opencode-go:minimax-m2.5',
+  'opencode-go:qwen3.8-max',
+  'opencode-go:qwen3.8-flash',
+  'opencode-go:qwen3.7-max',
+  'opencode-go:qwen3.7-plus',
+  'opencode-go:qwen3.6-plus',
+  'opencode-go:grok-4.6',
+  'opencode-go:gpt-5.6-luna',
+  'opencode-go:muse-spark-1.3-contributor',
+  'opencode-go:muse-spark-1.2-contributor',
+  'opencode-go:grok-4.5',
+];
+
+ok('T1: catalog carries exactly the 29 frozen ids in order (grok-4.5 last)', () => {
+  assert.equal(OPENCODE_GO_CATALOG.length, 29);
+  assert.deepEqual(
+    OPENCODE_GO_CATALOG.slice(16).map((m) => m.id),
+    T1_PHASE2_IDS,
+  );
+  assert.equal(OPENCODE_GO_CATALOG[28].id, 'opencode-go:grok-4.5');
+});
+
+ok('T1: transport is correct per entry and sendable is true on all 29 (messages since T4, responses since T5)', () => {
+  for (const m of OPENCODE_GO_CATALOG.slice(0, 16)) {
+    assert.equal(m.transport, 'chat', `${m.id} transport`);
+    assert.equal(m.sendable, true, `${m.id} sendable`);
+  }
+  const expectedTransport = [
+    'messages', 'messages', 'messages', 'messages',
+    'messages', 'messages', 'messages', 'messages',
+    'responses', 'responses', 'responses', 'responses', 'responses',
+  ];
+  // T5: the 5 responses rows are send-enabled via POST /responses (T3 GO);
+  // no transport hard-fails anymore, `unknown` ids still fail open.
+  const expectedSendable = [
+    true, true, true, true, true, true, true, true,
+    true, true, true, true, true,
+  ];
+  OPENCODE_GO_CATALOG.slice(16).forEach((m, i) => {
+    assert.equal(m.transport, expectedTransport[i], `${m.id} transport`);
+    assert.equal(m.sendable, expectedSendable[i], `${m.id} sendable`);
+  });
+});
+
+ok('T4: sendable is true in the 8 messages entries', () => {
+  const messagesIds = [
+    'opencode-go:minimax-m3',
+    'opencode-go:minimax-m2.7',
+    'opencode-go:minimax-m2.5',
+    'opencode-go:qwen3.8-max',
+    'opencode-go:qwen3.8-flash',
+    'opencode-go:qwen3.7-max',
+    'opencode-go:qwen3.7-plus',
+    'opencode-go:qwen3.6-plus',
+  ];
+  const byId = new Map(OPENCODE_GO_CATALOG.map((m) => [m.id, m]));
+  for (const id of messagesIds) {
+    const m = byId.get(id);
+    assert.ok(m, `${id} present`);
+    assert.equal(m!.transport, 'messages', `${id} transport`);
+    assert.equal(m!.sendable, true, `${id} sendable`);
+  }
+});
+
+ok('T5: sendable is true in the 5 responses entries (Bearer-only sender, T3 GO)', () => {
+  const responsesIds = [
+    'opencode-go:grok-4.6',
+    'opencode-go:gpt-5.6-luna',
+    'opencode-go:muse-spark-1.3-contributor',
+    'opencode-go:muse-spark-1.2-contributor',
+    'opencode-go:grok-4.5',
+  ];
+  const byId = new Map(OPENCODE_GO_CATALOG.map((m) => [m.id, m]));
+  for (const id of responsesIds) {
+    const m = byId.get(id);
+    assert.ok(m, `${id} present`);
+    assert.equal(m!.transport, 'responses', `${id} transport`);
+    assert.equal(m!.sendable, true, `${id} sendable`);
+  }
+  // grok-4.5 bills like any responses row despite the unknown monthly limit.
+  assert.equal(byId.get('opencode-go:grok-4.5')!.monthlyLimitUsd, undefined);
+  assert.equal(typeof byId.get('opencode-go:grok-4.5')!.priceNote, 'string');
+});
+
+ok('T1: phase-2 entries carry docs context + base-rate pricing + monthly limit (grok-4.5: no limit + priceNote)', () => {
+  const byId = new Map(OPENCODE_GO_CATALOG.map((m) => [m.id, m]));
+  const expected: Array<[string, number, { prompt: string; completion: string }, number?]> = [
+    ['opencode-go:minimax-m3', 1000000, { prompt: '0.0000003', completion: '0.0000012' }, 60],
+    ['opencode-go:minimax-m2.7', 204800, { prompt: '0.0000003', completion: '0.0000012' }, 60],
+    ['opencode-go:minimax-m2.5', 204800, { prompt: '0.0000003', completion: '0.0000012' }, 60],
+    ['opencode-go:qwen3.8-max', 1000000, { prompt: '0.000002', completion: '0.000006' }, 15],
+    ['opencode-go:qwen3.8-flash', 1000000, { prompt: '0.00000015', completion: '0.00000047' }, 30],
+    ['opencode-go:qwen3.7-max', 1000000, { prompt: '0.0000025', completion: '0.0000075' }, 30],
+    ['opencode-go:qwen3.7-plus', 1000000, { prompt: '0.0000004', completion: '0.0000016' }, 60],
+    ['opencode-go:qwen3.6-plus', 1000000, { prompt: '0.0000005', completion: '0.000003' }, 60],
+    ['opencode-go:grok-4.6', 500000, { prompt: '0.000002', completion: '0.000006' }, 15],
+    ['opencode-go:gpt-5.6-luna', 1050000, { prompt: '0.0000002', completion: '0.0000012' }, 15],
+    ['opencode-go:muse-spark-1.3-contributor', 1048576, { prompt: '0.0000001', completion: '0.0000002' }, 60],
+    ['opencode-go:muse-spark-1.2-contributor', 1048576, { prompt: '0.0000001', completion: '0.0000002' }, 60],
+  ];
+  for (const [id, ctx, pricing, limit] of expected) {
+    const m = byId.get(id);
+    assert.ok(m, `${id} present`);
+    assert.equal(m!.context_length, ctx, `${id} context`);
+    assert.deepEqual(m!.pricing, pricing, `${id} pricing`);
+    assert.equal(m!.monthlyLimitUsd, limit, `${id} monthly limit`);
+  }
+  const grok45 = byId.get('opencode-go:grok-4.5');
+  assert.ok(grok45, 'opencode-go:grok-4.5 present');
+  assert.equal(grok45!.context_length, 500000, 'grok-4.5 context');
+  assert.deepEqual(grok45!.pricing, { prompt: '0.000002', completion: '0.000006' }, 'grok-4.5 pricing');
+  assert.equal(grok45!.monthlyLimitUsd, undefined, 'grok-4.5 has no known monthly limit');
+  assert.equal(typeof grok45!.priceNote, 'string', 'grok-4.5 carries a priceNote');
+  assert.ok((grok45!.priceNote as string).length > 0, 'grok-4.5 priceNote non-empty');
+});
+
+ok('T1: opencodeGoTransportFor resolves all 29 plus the 9 excluded as unknown', () => {
+  for (const m of OPENCODE_GO_CATALOG.slice(0, 16)) {
+    assert.equal(opencodeGoTransportFor(toUpstreamModelId(m.id)), 'chat', m.id);
+  }
+  for (const id of T1_PHASE2_IDS) {
+    const bare = toUpstreamModelId(id);
+    assert.equal(opencodeGoTransportFor(bare), OPENCODE_GO_NON_CHAT_TRANSPORT.get(bare), bare);
+    assert.equal(opencodeGoTransportFor(id), OPENCODE_GO_NON_CHAT_TRANSPORT.get(bare), id);
+  }
+  const excluded = [...OPENCODE_GO_LIST_EXCLUDED.keys()];
+  assert.equal(excluded.length, 9);
+  for (const bare of excluded) {
+    assert.equal(opencodeGoTransportFor(bare), 'unknown', `${bare} excluded -> unknown`);
+    assert.equal(opencodeGoTransportFor(`${OPENCODE_GO_PREFIX}${bare}`), 'unknown', `${bare} namespaced -> unknown`);
+  }
+  assert.equal(opencodeGoTransportFor('zzz-desconocido'), 'unknown');
+});
+
+ok('T1: LIST_EXCLUDED holds exactly the 9 bare ids with reason, all absent from the catalog', () => {
+  assert.deepEqual(
+    [...OPENCODE_GO_LIST_EXCLUDED.keys()],
+    [
+      'glm-5',
+      'kimi-k2.5',
+      'mimo-v2-omni',
+      'mimo-v2-pro',
+      'omen-alpha',
+      'qwen3.5-plus',
+      'ox-alpha-free',
+      'deepseek-flash',
+      'hy3-preview',
+    ],
+  );
+  assert.equal(
+    OPENCODE_GO_LIST_EXCLUDED.get('deepseek-flash'),
+    'sin metadata oficial (UNVERIFIED, probe T3 pendiente)',
+  );
+  assert.equal(
+    OPENCODE_GO_LIST_EXCLUDED.get('hy3-preview'),
+    'sin metadata oficial (UNVERIFIED, probe T3 pendiente)',
+  );
+  for (const [bare, reason] of OPENCODE_GO_LIST_EXCLUDED) {
+    assert.equal(typeof reason, 'string', `${bare} reason`);
+    assert.ok(reason.length > 0, `${bare} reason non-empty`);
+  }
+  const catalogBare = new Set(OPENCODE_GO_CATALOG.map((m) => toUpstreamModelId(m.id)));
+  for (const bare of OPENCODE_GO_LIST_EXCLUDED.keys()) {
+    assert.equal(catalogBare.has(bare), false, `${bare} absent from catalog`);
+  }
+  for (const m of OPENCODE_GO_CATALOG) {
+    assert.equal(OPENCODE_GO_LIST_EXCLUDED.has(toUpstreamModelId(m.id)), false, `${m.id} not excluded`);
+  }
+});
+
+ok('T1: chat entries carry their docs monthly limit (api.json limit + docs table)', () => {
+  const byId = new Map(OPENCODE_GO_CATALOG.map((m) => [m.id, m]));
+  const expected: Array<[string, number]> = [
+    ['opencode-go:glm-5.3-flash', 60],
+    ['opencode-go:glm-5.3', 15],
+    ['opencode-go:glm-5.2', 60],
+    ['opencode-go:glm-5.1', 60],
+    ['opencode-go:kimi-k3', 15],
+    ['opencode-go:kimi-k2.7-code', 60],
+    ['opencode-go:kimi-k2.6', 60],
+    ['opencode-go:longcat-2.0', 60],
+    ['opencode-go:deepseek-v4.1-flash', 15],
+    ['opencode-go:deepseek-v4-pro', 15],
+    ['opencode-go:deepseek-v4-flash', 30],
+    ['opencode-go:deepseek-v4-flash-vision-exp', 15],
+    ['opencode-go:mimo-v2.5', 60],
+    ['opencode-go:mimo-v2.5-pro', 15],
+    ['opencode-go:hy4-preview', 30],
+    ['opencode-go:hy3', 60],
+  ];
+  assert.equal(expected.length, 16);
+  for (const [id, limit] of expected) {
+    assert.equal(byId.get(id)!.monthlyLimitUsd, limit, `${id} monthly limit`);
+  }
+});
+
+ok('T1: catalog version and phase-2 endpoint constants are frozen', () => {
+  assert.equal(OPENCODE_GO_CATALOG_VERSION, '2026-09-15.29');
+  assert.equal(OPENCODE_GO_MESSAGES_URL, 'https://opencode.ai/zen/go/v1/messages');
+  assert.equal(OPENCODE_GO_RESPONSES_URL, 'https://opencode.ai/zen/go/v1/responses');
+  assert.equal(OPENCODE_GO_ANTHROPIC_VERSION, '2023-06-01');
+});
+
+// ---------------------------------------------------------------------------
+// T2 pricing: tiers/write/peak cost engine (docs usage-limits table,
+// re-checked live 2026-09-15; promo DeepSeek V4.1 "4x · Ends Sep 20" active).
+// ---------------------------------------------------------------------------
+
+ok('T2: OPENCODE_GO_PRICING covers all 29 catalog ids with docs base rates', () => {
+  assert.deepEqual(
+    Object.keys(OPENCODE_GO_PRICING).sort(),
+    OPENCODE_GO_CATALOG.map((m) => toUpstreamModelId(m.id)).sort(),
+  );
+  // Docs-win spot: minimax-m2.5 cached-read 0.06 (not api.json 0.03).
+  assert.deepEqual(
+    OPENCODE_GO_PRICING['minimax-m2.5'],
+    { inHit: 0.06, inMiss: 0.3, out: 1.2, write: 0.375 },
+  );
+  assert.equal(OPENCODE_GO_PRICING['qwen3.8-flash'].write, 0.2);
+  assert.equal(OPENCODE_GO_PRICING['kimi-k3'].write, undefined);
+});
+
+ok('T2: write tokens price at Cached Write, else at the miss rate', () => {
+  const created = computeOpencodeGoCost(
+    { prompt_tokens: 1000, prompt_cache_write_tokens: 200, completion_tokens: 100 } as never,
+    'minimax-m2.7',
+  );
+  assert.ok(Math.abs(created - 435 / 1_000_000) < 1e-12, `write-rate ${created} ~= ${435 / 1_000_000}`);
+  const fallback = computeOpencodeGoCost(
+    { prompt_tokens: 1000, prompt_cache_write_tokens: 200, completion_tokens: 0 } as never,
+    'kimi-k3',
+  );
+  assert.ok(Math.abs(fallback - 3000 / 1_000_000) < 1e-12, `miss-fallback ${fallback} ~= ${3000 / 1_000_000}`);
+});
+
+ok('T2: context tiers bill above the threshold, edge stays on the base tier', () => {
+  const out1M = { prompt_tokens: 0, completion_tokens: 1_000_000 } as never;
+  const cases: Array<[string, number, number, number]> = [
+    // [model, baseOut, aboveOut, upToTokens]
+    ['qwen3.7-plus', 1.6, 4.8, 256000],
+    ['qwen3.6-plus', 3.0, 6.0, 256000],
+    ['gpt-5.6-luna', 1.2, 1.8, 272000],
+    ['grok-4.6', 6.0, 12.0, 200000],
+    ['grok-4.5', 6.0, 12.0, 200000],
+    ['minimax-m3', 1.2, 2.4, 512000],
+  ];
+  for (const [model, base, above, upTo] of cases) {
+    assert.equal(computeOpencodeGoCost(out1M, model), base, `${model} base`);
+    assert.equal(computeOpencodeGoCost(out1M, model, { contextTokens: upTo }), base, `${model} edge`);
+    assert.equal(computeOpencodeGoCost(out1M, model, { contextTokens: upTo + 1 }), above, `${model} above`);
+  }
+  // Read + write follow the tier too (non-uniform multipliers are absolute rows).
+  const hit1M = { prompt_tokens: 1_000_000, prompt_cache_hit_tokens: 1_000_000, completion_tokens: 0 } as never;
+  assert.equal(computeOpencodeGoCost(hit1M, 'grok-4.6', { contextTokens: 200001 }), 1.0);
+  const mk1M = { prompt_tokens: 0, prompt_cache_write_tokens: 1_000_000, completion_tokens: 0 } as never;
+  assert.equal(computeOpencodeGoCost(mk1M, 'qwen3.7-plus', { contextTokens: 256000 }), 0.5);
+  assert.equal(computeOpencodeGoCost(mk1M, 'qwen3.7-plus', { contextTokens: 256001 }), 1.5);
+});
+
+ok('T2: absent contextTokens bills the base tier without failing', () => {
+  const out1M = { prompt_tokens: 0, completion_tokens: 1_000_000 } as never;
+  assert.equal(computeOpencodeGoCost(out1M, 'qwen3.7-plus'), 1.6);
+  assert.equal(computeOpencodeGoCost(out1M, 'qwen3.7-plus', {}), 1.6);
+  assert.equal(computeOpencodeGoCost(out1M, 'qwen3.7-plus', { peak: true }), 1.6);
+});
+
+ok('T2: peak doubles DeepSeek in/out/read and is ignored elsewhere', () => {
+  const usage = { prompt_tokens: 1_000_000, completion_tokens: 1_000_000 } as never;
+  assert.equal(computeOpencodeGoCost(usage, 'deepseek-v4-pro'), 2.64);
+  assert.equal(computeOpencodeGoCost(usage, 'deepseek-v4-pro', { peak: true }), 5.28);
+  const hit1M = { prompt_tokens: 1_000_000, prompt_cache_hit_tokens: 1_000_000, completion_tokens: 0 } as never;
+  assert.equal(computeOpencodeGoCost(hit1M, 'deepseek-v4-flash', { peak: true }), 0.006);
+  // Non-DeepSeek rows ignore peak without error.
+  assert.equal(
+    computeOpencodeGoCost(
+      { prompt_tokens: 1000, completion_tokens: 500 } as never,
+      'kimi-k3',
+      { peak: true },
+    ),
+    0.0105,
+  );
+  assert.equal(
+    computeOpencodeGoCost(
+      { prompt_tokens: 0, completion_tokens: 1_000_000 } as never,
+      'qwen3.7-plus',
+      { contextTokens: 256001, peak: true },
+    ),
+    4.8,
+  );
+});
+
+ok('T2: unknown models and missing usage cost 0 even with opts', () => {
+  const usage = { prompt_tokens: 100, completion_tokens: 100 } as never;
+  assert.equal(computeOpencodeGoCost(usage, 'nope', { contextTokens: 999_999_999, peak: true }), 0);
+  assert.equal(computeOpencodeGoCost(null, 'kimi-k3', { contextTokens: 1, peak: true }), 0);
+  assert.equal(computeOpencodeGoCost(undefined, 'grok-4.6', { contextTokens: 200001 }), 0);
 });
 
 console.log(`opencode-go provider tests passed (${checks} checks)`);

@@ -49,6 +49,25 @@ export const ARNICT_ACCENT = '#14b8a6';
 /** Brand accent for the OpenCode Go-direct provider. */
 export const OPENCODE_GO_ACCENT = '#a855f7';
 
+/**
+ * Transport badge shown on phase-2 OpenCode Go rows (T7). `messages` rows
+ * wear the `Anthropic` badge (amber), `responses` rows the `Responses` badge
+ * (blue). Chat-transport rows wear no badge. Pairs are WCAG AA on both light
+ * and dark surfaces (amber 6.37:1, blue 7.15:1, measured).
+ */
+export type OpencodeGoBadgeKind = 'anthropic' | 'responses';
+
+export interface OpencodeGoBadgeMeta {
+  label: string;
+  background: string;
+  color: string;
+}
+
+export const OPENCODE_GO_BADGE_META: Record<OpencodeGoBadgeKind, OpencodeGoBadgeMeta> = {
+  anthropic: { label: 'Anthropic', background: '#fef3c7', color: '#92400e' },
+  responses: { label: 'Responses', background: '#dbeafe', color: '#1e40af' },
+};
+
 /** Brand accent for the llama.cpp (local) provider. */
 export const LLAMACPP_ACCENT = '#ca8a04';
 

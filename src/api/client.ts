@@ -727,7 +727,7 @@ export interface CompactConversationOptions {
   model?: string;
   signal?: AbortSignal;
   onStarted?: (info: CompactStartedInfo) => void;
-  onEnded?: (info: CompactEndedInfo) => void;
+  onEnded?: (info: CompactEndedInfo) => void | Promise<void>;
   onFailed?: (reason: string, details?: CompactFailedDetails) => void;
 }
 
@@ -862,7 +862,11 @@ export async function compactConversation(
               Array.isArray(parsed.tail_message_ids))
           ) {
             terminal = true;
-            options?.onEnded?.({
+            // Awaited (not fire-and-forget): callers that `await
+            // compactConversation` must observe the post-terminal refresh
+            // applied before the turn ends, otherwise the banner lags one
+            // compaction behind (quick-compact-lag RED probe).
+            await options?.onEnded?.({
               compaction_id: String(parsed.compaction_id ?? ''),
               conversation_id: String(parsed.conversation_id ?? conversationId),
               tail_message_ids: (Array.isArray(parsed.tail_message_ids) ? parsed.tail_message_ids : []).filter(
@@ -917,6 +921,14 @@ export async function compactConversation(
 }
 
 // Models
+/** Additive versioned envelope for `GET /models/opencodego` (T6 sync):
+ *  old clients read only `data`; new clients also read `meta`. */
+export interface OpencodeGoListMeta {
+  version: string;
+  count: number;
+  fetchedAt: string;
+}
+
 export const modelsApi = {
   openrouter: () => request<{ data: OpenRouterModel[] }>('/models/openrouter'),
   openrouterEndpoints: (model: string) => request<{ data: OpenRouterEndpoint[] }>(
@@ -926,7 +938,7 @@ export const modelsApi = {
   codex: () => request<{ data: OpenRouterModel[] }>('/models/codex'),
   abliteration: () => request<{ data: OpenRouterModel[] }>('/models/abliteration'),
   arnict: () => request<{ data: OpenRouterModel[] }>('/models/arnict'),
-  opencodego: () => request<{ data: OpenRouterModel[] }>('/models/opencodego'),
+  opencodego: () => request<{ data: OpenRouterModel[]; meta?: OpencodeGoListMeta }>('/models/opencodego'),
   llamacpp: () => request<{ data: LlamaCppModel[] }>('/models/llamacpp'),
   /** NEVER-THROWS §5 status payload. */
   llamacppStatus: () => request<LlamaCppStatus>('/models/llamacpp/status'),

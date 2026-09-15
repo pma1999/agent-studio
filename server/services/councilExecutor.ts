@@ -32,8 +32,10 @@ import {
   opencodeGoFormatMismatchMessage,
   opencodeGoHistoryReasoningField,
   opencodeGoTransportFor,
-  opencodeGoWrongTransportMessage,
   resolveProviderId,
+  OPENCODE_GO_ANTHROPIC_VERSION,
+  OPENCODE_GO_MESSAGES_URL,
+  OPENCODE_GO_RESPONSES_URL,
   type ProviderConfig,
   type ProviderId,
 } from '../providers/index.js';
@@ -53,6 +55,298 @@ const COMPARISON_EXTRACTION_MAX_TOKENS = 8192;
 const COMPARISON_EXTRACTION_MAX_REPAIR_ATTEMPTS = 1;
 const MAX_RETRIES = 1;
 const MAX_MEMBER_CONTENT_FOR_COMPARISON = 2800; // chars per member to stay within context
+
+// ---------------------------------------------------------------------------
+// OpenCode Go `messages` transport sender (T4, Anthropic shape) — réplica del
+// sender de `server/routes/chat.ts` para los dos paths del executor (miembro
+// y síntesis). T3 VERIFIED-shape 2026-09-15: `POST {OPENCODE_GO_MESSAGES_URL}`
+// con `model` bare + `max_tokens` + `messages` + `stream`, headers
+// `anthropic-version` + `Bearer` + `x-api-key` (divergencia: `Bearer` solo
+// 401s) + `x-opencode-session`. Tools OpenAI→Anthropic nativo:
+// `{type:'function',function:{name,description,parameters}}` →
+// `{name,description,input_schema:parameters}` (sin `tool_choice` ni
+// `parallel_tool_calls`); `tool_calls`→`tool_use`, `tool`→`tool_result`;
+// `reasoning` nunca viaja (se ignora, D4).
+// ---------------------------------------------------------------------------
+
+type CouncilOpenRouterToolDef = { type: 'function'; function: { name: string; description: string; parameters: Record<string, unknown> } };
+
+/** Extracts plain text from an OpenAI chat content value (string or parts array). */
+function councilGoMessagesTextContent(content: string | unknown[] | null | undefined): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((p) => {
+        if (typeof p === 'string') return p;
+        if (p && typeof p === 'object') {
+          const part = p as { type?: unknown; text?: unknown };
+          if (part.type === 'text' && typeof part.text === 'string') return part.text;
+        }
+        return '';
+      })
+      .join('');
+  }
+  return '';
+}
+
+/** Anthropic `usage` shape (T3 P2/P3 literales) para el motor de coste T2. */
+interface CouncilGoMessagesUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_creation_input_tokens?: number;
+  cache_read_input_tokens?: number;
+  cost?: string | number;
+}
+
+/**
+ * Maps the chat-completions `messages` array to an Anthropic `POST /messages`
+ * body (same contract as `buildOpencodeGoMessagesBody` in chat.ts): system
+ * rows fold into top-level `system`, assistant `tool_calls` into `tool_use`
+ * blocks, `tool` rows into `user` `tool_result` blocks, consecutive same-role
+ * rows merge; reasoning fields never travel.
+ */
+function buildCouncilGoMessagesBody(opts: {
+  upstreamModel: string;
+  messages: Array<{ role: string; content?: string | unknown[] | null; tool_call_id?: string; tool_calls?: unknown[] }>;
+  openRouterTools: CouncilOpenRouterToolDef[];
+  includeTools: boolean;
+  temperature: number;
+  maxTokens: number;
+}): Record<string, unknown> {
+  const systemTexts: string[] = [];
+  const converted: Array<{ role: string; content: unknown }> = [];
+  for (const m of opts.messages) {
+    if (m.role === 'system') {
+      const text = councilGoMessagesTextContent(m.content);
+      if (text) systemTexts.push(text);
+      continue;
+    }
+    if (m.role === 'tool') {
+      converted.push({
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: m.tool_call_id ?? '', content: councilGoMessagesTextContent(m.content) }],
+      });
+      continue;
+    }
+    if (m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length > 0) {
+      const blocks: unknown[] = [];
+      const text = councilGoMessagesTextContent(m.content);
+      if (text) blocks.push({ type: 'text', text });
+      for (const raw of m.tool_calls) {
+        const tc = raw as { id?: string; function?: { name?: string; arguments?: string } };
+        let input: Record<string, unknown> = {};
+        try {
+          const parsedArgs: unknown = JSON.parse(tc.function?.arguments ?? '{}');
+          if (parsedArgs && typeof parsedArgs === 'object' && !Array.isArray(parsedArgs)) {
+            input = parsedArgs as Record<string, unknown>;
+          }
+        } catch {
+          input = {};
+        }
+        blocks.push({ type: 'tool_use', id: tc.id ?? '', name: tc.function?.name ?? '', input });
+      }
+      converted.push({ role: 'assistant', content: blocks });
+      continue;
+    }
+    converted.push({
+      role: m.role === 'assistant' ? 'assistant' : 'user',
+      content: councilGoMessagesTextContent(m.content),
+    });
+  }
+  const merged: Array<{ role: string; content: unknown }> = [];
+  for (const m of converted) {
+    const prev = merged[merged.length - 1];
+    if (prev && prev.role === m.role) {
+      const a = Array.isArray(prev.content) ? (prev.content as unknown[]) : [{ type: 'text', text: prev.content ?? '' }];
+      const b = Array.isArray(m.content) ? (m.content as unknown[]) : [{ type: 'text', text: m.content ?? '' }];
+      prev.content = [...a, ...b];
+    } else {
+      merged.push({ role: m.role, content: m.content });
+    }
+  }
+  const body: Record<string, unknown> = {
+    model: opts.upstreamModel,
+    messages: merged,
+    max_tokens: opts.maxTokens,
+    temperature: opts.temperature,
+    stream: true,
+  };
+  if (systemTexts.length > 0) body.system = systemTexts.join('\n\n');
+  if (opts.includeTools && opts.openRouterTools.length > 0) {
+    body.tools = opts.openRouterTools.map((t) => ({
+      name: t.function.name,
+      description: t.function.description,
+      input_schema: t.function.parameters,
+    }));
+  }
+  return body;
+}
+
+/**
+ * Maps Anthropic messages usage onto `computeOpencodeGoCost` (same contract
+ * as `mapOpencodeGoMessagesUsage` in chat.ts): explicit miss = `input_tokens`,
+ * hit = `cache_read_input_tokens`, write (`prompt_cache_write_tokens`) =
+ * `cache_creation_input_tokens`; tier by the real request context (cached
+ * input + output); an upstream numeric `cost` wins and is never overwritten.
+ */
+function mapCouncilGoMessagesUsage(usage: CouncilGoMessagesUsage | null | undefined): {
+  mappedUsage: { prompt_tokens: number; completion_tokens: number; prompt_cache_hit_tokens: number; prompt_cache_miss_tokens: number; prompt_cache_write_tokens: number };
+  promptTotal: number;
+  outputTokens: number;
+  cachedTokens: number;
+  upstreamCost: number | null;
+} {
+  const input = usage?.input_tokens ?? 0;
+  const output = usage?.output_tokens ?? 0;
+  const created = usage?.cache_creation_input_tokens ?? 0;
+  const read = usage?.cache_read_input_tokens ?? 0;
+  let upstreamCost: number | null = null;
+  if (usage?.cost !== undefined) {
+    const n = typeof usage.cost === 'string' ? Number(usage.cost) : usage.cost;
+    if (typeof n === 'number' && Number.isFinite(n)) upstreamCost = n;
+  }
+  return {
+    mappedUsage: {
+      prompt_tokens: input + read + created,
+      completion_tokens: output,
+      prompt_cache_hit_tokens: read,
+      prompt_cache_miss_tokens: input,
+      prompt_cache_write_tokens: created,
+    },
+    promptTotal: input + read + created,
+    outputTokens: output,
+    cachedTokens: read,
+    upstreamCost,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// OpenCode Go `responses` transport sender (T5, Responses API) — réplica del
+// sender de `server/routes/chat.ts` para los dos paths del executor (miembro
+// y síntesis). T3 VERIFIED 2026-09-15 (P4/P5): `POST {OPENCODE_GO_RESPONSES_URL}`
+// con `model` bare + `input` + `stream`, `Bearer` solo (sin `x-api-key`, sin
+// `anthropic-version`) + `x-opencode-session`. Tools en forma función OpenAI
+// nativa; `tool_calls`→`function_call`, `tool`→`function_call_output`;
+// `system`→`instructions`. `reasoning.effort:'low'` + `max_output_tokens`
+// acotan el burn de `high`-por-defecto (T3); el toggle nunca viaja (D4).
+// ---------------------------------------------------------------------------
+
+/**
+ * Maps the chat-completions `messages` array to a Responses `POST /responses`
+ * body (same contract as `buildOpencodeGoResponsesBody` in chat.ts).
+ */
+function buildCouncilGoResponsesBody(opts: {
+  upstreamModel: string;
+  messages: Array<{ role: string; content?: string | unknown[] | null; tool_call_id?: string; tool_calls?: unknown[] }>;
+  openRouterTools: CouncilOpenRouterToolDef[];
+  includeTools: boolean;
+  temperature: number;
+  maxTokens: number;
+}): Record<string, unknown> {
+  const instructionTexts: string[] = [];
+  const input: unknown[] = [];
+  for (const m of opts.messages) {
+    if (m.role === 'system') {
+      const text = councilGoMessagesTextContent(m.content);
+      if (text) instructionTexts.push(text);
+      continue;
+    }
+    if (m.role === 'tool') {
+      input.push({
+        type: 'function_call_output',
+        call_id: m.tool_call_id ?? '',
+        output: councilGoMessagesTextContent(m.content),
+      });
+      continue;
+    }
+    if (m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length > 0) {
+      const text = councilGoMessagesTextContent(m.content);
+      if (text) input.push({ role: 'assistant', content: text });
+      for (const raw of m.tool_calls) {
+        const tc = raw as { id?: string; function?: { name?: string; arguments?: string } };
+        input.push({
+          type: 'function_call',
+          call_id: tc.id ?? '',
+          name: tc.function?.name ?? '',
+          arguments: tc.function?.arguments ?? '{}',
+        });
+      }
+      continue;
+    }
+    input.push({
+      role: m.role === 'assistant' ? 'assistant' : 'user',
+      content: councilGoMessagesTextContent(m.content),
+    });
+  }
+  const body: Record<string, unknown> = {
+    model: opts.upstreamModel,
+    input,
+    temperature: opts.temperature,
+    reasoning: { effort: 'low' },
+    max_output_tokens: opts.maxTokens,
+    stream: true,
+  };
+  if (instructionTexts.length > 0) body.instructions = instructionTexts.join('\n\n');
+  if (opts.includeTools && opts.openRouterTools.length > 0) {
+    body.tools = opts.openRouterTools;
+  }
+  return body;
+}
+
+/** Responses `usage` shape (T3 P4/P5 literales) para el motor de coste T2. */
+interface CouncilGoResponsesUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  total_tokens?: number;
+  input_tokens_details?: { cached_tokens?: number };
+  output_tokens_details?: { reasoning_tokens?: number };
+  cost?: string | number;
+}
+
+/**
+ * Maps Responses usage onto `computeOpencodeGoCost` (same contract as
+ * `mapOpencodeGoResponsesUsage` in chat.ts): explicit miss =
+ * `input - cached`, hit = `cached_tokens`, out = `output_tokens`
+ * (`reasoning_tokens` informative only); tier by the real request context
+ * (input + output); an upstream numeric `cost` wins, never overwritten.
+ */
+function mapCouncilGoResponsesUsage(usage: CouncilGoResponsesUsage | null | undefined): {
+  mappedResponsesUsage: { prompt_tokens: number; completion_tokens: number; prompt_cache_hit_tokens: number; prompt_cache_miss_tokens: number };
+  promptTotal: number;
+  outputTokens: number;
+  cachedTokens: number;
+  reasoningTokens: number;
+  upstreamCost: number | null;
+} {
+  const input = usage?.input_tokens ?? 0;
+  const output = usage?.output_tokens ?? 0;
+  const cached = usage?.input_tokens_details?.cached_tokens ?? 0;
+  const reasoning = usage?.output_tokens_details?.reasoning_tokens ?? 0;
+  let upstreamCost: number | null = null;
+  if (usage?.cost !== undefined) {
+    const n = typeof usage.cost === 'string' ? Number(usage.cost) : usage.cost;
+    if (typeof n === 'number' && Number.isFinite(n)) upstreamCost = n;
+  }
+  return {
+    mappedResponsesUsage: {
+      prompt_tokens: input,
+      completion_tokens: output,
+      prompt_cache_hit_tokens: cached,
+      prompt_cache_miss_tokens: Math.max(input - cached, 0),
+    },
+    promptTotal: input,
+    outputTokens: output,
+    cachedTokens: cached,
+    reasoningTokens: reasoning,
+    upstreamCost,
+  };
+}
+
+/** Frozen §7 billing literals shared with chat (same text, council throw). */
+const COUNCIL_GO_INVALID_KEY_MESSAGE =
+  'Invalid OpenCode Go API key. Check your key in Settings → OpenCode Go.';
+const COUNCIL_GO_LIMIT_MESSAGE =
+  'OpenCode Go usage limit reached for this model. Check usage in the OpenCode console (https://opencode.ai/docs/go/) or enable the Zen-balance fallback there.';
 
 /** OpenRouter JSON Schema for council comparison (structured output). */
 const COUNCIL_COMPARISON_JSON_SCHEMA = {
@@ -421,9 +715,26 @@ export class CouncilExecutor {
 
     const ep = this.resolveEndpoint(modelId);
     const headers = ep.headers;
+    // T4: `messages`-transport models ride the Anthropic sender (same contract
+    // as chat.ts). T5: `responses`-transport models ride the Responses API
+    // sender. `unknown` fails open.
+    const isGoMessages = ep.provider.id === 'opencode-go' && opencodeGoTransportFor(ep.upstreamModel) === 'messages';
+    const isGoResponses = ep.provider.id === 'opencode-go' && opencodeGoTransportFor(ep.upstreamModel) === 'responses';
     if (ep.provider.id === 'opencode-go') {
       // D9: upstream flags clients without a session as problematic (GC §1).
       ep.headers['x-opencode-session'] = options.conversationId ?? options.userId ?? 'unknown';
+    }
+    if (isGoMessages) {
+      // T3 divergence (VERIFIED-shape + DIVERGENTE-auth): `x-api-key` travels
+      // next to `Bearer` on `/messages`, plus `anthropic-version`.
+      ep.url = OPENCODE_GO_MESSAGES_URL;
+      ep.headers['anthropic-version'] = OPENCODE_GO_ANTHROPIC_VERSION;
+      ep.headers['x-api-key'] = this.getApiKey('opencode-go');
+    }
+    if (isGoResponses) {
+      // T3 VERIFIED (P4/P5): `/responses` authenticates with `Bearer` alone —
+      // no `x-api-key`, no `anthropic-version` on this path.
+      ep.url = OPENCODE_GO_RESPONSES_URL;
     }
 
     // Build messages
@@ -462,16 +773,37 @@ export class CouncilExecutor {
 
     // Resolve tools (arnict accepts `tools` like any OpenRouter-shaped
     // provider: keyed parity, no gate — the generic attach below applies).
+    // T4: `messages` tools ride the Anthropic `input_schema` mapping inside
+    // the body builder; T5: `responses` tools ride the native function shape
+    // inside its builder — never the OpenAI shape twice.
     const resolvedTools = options.tools || [];
     const openRouterTools = toOpenRouterTools(resolvedTools);
 
-    const requestBody: Record<string, unknown> = {
-      model: ep.upstreamModel,
-      messages,
-      temperature: 0.7,
-      max_tokens: 4096,
-      stream: true,
-    };
+    const requestBody: Record<string, unknown> = isGoMessages
+      ? buildCouncilGoMessagesBody({
+          upstreamModel: ep.upstreamModel,
+          messages,
+          openRouterTools: openRouterTools as CouncilOpenRouterToolDef[],
+          includeTools: true,
+          temperature: 0.7,
+          maxTokens: 4096,
+        })
+      : isGoResponses
+        ? buildCouncilGoResponsesBody({
+            upstreamModel: ep.upstreamModel,
+            messages,
+            openRouterTools: openRouterTools as CouncilOpenRouterToolDef[],
+            includeTools: true,
+            temperature: 0.7,
+            maxTokens: 4096,
+          })
+        : {
+            model: ep.upstreamModel,
+            messages,
+            temperature: 0.7,
+            max_tokens: 4096,
+            stream: true,
+          };
     if (ep.provider.id === 'abliteration') {
       // Usage frame for static cost accounting (GC §6/§7) + the custom
       // reasoning arm (GC §4): top-level `reasoning_effort` verbatim, or
@@ -489,16 +821,15 @@ export class CouncilExecutor {
       requestBody.reasoning = buildArnictReasoning(reasoning.enabled, reasoning.effort);
     }
     if (ep.provider.id === 'opencode-go') {
-      // Phase-1 is chat-completions only: known phase-2 transports fail named
-      // BEFORE any network call (GC §7); 'unknown' ids fail open below (GC §3).
-      const goTransport = opencodeGoTransportFor(ep.upstreamModel);
-      if (goTransport === 'messages' || goTransport === 'responses') {
-        console.log(`[council] opencode-go wrong transport: model=${ep.upstreamModel} transport=${goTransport}`);
-        throw new Error(opencodeGoWrongTransportMessage(ep.upstreamModel, goTransport));
-      }
-      // Usage frame for static cost accounting (GC §6). No reasoning arm in
-      // fase-1: the toggle is ignored, never sent (GC §4/§5, D4).
-      requestBody.stream_options = { include_usage: true };
+      // T5: both phase-2 transports send (`messages` via the T4 Anthropic
+      // sender, `responses` via the Responses sender); 'unknown' ids fail
+      // open below (GC §3). No reasoning arm: the toggle is ignored, never
+      // sent (GC §4/§5, D4).
+      // Usage frame for static cost accounting (GC §6). T4: `messages` carries
+      // its usage inside `message_delta` (+ final `ping` cost); T5:
+      // `responses` inside `response.completed` (+ final `ping` cost) — no
+      // `stream_options` on either wire shape.
+      if (!isGoMessages && !isGoResponses) requestBody.stream_options = { include_usage: true };
     }
     // §10 (+ Increment 2d): council members share the chat sampling resolver —
     // the fixed temp 0.7 above is superseded for llamacpp arms by resolution
@@ -526,7 +857,7 @@ export class CouncilExecutor {
       }
     }
 
-    if (openRouterTools.length > 0) {
+    if (openRouterTools.length > 0 && !isGoMessages && !isGoResponses) {
       requestBody.tools = openRouterTools;
       requestBody.tool_choice = 'auto';
       requestBody.parallel_tool_calls = true;
@@ -553,6 +884,39 @@ export class CouncilExecutor {
         throw new Error('Execution cancelled');
       }
 
+      if (isGoMessages) {
+        // T4: re-map the OpenAI-shaped turn (tool_calls/tool rows appended
+        // below) to the Anthropic wire shape every lap around the tool loop.
+        const rebuilt = buildCouncilGoMessagesBody({
+          upstreamModel: ep.upstreamModel,
+          messages,
+          openRouterTools: openRouterTools as CouncilOpenRouterToolDef[],
+          includeTools: true,
+          temperature: 0.7,
+          maxTokens: 4096,
+        });
+        requestBody.messages = rebuilt.messages;
+        if (rebuilt.system !== undefined) requestBody.system = rebuilt.system;
+        else delete requestBody.system;
+        if (rebuilt.tools !== undefined) requestBody.tools = rebuilt.tools;
+        else delete requestBody.tools;
+      } else if (isGoResponses) {
+        // T5: re-map the OpenAI-shaped turn to Responses `input` every lap.
+        const rebuilt = buildCouncilGoResponsesBody({
+          upstreamModel: ep.upstreamModel,
+          messages,
+          openRouterTools: openRouterTools as CouncilOpenRouterToolDef[],
+          includeTools: true,
+          temperature: 0.7,
+          maxTokens: 4096,
+        });
+        requestBody.input = rebuilt.input;
+        if (rebuilt.instructions !== undefined) requestBody.instructions = rebuilt.instructions;
+        else delete requestBody.instructions;
+        if (rebuilt.tools !== undefined) requestBody.tools = rebuilt.tools;
+        else delete requestBody.tools;
+      }
+
       const response = await this.fetchUpstream(options.userId, ep, {
         method: 'POST',
         headers,
@@ -561,7 +925,35 @@ export class CouncilExecutor {
       });
 
       if (!response.ok) {
+        // Upstream lies about Content-Type (text/plain on JSON bodies): read
+        // as text first, then parse by content, not by header.
         const errorText = await response.text();
+        if (isGoMessages || isGoResponses) {
+          // T4/T5: frozen §7 literals, same text as chat. 401 also covers the
+          // T3 `AuthError/Missing API key` envelope (Bearer without x-api-key
+          // on `/messages`; `/responses` is Bearer-only).
+          let message = '';
+          try {
+            const errorJson = JSON.parse(errorText) as { error?: { message?: unknown } };
+            if (typeof errorJson?.error?.message === 'string') message = errorJson.error.message;
+          } catch {
+            message = errorText;
+          }
+          if (response.status === 401) {
+            console.log(`[council] opencode-go billing: status=401 model=${ep.upstreamModel}`);
+            throw new Error(COUNCIL_GO_INVALID_KEY_MESSAGE);
+          }
+          if (response.status === 402 || response.status === 429) {
+            console.log(`[council] opencode-go billing: status=${response.status} model=${ep.upstreamModel}`);
+            throw new Error(COUNCIL_GO_LIMIT_MESSAGE);
+          }
+          if (/not supported for format|oa-compat/i.test(`${errorText} ${message}`)) {
+            console.log(`[council] opencode-go format mismatch: model=${ep.upstreamModel}`);
+            throw new Error(opencodeGoFormatMismatchMessage(ep.upstreamModel, errorText.slice(0, 200)));
+          }
+          const prefix = (message.trim() || errorText).trim().slice(0, 300);
+          throw new Error(`OpenCode Go request failed (status ${response.status}): ${prefix || 'unknown error'}`);
+        }
         if (ep.provider.id === 'opencode-go' && /not supported for format|oa-compat/i.test(errorText)) {
           console.log(`[council] opencode-go format mismatch: model=${ep.upstreamModel}`);
           throw new Error(opencodeGoFormatMismatchMessage(ep.upstreamModel, errorText.slice(0, 200)));
@@ -578,6 +970,18 @@ export class CouncilExecutor {
       let buffer = '';
       const toolCallsByIndex: Record<number, { id?: string; type?: string; function?: { name?: string; arguments?: string } }> = {};
       let lastFinishReason: string | null = null;
+      // T4 Anthropic stream state (message_delta usage + tool_use blocks +
+      // final ping cost; same wire sequence as chat.ts).
+      const councilToolBlocks: Record<number, { id?: string; name?: string; inputJson: string }> = {};
+      let councilUsage: CouncilGoMessagesUsage | null = null;
+      let councilStopReason: string | null = null;
+      let councilPingCost: string | number | undefined;
+      // T5 Responses stream state (output_text deltas + function_call items +
+      // response.completed usage/cost + final ping cost; same wire as chat.ts).
+      const councilResponsesCalls: Record<string, { callId?: string; name?: string; args: string }> = {};
+      let councilResponsesUsage: CouncilGoResponsesUsage | null = null;
+      let councilResponsesInlineCost: string | number | undefined;
+      let councilResponsesPingCost: string | number | undefined;
 
       try {
         while (true) {
@@ -603,6 +1007,121 @@ export class CouncilExecutor {
               const parsed = JSON.parse(data);
               if (parsed.error) {
                 throw new Error(parsed.error.message || 'Stream error');
+              }
+
+              if (isGoMessages) {
+                // T4 Anthropic SSE (T3 P3 literals): text_delta appends
+                // content; input_json_delta accumulates tool args;
+                // message_delta carries stop_reason + usage (no
+                // cache_creation in stream); final ping carries cost.
+                const evtType = typeof parsed.type === 'string' ? parsed.type : '';
+                if (evtType === 'content_block_start') {
+                  const idx = typeof parsed.index === 'number' ? parsed.index : 0;
+                  const block = parsed.content_block as { type?: string; id?: string; name?: string } | undefined;
+                  if (block?.type === 'tool_use') {
+                    councilToolBlocks[idx] = {
+                      id: typeof block.id === 'string' ? block.id : undefined,
+                      name: typeof block.name === 'string' ? block.name : undefined,
+                      inputJson: '',
+                    };
+                  } else if (!councilToolBlocks[idx]) {
+                    councilToolBlocks[idx] = { inputJson: '' };
+                  }
+                  continue;
+                }
+                if (evtType === 'content_block_delta') {
+                  const idx = typeof parsed.index === 'number' ? parsed.index : 0;
+                  const d = parsed.delta as { text?: unknown; partial_json?: unknown } | undefined;
+                  if (d && typeof d.text === 'string' && d.text) {
+                    fullContent += d.text;
+                  } else if (d && typeof d.partial_json === 'string' && d.partial_json) {
+                    if (!councilToolBlocks[idx]) councilToolBlocks[idx] = { inputJson: '' };
+                    councilToolBlocks[idx].inputJson += d.partial_json;
+                  }
+                  continue;
+                }
+                if (evtType === 'content_block_stop' || evtType === 'message_start' || evtType === 'message_stop') continue;
+                if (evtType === 'message_delta') {
+                  const stopReason = parsed.delta?.stop_reason;
+                  if (typeof stopReason === 'string' && stopReason) councilStopReason = stopReason;
+                  if (parsed.usage) councilUsage = parsed.usage as CouncilGoMessagesUsage;
+                  continue;
+                }
+                if (evtType === 'ping') {
+                  if (parsed.cost !== undefined) councilPingCost = parsed.cost as string | number;
+                  continue;
+                }
+                continue;
+              }
+
+              if (isGoResponses) {
+                // T5 Responses SSE (T3 P5 literals): output_text deltas append
+                // content; function_call items accumulate args;
+                // response.completed carries usage + full output; final ping
+                // carries cost. Same wire sequence as chat.ts.
+                const evtType = typeof parsed.type === 'string' ? parsed.type : '';
+                if (evtType === 'response.output_text.delta') {
+                  const d = parsed.delta;
+                  if (typeof d === 'string' && d) {
+                    fullContent += d;
+                  }
+                  continue;
+                }
+                if (evtType === 'response.output_item.added') {
+                  const item = parsed.item as { type?: unknown; call_id?: unknown; id?: unknown; name?: unknown; arguments?: unknown } | undefined;
+                  if (item?.type === 'function_call') {
+                    const key = typeof parsed.output_index === 'number'
+                      ? String(parsed.output_index)
+                      : (typeof item.call_id === 'string' ? item.call_id : String(Object.keys(councilResponsesCalls).length));
+                    councilResponsesCalls[key] = {
+                      callId: typeof item.call_id === 'string' ? item.call_id : (typeof item.id === 'string' ? item.id : undefined),
+                      name: typeof item.name === 'string' ? item.name : undefined,
+                      args: typeof item.arguments === 'string' ? item.arguments : '',
+                    };
+                  }
+                  continue;
+                }
+                if (evtType.indexOf('function_call_arguments') >= 0 && evtType.indexOf('delta') >= 0) {
+                  const key = typeof parsed.output_index === 'number'
+                    ? String(parsed.output_index)
+                    : (typeof parsed.item_id === 'string' ? parsed.item_id : '0');
+                  const d = parsed.delta;
+                  if (typeof d === 'string' && d) {
+                    if (!councilResponsesCalls[key]) councilResponsesCalls[key] = { args: '' };
+                    councilResponsesCalls[key].args += d;
+                  }
+                  continue;
+                }
+                if (evtType === 'response.completed') {
+                  const resp = (parsed.response && typeof parsed.response === 'object'
+                    ? parsed.response
+                    : null) as { usage?: unknown; cost?: unknown; output?: unknown } | null;
+                  const u = resp?.usage ?? parsed.usage;
+                  if (u && typeof u === 'object') councilResponsesUsage = u as CouncilGoResponsesUsage;
+                  if (resp?.cost !== undefined) councilResponsesInlineCost = resp.cost as string | number;
+                  const out = Array.isArray(resp?.output) ? resp.output as unknown[] : [];
+                  for (const raw of out) {
+                    if (!raw || typeof raw !== 'object') continue;
+                    const item = raw as { type?: unknown; call_id?: unknown; id?: unknown; name?: unknown; arguments?: unknown };
+                    if (item.type !== 'function_call') continue;
+                    const callId = typeof item.call_id === 'string' ? item.call_id : (typeof item.id === 'string' ? item.id : '');
+                    const name = typeof item.name === 'string' ? item.name : '';
+                    const args = typeof item.arguments === 'string' ? item.arguments : '';
+                    const hit = Object.values(councilResponsesCalls).find((t) => t.callId !== undefined && t.callId === callId);
+                    if (hit) {
+                      if (!hit.name && name) hit.name = name;
+                      if (!hit.args && args) hit.args = args;
+                    } else if (name) {
+                      councilResponsesCalls[callId || `done-${Object.keys(councilResponsesCalls).length}`] = { callId: callId || undefined, name, args };
+                    }
+                  }
+                  continue;
+                }
+                if (evtType === 'ping') {
+                  if (parsed.cost !== undefined) councilResponsesPingCost = parsed.cost as string | number;
+                  continue;
+                }
+                continue;
               }
 
               const delta = parsed.choices?.[0]?.delta;
@@ -639,7 +1158,7 @@ export class CouncilExecutor {
                 else if (ep.provider.id === 'deepseek') cost = computeDeepSeekCost(usage, ep.upstreamModel);
                 else if (ep.provider.id === 'abliteration') cost = computeAbliterationCost(usage, ep.upstreamModel);
                 else if (ep.provider.id === 'arnict') cost = computeArnictCost(usage, ep.upstreamModel);
-                else if (ep.provider.id === 'opencode-go') cost = computeOpencodeGoCost(usage, ep.upstreamModel);
+                else if (ep.provider.id === 'opencode-go' && !isGoMessages) cost = computeOpencodeGoCost(usage, ep.upstreamModel);
                 if (usage.completion_tokens_details?.reasoning_tokens) {
                   reasoningTokens = usage.completion_tokens_details.reasoning_tokens;
                 }
@@ -656,9 +1175,109 @@ export class CouncilExecutor {
         reader.cancel().catch(() => {});
       }
 
-      // Tool calls: from delta (finish_reason === 'tool_calls') or parsed from reasoning (e.g. Kimi K2)
+      if (isGoMessages) {
+        // T4 Anthropic usage → T2 engine: hit = cache_read_input_tokens,
+        // write (prompt_cache_write_tokens) = cache_creation_input_tokens,
+        // explicit miss = input_tokens, tier by the real request context
+        // (cached input + output); upstream numeric cost wins, never
+        // overwritten. cached_tokens = cache_read.
+        if (councilUsage) {
+          const { mappedUsage, promptTotal, outputTokens, upstreamCost } =
+            mapCouncilGoMessagesUsage(councilUsage);
+          promptTokens = promptTotal;
+          completionTokens = outputTokens;
+          totalTokens = promptTotal + outputTokens;
+          // No cached_tokens column on MemberResult; the cache_read split
+          // still prices via `mappedUsage` above (hit rate).
+          if (upstreamCost !== null) {
+            cost = upstreamCost;
+          } else if (councilPingCost !== undefined) {
+            const n = typeof councilPingCost === 'string' ? Number(councilPingCost) : councilPingCost;
+            if (typeof n === 'number' && Number.isFinite(n)) {
+              cost = n;
+            } else {
+              const contextTokens = promptTotal + outputTokens;
+              cost = computeOpencodeGoCost(mappedUsage, ep.upstreamModel, { contextTokens });
+            }
+          } else {
+            const contextTokens = promptTotal + outputTokens;
+            cost = computeOpencodeGoCost(mappedUsage, ep.upstreamModel, { contextTokens });
+          }
+        } else if (councilPingCost !== undefined) {
+          const n = typeof councilPingCost === 'string' ? Number(councilPingCost) : councilPingCost;
+          if (typeof n === 'number' && Number.isFinite(n)) cost = n;
+        }
+        lastFinishReason = councilStopReason === 'tool_use' ? 'tool_calls' : councilStopReason;
+      }
+
+      if (isGoResponses) {
+        // T5 Responses usage → T2 engine: hit = cached_tokens, explicit miss
+        // = input − cached, out = output_tokens (reasoning_tokens informative
+        // only); tier by the real request context (input + output); upstream
+        // numeric cost wins, never overwritten.
+        const responsesEventCost = (raw: string | number | undefined): number | null => {
+          if (raw === undefined) return null;
+          const n = typeof raw === 'string' ? Number(raw) : raw;
+          return (typeof n === 'number' && Number.isFinite(n)) ? n : null;
+        };
+        if (councilResponsesUsage) {
+          const { mappedResponsesUsage, promptTotal, outputTokens, upstreamCost } =
+            mapCouncilGoResponsesUsage(councilResponsesUsage);
+          promptTokens = promptTotal;
+          completionTokens = outputTokens;
+          totalTokens = promptTotal + outputTokens;
+          if (upstreamCost !== null) {
+            cost = upstreamCost;
+          } else {
+            const eventCost = responsesEventCost(councilResponsesInlineCost) ?? responsesEventCost(councilResponsesPingCost);
+            if (eventCost !== null) {
+              cost = eventCost;
+            } else {
+              const contextTokens = promptTotal + outputTokens;
+              cost = computeOpencodeGoCost(mappedResponsesUsage, ep.upstreamModel, { contextTokens });
+            }
+          }
+        } else {
+          const eventCost = responsesEventCost(councilResponsesInlineCost) ?? responsesEventCost(councilResponsesPingCost);
+          if (eventCost !== null) cost = eventCost;
+        }
+        if (Object.keys(councilResponsesCalls).length > 0 && resolvedTools.length > 0) {
+          lastFinishReason = 'tool_calls';
+        }
+      }
+
+      // Tool calls: from delta (finish_reason === 'tool_calls') or parsed from reasoning (e.g. Kimi K2).
+      // T4: Anthropic `tool_use` blocks arrive via content_block_start/delta
+      // (never `choices[].delta.tool_calls`); they convert to the same
+      // OpenAI-shaped calls and re-enter as `tool_result` blocks next lap.
+      // T5: Responses `function_call` items convert the same way and re-enter
+      // as `function_call_output` items next lap.
       let toolCallsArray: ToolCallSpec[] = [];
-      if (lastFinishReason === 'tool_calls' && resolvedTools.length > 0) {
+      if (isGoResponses) {
+        if (resolvedTools.length > 0) {
+          const keys = Object.keys(councilResponsesCalls).sort((a, b) => Number(a) - Number(b));
+          toolCallsArray = keys.map((key) => ({
+            id: councilResponsesCalls[key].callId || `call_${nanoid()}`,
+            type: 'function' as const,
+            function: {
+              name: councilResponsesCalls[key].name || '',
+              arguments: councilResponsesCalls[key].args || '{}',
+            },
+          })).filter((tc) => tc.function.name);
+        }
+      } else if (isGoMessages) {
+        if (lastFinishReason === 'tool_calls' && resolvedTools.length > 0) {
+          const indices = Object.keys(councilToolBlocks).map(Number).sort((a, b) => a - b);
+          toolCallsArray = indices.map((idx) => ({
+            id: councilToolBlocks[idx].id || `call_${nanoid()}`,
+            type: 'function' as const,
+            function: {
+              name: councilToolBlocks[idx].name || '',
+              arguments: councilToolBlocks[idx].inputJson || '{}',
+            },
+          })).filter((tc) => tc.function.name);
+        }
+      } else if (lastFinishReason === 'tool_calls' && resolvedTools.length > 0) {
         const indices = Object.keys(toolCallsByIndex).map(Number).sort((a, b) => a - b);
         toolCallsArray = indices.map((idx) => ({
           id: toolCallsByIndex[idx].id || `call_${nanoid()}`,
@@ -819,9 +1438,22 @@ export class CouncilExecutor {
 
     const ep = this.resolveEndpoint(synthesizerModel);
     const headers = ep.headers;
+    // T4: `messages` synthesizers ride the same Anthropic sender as members.
+    // T5: `responses` synthesizers ride the same Responses sender as members.
+    const isGoMessages = ep.provider.id === 'opencode-go' && opencodeGoTransportFor(ep.upstreamModel) === 'messages';
+    const isGoResponses = ep.provider.id === 'opencode-go' && opencodeGoTransportFor(ep.upstreamModel) === 'responses';
     if (ep.provider.id === 'opencode-go') {
       // D9: upstream flags clients without a session as problematic (GC §1).
       ep.headers['x-opencode-session'] = options.conversationId ?? options.userId ?? 'unknown';
+    }
+    if (isGoMessages) {
+      ep.url = OPENCODE_GO_MESSAGES_URL;
+      ep.headers['anthropic-version'] = OPENCODE_GO_ANTHROPIC_VERSION;
+      ep.headers['x-api-key'] = this.getApiKey('opencode-go');
+    }
+    if (isGoResponses) {
+      // T3 VERIFIED (P4/P5): Bearer-only on `/responses`.
+      ep.url = OPENCODE_GO_RESPONSES_URL;
     }
 
     const providerRouting: ProviderRoutingConfig = ep.provider.supportsProviderRouting
@@ -830,16 +1462,35 @@ export class CouncilExecutor {
     if (ep.provider.supportsProviderRouting) {
       assertProviderRoutingCompatible(synthesizerModel, providerRouting);
     }
-    const requestBody: Record<string, unknown> = {
-      model: ep.upstreamModel,
-      messages: [
-        { role: 'system', content: 'You are a synthesis expert. Your task is to analyze multiple AI model responses and create a unified, comprehensive answer.' },
-        { role: 'user', content: synthesisPrompt },
-      ],
-      temperature: 0.7,
-      max_tokens: 4096,
-      stream: true,
-    };
+    const synthesisMessages = [
+      { role: 'system', content: 'You are a synthesis expert. Your task is to analyze multiple AI model responses and create a unified, comprehensive answer.' },
+      { role: 'user', content: synthesisPrompt },
+    ];
+    const requestBody: Record<string, unknown> = isGoMessages
+      ? buildCouncilGoMessagesBody({
+          upstreamModel: ep.upstreamModel,
+          messages: synthesisMessages,
+          openRouterTools: [],
+          includeTools: false,
+          temperature: 0.7,
+          maxTokens: 4096,
+        })
+      : isGoResponses
+        ? buildCouncilGoResponsesBody({
+            upstreamModel: ep.upstreamModel,
+            messages: synthesisMessages,
+            openRouterTools: [],
+            includeTools: false,
+            temperature: 0.7,
+            maxTokens: 4096,
+          })
+        : {
+            model: ep.upstreamModel,
+            messages: synthesisMessages,
+            temperature: 0.7,
+            max_tokens: 4096,
+            stream: true,
+          };
     // §10 (+ Increment 2d): the synthesizer arm rides the SAME ForModel
     // sampling resolver family when it targets an llamacpp model (fixed
     // temp 0.7 stays for every other arm; presence_penalty ONLY when set).
@@ -874,15 +1525,13 @@ export class CouncilExecutor {
       requestBody.reasoning = buildArnictReasoning(reasoning.enabled, reasoning.effort);
     }
     if (ep.provider.id === 'opencode-go') {
-      // Same relay contract as member bodies: phase-2 transports fail named
-      // BEFORE any network call (GC §7); usage frame for static cost (GC §6).
-      // No reasoning arm in fase-1: the toggle is ignored, never sent (GC §4/§5, D4).
-      const goTransport = opencodeGoTransportFor(ep.upstreamModel);
-      if (goTransport === 'messages' || goTransport === 'responses') {
-        console.log(`[council] opencode-go wrong transport: model=${ep.upstreamModel} transport=${goTransport}`);
-        throw new Error(opencodeGoWrongTransportMessage(ep.upstreamModel, goTransport));
-      }
-      requestBody.stream_options = { include_usage: true };
+      // Same relay contract as member bodies: both phase-2 transports send
+      // (`messages` via the T4 sender, `responses` via the T5 sender).
+      // No reasoning arm: the toggle is ignored, never sent (GC §4/§5, D4).
+      // Usage frame for static cost (GC §6); `messages` carries its usage in
+      // `message_delta` (+ final `ping` cost), `responses` in
+      // `response.completed` (+ final `ping` cost) — no `stream_options`.
+      if (!isGoMessages && !isGoResponses) requestBody.stream_options = { include_usage: true };
     }
 
     // Notify synthesis start
@@ -906,6 +1555,29 @@ export class CouncilExecutor {
     if (!response.ok) {
       const errorText = await response.text();
       console.log(`   ❌ Synthesis API Error: ${response.status} - ${errorText.slice(0, 100)}`);
+      if (isGoMessages || isGoResponses) {
+        // T4/T5: frozen §7 literals, same text as chat (also covers the T3
+        // `AuthError/Missing API key` envelope on 401).
+        if (response.status === 401) {
+          throw new Error(COUNCIL_GO_INVALID_KEY_MESSAGE);
+        }
+        if (response.status === 402 || response.status === 429) {
+          throw new Error(COUNCIL_GO_LIMIT_MESSAGE);
+        }
+        if (/not supported for format|oa-compat/i.test(errorText)) {
+          console.log(`[council] opencode-go format mismatch: model=${ep.upstreamModel}`);
+          throw new Error(opencodeGoFormatMismatchMessage(ep.upstreamModel, errorText.slice(0, 200)));
+        }
+        let message = '';
+        try {
+          const errorJson = JSON.parse(errorText) as { error?: { message?: unknown } };
+          if (typeof errorJson?.error?.message === 'string') message = errorJson.error.message;
+        } catch {
+          message = errorText;
+        }
+        const prefix = (message.trim() || errorText).trim().slice(0, 300);
+        throw new Error(`Synthesis API error (${response.status}): ${prefix || 'unknown error'}`);
+      }
       if (ep.provider.id === 'opencode-go' && /not supported for format|oa-compat/i.test(errorText)) {
         console.log(`[council] opencode-go format mismatch: model=${ep.upstreamModel}`);
         throw new Error(opencodeGoFormatMismatchMessage(ep.upstreamModel, errorText.slice(0, 200)));
@@ -926,6 +1598,13 @@ export class CouncilExecutor {
     let promptTokens = 0;
     let completionTokens = 0;
     let cost = 0;
+    // T4 Anthropic stream state (same wire sequence as members).
+    let synthUsage: CouncilGoMessagesUsage | null = null;
+    let synthPingCost: string | number | undefined;
+    // T5 Responses stream state (same wire sequence as members).
+    let synthResponsesUsage: CouncilGoResponsesUsage | null = null;
+    let synthResponsesInlineCost: string | number | undefined;
+    let synthResponsesPingCost: string | number | undefined;
 
     const timeoutPromise = new Promise<never>((_, reject) => {
       setTimeout(() => reject(new Error('Synthesis timeout')), SYNTHESIS_TIMEOUT_MS);
@@ -954,6 +1633,60 @@ export class CouncilExecutor {
 
             try {
               const parsed = JSON.parse(data);
+              if (isGoMessages) {
+                // T4 Anthropic SSE (T3 P3 literals): text_delta appends
+                // content; message_delta carries usage (no cache_creation in
+                // stream); final ping carries cost.
+                const evtType = typeof parsed.type === 'string' ? parsed.type : '';
+                if (evtType === 'content_block_delta') {
+                  const d = parsed.delta as { text?: unknown } | undefined;
+                  if (d && typeof d.text === 'string' && d.text) {
+                    fullContent += d.text;
+                    options.onSynthesisChunk(d.text);
+                  }
+                  continue;
+                }
+                if (evtType === 'message_delta') {
+                  if (parsed.usage) synthUsage = parsed.usage as CouncilGoMessagesUsage;
+                  continue;
+                }
+                if (evtType === 'ping') {
+                  if (parsed.cost !== undefined) synthPingCost = parsed.cost as string | number;
+                  continue;
+                }
+                // message_start (zeros), content_block_start/stop,
+                // message_stop: no content to accumulate.
+                continue;
+              }
+              if (isGoResponses) {
+                // T5 Responses SSE (T3 P5 literals): output_text deltas append
+                // content; response.completed carries usage; final ping
+                // carries cost. Synthesis takes no tools: function_call items
+                // are ignored here (same wire, member-only handling).
+                const evtType = typeof parsed.type === 'string' ? parsed.type : '';
+                if (evtType === 'response.output_text.delta') {
+                  const d = parsed.delta;
+                  if (typeof d === 'string' && d) {
+                    fullContent += d;
+                    options.onSynthesisChunk(d);
+                  }
+                  continue;
+                }
+                if (evtType === 'response.completed') {
+                  const resp = (parsed.response && typeof parsed.response === 'object'
+                    ? parsed.response
+                    : null) as { usage?: unknown; cost?: unknown } | null;
+                  const u = resp?.usage ?? parsed.usage;
+                  if (u && typeof u === 'object') synthResponsesUsage = u as CouncilGoResponsesUsage;
+                  if (resp?.cost !== undefined) synthResponsesInlineCost = resp.cost as string | number;
+                  continue;
+                }
+                if (evtType === 'ping') {
+                  if (parsed.cost !== undefined) synthResponsesPingCost = parsed.cost as string | number;
+                  continue;
+                }
+                continue;
+              }
               const delta = parsed.choices?.[0]?.delta;
 
               if (delta?.reasoning || delta?.reasoning_content) {
@@ -973,7 +1706,7 @@ export class CouncilExecutor {
                 else if (ep.provider.id === 'deepseek') cost = computeDeepSeekCost(usage, ep.upstreamModel);
                 else if (ep.provider.id === 'abliteration') cost = computeAbliterationCost(usage, ep.upstreamModel);
                 else if (ep.provider.id === 'arnict') cost = computeArnictCost(usage, ep.upstreamModel);
-                else if (ep.provider.id === 'opencode-go') cost = computeOpencodeGoCost(usage, ep.upstreamModel);
+                else if (ep.provider.id === 'opencode-go' && !isGoMessages) cost = computeOpencodeGoCost(usage, ep.upstreamModel);
               }
             } catch {
               // Skip malformed
@@ -986,6 +1719,69 @@ export class CouncilExecutor {
     })();
 
     await Promise.race([streamPromise, timeoutPromise]);
+
+    if (isGoMessages) {
+      // T4 Anthropic usage → T2 engine: hit = cache_read_input_tokens, write
+      // (prompt_cache_write_tokens) = cache_creation_input_tokens, explicit
+      // miss = input_tokens, tier by the real request context (cached input +
+      // output); upstream numeric cost wins, never overwritten.
+      if (synthUsage) {
+        const { mappedUsage, promptTotal, outputTokens, upstreamCost } =
+          mapCouncilGoMessagesUsage(synthUsage);
+        promptTokens = promptTotal;
+        completionTokens = outputTokens;
+        totalTokens = promptTotal + outputTokens;
+        if (upstreamCost !== null) {
+          cost = upstreamCost;
+        } else if (synthPingCost !== undefined) {
+          const n = typeof synthPingCost === 'string' ? Number(synthPingCost) : synthPingCost;
+          if (typeof n === 'number' && Number.isFinite(n)) {
+            cost = n;
+          } else {
+            const contextTokens = promptTotal + outputTokens;
+            cost = computeOpencodeGoCost(mappedUsage, ep.upstreamModel, { contextTokens });
+          }
+        } else {
+          const contextTokens = promptTotal + outputTokens;
+          cost = computeOpencodeGoCost(mappedUsage, ep.upstreamModel, { contextTokens });
+        }
+      } else if (synthPingCost !== undefined) {
+        const n = typeof synthPingCost === 'string' ? Number(synthPingCost) : synthPingCost;
+        if (typeof n === 'number' && Number.isFinite(n)) cost = n;
+      }
+    }
+
+    if (isGoResponses) {
+      // T5 Responses usage → T2 engine: hit = cached_tokens, explicit miss =
+      // input − cached, out = output_tokens; tier by the real request context
+      // (input + output); upstream numeric cost wins, never overwritten.
+      const synthEventCost = (raw: string | number | undefined): number | null => {
+        if (raw === undefined) return null;
+        const n = typeof raw === 'string' ? Number(raw) : raw;
+        return (typeof n === 'number' && Number.isFinite(n)) ? n : null;
+      };
+      if (synthResponsesUsage) {
+        const { mappedResponsesUsage, promptTotal, outputTokens, upstreamCost } =
+          mapCouncilGoResponsesUsage(synthResponsesUsage);
+        promptTokens = promptTotal;
+        completionTokens = outputTokens;
+        totalTokens = promptTotal + outputTokens;
+        if (upstreamCost !== null) {
+          cost = upstreamCost;
+        } else {
+          const eventCost = synthEventCost(synthResponsesInlineCost) ?? synthEventCost(synthResponsesPingCost);
+          if (eventCost !== null) {
+            cost = eventCost;
+          } else {
+            const contextTokens = promptTotal + outputTokens;
+            cost = computeOpencodeGoCost(mappedResponsesUsage, ep.upstreamModel, { contextTokens });
+          }
+        }
+      } else {
+        const eventCost = synthEventCost(synthResponsesInlineCost) ?? synthEventCost(synthResponsesPingCost);
+        if (eventCost !== null) cost = eventCost;
+      }
+    }
 
     const responseTimeMs = Date.now() - startTime;
 

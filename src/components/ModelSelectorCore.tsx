@@ -25,6 +25,13 @@ import {
   formatContext,
   formatPrice,
   PROVIDER_PRIORITY,
+  getOpencodeGoBadgeKind,
+  isOpencodeGoPendingVerification,
+  formatOpencodeGoMonthlyLimit,
+  compareOpencodeGoByPriceAsc,
+  opencodeGoMatchesTransportQuery,
+  getOpencodeGoAccessibleName,
+  OPENCODE_GO_PENDING_SUFFIX,
 } from '../utils/modelUtils';
 import type { OpenRouterModel as OpenRouterModelType } from '../types';
 import { useOpenRouterModels } from '../hooks/useOpenRouterModels';
@@ -37,13 +44,172 @@ import { useLlamaCppModels } from '../hooks/useLlamaCppModels';
 import { useFavoriteModels } from '../hooks/useFavoriteModels';
 import { useRecentModels } from '../hooks/useRecentModels';
 import { useIsMobile } from '../utils/breakpoints';
-import { DEEPSEEK_DIRECT_GROUP, CODEX_DIRECT_GROUP, ABLITERATION_GROUP, ARNICT_GROUP, OPENCODE_GO_GROUP, LLAMACPP_GROUP, isLlamaCppModel, isRemovedLocalProviderId } from '../utils/providers';
+import { DEEPSEEK_DIRECT_GROUP, CODEX_DIRECT_GROUP, ABLITERATION_GROUP, ARNICT_GROUP, OPENCODE_GO_GROUP, LLAMACPP_GROUP, isLlamaCppModel, isOpencodeGoModel, isRemovedLocalProviderId, OPENCODE_GO_BADGE_META } from '../utils/providers';
 
 const ICON_MAP = { sparkles: Sparkles, zap: Zap, eye: Eye, brain: Brain };
 
 function ProviderIcon({ name, size = 14 }: { name: 'sparkles' | 'zap' | 'eye' | 'brain'; size?: number }) {
   const Icon = ICON_MAP[name];
   return Icon ? <Icon size={size} /> : <Sparkles size={size} />;
+}
+
+/** Rows reserved for the Go skeleton (fixed height each → CLS = 0 in the group). */
+const OPENCODE_GO_SKELETON_ROWS = 5;
+
+/**
+ * Phase-2 transport badge (`Anthropic` amber / `Responses` blue, T7). Hidden
+ * from AT: the transport also ships in the row's accessible name.
+ */
+function OpencodeGoBadge({ model }: { model: OpenRouterModelType }) {
+  const kind = getOpencodeGoBadgeKind(model);
+  if (!kind) return null;
+  const meta = OPENCODE_GO_BADGE_META[kind];
+  return (
+    <span
+      aria-hidden="true"
+      style={{
+        fontSize: '0.6875rem',
+        fontWeight: 600,
+        lineHeight: 1.4,
+        padding: '2px 6px',
+        borderRadius: 'var(--radius-sm)',
+        background: meta.background,
+        color: meta.color,
+        whiteSpace: 'nowrap',
+        flexShrink: 0,
+      }}
+    >
+      {meta.label}
+    </span>
+  );
+}
+
+/** `· pendiente de verificación` suffix, governed only by served `sendable`. */
+function OpencodeGoPendingSuffix({ model }: { model: OpenRouterModelType }) {
+  if (!isOpencodeGoPendingVerification(model)) return null;
+  return (
+    <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>
+      {' '}{OPENCODE_GO_PENDING_SUFFIX}
+    </span>
+  );
+}
+
+/** Visual Go subgroup header inside the settings Premium tier. */
+function OpencodeGoSettingsSubheader({ count }: { count: number }) {
+  return (
+    <div
+      style={{
+        padding: '8px 16px 4px',
+        fontSize: '0.6875rem',
+        fontWeight: 600,
+        color: 'var(--text-muted)',
+        textTransform: 'uppercase',
+        letterSpacing: '0.08em',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        whiteSpace: 'nowrap',
+      }}
+    >
+      <span
+        aria-hidden="true"
+        style={{
+          width: 6,
+          height: 6,
+          borderRadius: '50%',
+          background: getAuthorColor(OPENCODE_GO_GROUP),
+          flexShrink: 0,
+        }}
+      />
+      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>OpenCode Go · Direct</span>
+      {count > 0 && <span style={{ fontWeight: 400 }}>· {count} · ordenado por precio</span>}
+    </div>
+  );
+}
+
+/** Loading skeleton for the Go section (reserved heights, no layout shift). */
+function OpencodeGoSkeleton({ rowHeight, rowPadding }: { rowHeight: number; rowPadding: string }) {
+  return (
+    <div role="status" aria-label="Cargando modelos de OpenCode Go" style={{ padding: '4px 0' }}>
+      {Array.from({ length: OPENCODE_GO_SKELETON_ROWS }).map((_, i) => (
+        <div key={i} style={{ padding: rowPadding, height: rowHeight, boxSizing: 'border-box' }}>
+          <div className="opencode-go-skeleton-bar" style={{ height: '100%', borderRadius: 'var(--radius-sm)' }} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** Inline fetch-error hint for the Go section with retry (T6 `error` + `refresh`). */
+function OpencodeGoErrorHint({ error, onRetry }: { error: string; onRetry: () => void }) {
+  return (
+    <div style={{ padding: '8px 16px 12px 32px' }}>
+      <div style={{ fontSize: '0.875rem', fontWeight: 500, color: 'var(--text-primary)' }}>
+        No se pudo cargar OpenCode Go
+      </div>
+      <div
+        style={{
+          fontSize: '0.75rem',
+          color: 'var(--text-muted)',
+          marginTop: 2,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}
+      >
+        {error}
+      </div>
+      <button
+        type="button"
+        onClick={onRetry}
+        aria-label="Reintentar la carga de OpenCode Go"
+        style={{
+          marginTop: 8,
+          minHeight: 44,
+          padding: '10px 16px',
+          fontSize: '0.875rem',
+          fontFamily: 'var(--font-body)',
+          fontWeight: 500,
+          color: 'var(--text-primary)',
+          background: 'var(--bg-surface)',
+          border: '1px solid var(--border)',
+          borderRadius: 'var(--radius-md)',
+          cursor: 'pointer',
+        }}
+      >
+        Reintentar
+      </button>
+    </div>
+  );
+}
+
+/** Empty-search block rendered where the Go section lives. */
+function OpencodeGoEmptyResults({ onClear }: { onClear: () => void }) {
+  return (
+    <div style={{ padding: '8px 16px 12px 32px' }}>
+      <div style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', marginBottom: 8 }}>
+        Sin resultados en OpenCode Go
+      </div>
+      <button
+        type="button"
+        onClick={onClear}
+        style={{
+          minHeight: 44,
+          padding: '10px 16px',
+          fontSize: '0.875rem',
+          fontFamily: 'var(--font-body)',
+          fontWeight: 500,
+          color: 'var(--text-primary)',
+          background: 'var(--bg-surface)',
+          border: '1px solid var(--border)',
+          borderRadius: 'var(--radius-md)',
+          cursor: 'pointer',
+        }}
+      >
+        Limpiar búsqueda
+      </button>
+    </div>
+  );
 }
 
 export type ModelSelectorVariant = 'conversation' | 'settings' | 'agent' | 'council';
@@ -95,7 +261,19 @@ export function ModelSelectorCore({
   const { models: codexModels } = useCodexModels();
   const { models: abliterationModels } = useAbliterationModels();
   const { models: arnictModels } = useArnictModels();
-  const { models: opencodeGoModels } = useOpencodeGoModels();
+  // T6 (parallel wave) adds `refresh`/`retry` to this hook; consume them
+  // defensively so the picker compiles and works before and after it lands.
+  // No extra status-event subscription here: hook state drives re-render.
+  const opencodeGoHook = useOpencodeGoModels() as ReturnType<typeof useOpencodeGoModels> & {
+    refresh?: () => void;
+    retry?: () => void;
+  };
+  const {
+    models: opencodeGoModels,
+    loading: opencodeGoLoading,
+    error: opencodeGoError,
+  } = opencodeGoHook;
+  const opencodeGoRefresh = opencodeGoHook.refresh ?? opencodeGoHook.retry;
   const { models: llamaCppModels } = useLlamaCppModels();
   const { favorites, toggleFavorite } = useFavoriteModels();
   const { recent, addRecent } = useRecentModels();
@@ -142,7 +320,9 @@ export function ModelSelectorCore({
       (m) =>
         m.id.toLowerCase().includes(q) ||
         m.name.toLowerCase().includes(q) ||
-        (m.description && m.description.toLowerCase().includes(q))
+        (m.description && m.description.toLowerCase().includes(q)) ||
+        // T7: transport search — `anthropic`/`responses` filter Go rows by badge.
+        opencodeGoMatchesTransportQuery(m, q)
     );
   }, [models, search]);
 
@@ -237,6 +417,43 @@ export function ModelSelectorCore({
     );
     return Object.fromEntries([...sorted, ...rest]);
   }, [filteredModels, favorites, recent, models, variant, search]);
+
+  // ----- OpenCode Go section state (T7) -----
+  const isSettingsVariant = variant === 'settings';
+  const goSearchActive = search.trim() !== '';
+  const goVisibleCount = filteredModels.filter((m) => isOpencodeGoModel(m.id)).length;
+  const showGoError = !!opencodeGoError && !opencodeGoLoading;
+  // Author-grouped variants (composer/agent/council): when the Go group has no
+  // rows (loading / error / empty search), pin an empty group shell at Go's
+  // priority slot so skeleton / hint / empty render where the group lives.
+  const showGoSkeletonAuthor = !isSettingsVariant && opencodeGoLoading && !opencodeGoError && goVisibleCount === 0;
+  const showGoErrorAuthor = !isSettingsVariant && showGoError;
+  const showGoEmptyAuthor = !isSettingsVariant && goSearchActive && !opencodeGoLoading && !opencodeGoError && goVisibleCount === 0;
+  const groupEntries: [string, OpenRouterModelType[]][] = Object.entries(grouped);
+  if ((showGoSkeletonAuthor || showGoErrorAuthor || showGoEmptyAuthor) && !grouped[OPENCODE_GO_GROUP]) {
+    const goPriority = (PROVIDER_PRIORITY as readonly string[]).indexOf(OPENCODE_GO_GROUP);
+    const idx = groupEntries.findIndex(([k]) => {
+      const p = (PROVIDER_PRIORITY as readonly string[]).indexOf(k);
+      return p !== -1 && p > goPriority;
+    });
+    const sentinel: [string, OpenRouterModelType[]] = [OPENCODE_GO_GROUP, []];
+    if (idx === -1) groupEntries.push(sentinel);
+    else groupEntries.splice(idx, 0, sentinel);
+  }
+  // Settings variant: the Go visual subgroup lives inside Premium.
+  const showGoSkeletonSettings = isSettingsVariant && !!grouped['Premium'] && opencodeGoLoading && !opencodeGoError &&
+    grouped['Premium'].filter((m) => isOpencodeGoModel(m.id)).length === 0;
+  const showGoErrorSettings = isSettingsVariant && !!grouped['Premium'] && showGoError;
+  const showGoEmptySettings = isSettingsVariant && !!grouped['Premium'] && goSearchActive && !opencodeGoLoading && !opencodeGoError && goVisibleCount === 0;
+  const showGoStandaloneSettings = isSettingsVariant && !grouped['Premium'] &&
+    (opencodeGoLoading || showGoError || (goSearchActive && goVisibleCount === 0));
+  const clearSearch = useCallback(() => {
+    setSearch('');
+    searchInputRef.current?.focus();
+  }, []);
+  const retryOpencodeGo = useCallback(() => {
+    opencodeGoRefresh?.();
+  }, [opencodeGoRefresh]);
 
   const toggleGroup = useCallback((key: string) => {
     setExpandedGroups((prev) => {
@@ -554,8 +771,8 @@ export function ModelSelectorCore({
                   background: 'transparent',
                   color: 'var(--text-muted)',
                   cursor: 'pointer',
-                  minWidth: 36,
-                  minHeight: 36,
+                  minWidth: 44,
+                  minHeight: 44,
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
@@ -669,7 +886,7 @@ export function ModelSelectorCore({
                     </button>
                   )}
 
-                  {Object.entries(grouped).map(([groupKey, groupModels]) => {
+                  {groupEntries.map(([groupKey, groupModels]) => {
                     if (groupKey === 'AgentDefault') return null;
                     if (groupKey === 'Recent') {
                       return (
@@ -703,11 +920,13 @@ export function ModelSelectorCore({
                                 onClick={() => handleSelect(model.id, model.name)}
                                 role="option"
                                 aria-selected={isSelected}
+                                aria-label={isOpencodeGoModel(model.id) ? getOpencodeGoAccessibleName(model) : undefined}
                                 style={{
                                   display: 'flex',
                                   alignItems: 'center',
                                   gap: 10,
                                   width: '100%',
+                                  minHeight: 44,
                                   padding: '8px 16px',
                                   textAlign: 'left',
                                   background: isSelected ? 'var(--accent-muted)' : 'transparent',
@@ -758,6 +977,21 @@ export function ModelSelectorCore({
                     const isTierGroup = ['Recommended', 'Premium', 'Standard', 'Economy'].includes(
                       groupKey
                     );
+                    const isGoGroup = groupKey === OPENCODE_GO_GROUP;
+                    const isPremiumTier = groupKey === 'Premium';
+                    // Settings: non-Go Premium rows keep their order; the Go
+                    // visual subgroup closes Premium sorted by base price asc.
+                    const renderModels = isPremiumTier
+                      ? [
+                          ...groupModels.filter((m) => !isOpencodeGoModel(m.id)),
+                          ...groupModels
+                            .filter((m) => isOpencodeGoModel(m.id))
+                            .sort(compareOpencodeGoByPriceAsc),
+                        ]
+                      : groupModels;
+                    const premiumGoCount = isPremiumTier
+                      ? renderModels.filter((m) => isOpencodeGoModel(m.id)).length
+                      : 0;
 
                     return (
                       <div key={groupKey}>
@@ -837,22 +1071,48 @@ export function ModelSelectorCore({
 
                         {(isTierGroup || isFavoritesGroup || expandedGroups.has(groupKey)) && (
                           <div style={{ padding: '4px 0' }}>
-                            {groupModels.map((model) => {
+                            {isGoGroup && showGoSkeletonAuthor && (
+                              <OpencodeGoSkeleton rowHeight={44} rowPadding="8px 16px 8px 32px" />
+                            )}
+                            {isGoGroup && showGoErrorAuthor && opencodeGoError && (
+                              <OpencodeGoErrorHint error={opencodeGoError} onRetry={retryOpencodeGo} />
+                            )}
+                            {isGoGroup && showGoEmptyAuthor && (
+                              <OpencodeGoEmptyResults onClear={clearSearch} />
+                            )}
+                            {isPremiumTier && showGoSkeletonSettings && (
+                              <OpencodeGoSkeleton rowHeight={65} rowPadding="12px 16px" />
+                            )}
+                            {isPremiumTier && showGoErrorSettings && opencodeGoError && (
+                              <OpencodeGoErrorHint error={opencodeGoError} onRetry={retryOpencodeGo} />
+                            )}
+                            {isPremiumTier && showGoEmptySettings && (
+                              <>
+                                <OpencodeGoSettingsSubheader count={0} />
+                                <OpencodeGoEmptyResults onClear={clearSearch} />
+                              </>
+                            )}
+                            {renderModels.map((model, idx) => {
                               const isSelected = effectiveModel === model.id;
                               const isFavorite = favorites.includes(model.id);
                               const meta = getProviderMeta(getModelAuthor(model.id));
-                              return (
+                              const isGoRow = isOpencodeGoModel(model.id);
+                              const showGoSubheader = isPremiumTier && isGoRow &&
+                                (idx === 0 || !isOpencodeGoModel(renderModels[idx - 1].id));
+                              const row = (
                                 <button
                                   key={model.id}
                                   type="button"
                                   onClick={() => handleSelect(model.id, model.name)}
                                   role="option"
                                   aria-selected={isSelected}
+                                  aria-label={isGoRow ? getOpencodeGoAccessibleName(model) : undefined}
                                   style={{
                                     display: 'flex',
                                     alignItems: 'center',
                                     gap: isSettings ? 12 : 10,
                                     width: '100%',
+                                    minHeight: 44,
                                     padding: isSettings ? '12px 16px' : '8px 16px 8px 32px',
                                     textAlign: 'left',
                                     background: isSelected
@@ -911,7 +1171,9 @@ export function ModelSelectorCore({
                                         }}
                                       >
                                         {model.name}
+                                        {isGoRow && <OpencodeGoPendingSuffix model={model} />}
                                       </span>
+                                      {isGoRow && <OpencodeGoBadge model={model} />}
                                       {model.id === 'openrouter/auto' && (
                                         <Sparkles size={12} style={{ color: 'var(--accent)' }} />
                                       )}
@@ -932,6 +1194,12 @@ export function ModelSelectorCore({
                                         <span>·</span>
                                         {/* llama.cpp is free/local — never render a $0.00 price as if metered. */}
                                         <span>{isLlamaCppModel(model.id) ? 'local' : formatPrice(model.pricing.prompt)}</span>
+                                        {isGoRow && (
+                                          <>
+                                            <span>·</span>
+                                            <span>{formatOpencodeGoMonthlyLimit(model)}</span>
+                                          </>
+                                        )}
                                         {(model as { loaded?: boolean }).loaded === true && (
                                           <>
                                             <span>·</span>
@@ -959,8 +1227,8 @@ export function ModelSelectorCore({
                                           }
                                         }}
                                         style={{
-                                          padding: 8,
-                                          margin: -4,
+                                          padding: 14,
+                                          margin: -10,
                                           background: 'transparent',
                                           border: 'none',
                                           borderRadius: 'var(--radius-sm)',
@@ -987,12 +1255,31 @@ export function ModelSelectorCore({
                                   </div>
                                 </button>
                               );
+                              if (!showGoSubheader) return row;
+                              return (
+                                <React.Fragment key={model.id}>
+                                  <OpencodeGoSettingsSubheader key="go-subheader" count={premiumGoCount} />
+                                  {row}
+                                </React.Fragment>
+                              );
                             })}
                           </div>
                         )}
                       </div>
                     );
                   })}
+                  {showGoStandaloneSettings && (
+                    <div style={{ padding: '12px 0', borderTop: '1px solid var(--border)' }}>
+                      <OpencodeGoSettingsSubheader count={goVisibleCount} />
+                      {opencodeGoLoading && !opencodeGoError ? (
+                        <OpencodeGoSkeleton rowHeight={65} rowPadding="12px 16px" />
+                      ) : showGoError && opencodeGoError ? (
+                        <OpencodeGoErrorHint error={opencodeGoError} onRetry={retryOpencodeGo} />
+                      ) : (
+                        <OpencodeGoEmptyResults onClear={clearSearch} />
+                      )}
+                    </div>
+                  )}
                 </>
               )}
             </div>
@@ -1015,6 +1302,19 @@ export function ModelSelectorCore({
         .model-selector-core button:focus-visible {
           outline: 2px solid var(--accent);
           outline-offset: 2px;
+        }
+        .opencode-go-skeleton-bar {
+          background: linear-gradient(90deg, var(--bg-surface) 25%, var(--bg-hover) 50%, var(--bg-surface) 75%);
+          background-size: 200% 100%;
+          animation: opencode-go-skeleton-shimmer 1.4s ease-in-out infinite;
+        }
+        @keyframes opencode-go-skeleton-shimmer {
+          to { background-position: -200% 0; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .opencode-go-skeleton-bar {
+            animation: none;
+          }
         }
       `}</style>
     </div>

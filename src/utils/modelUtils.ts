@@ -1,3 +1,4 @@
+import type { OpenRouterModel } from '../types';
 import {
   DEEPSEEK_PREFIX,
   DEEPSEEK_DIRECT_GROUP,
@@ -18,7 +19,9 @@ import {
   OPENCODE_GO_PREFIX,
   OPENCODE_GO_GROUP,
   OPENCODE_GO_ACCENT,
+  OPENCODE_GO_BADGE_META,
   isOpencodeGoModel,
+  type OpencodeGoBadgeKind,
   LLAMACPP_PREFIX,
   LLAMACPP_GROUP,
   LLAMACPP_ACCENT,
@@ -191,3 +194,104 @@ export const PROVIDER_PRIORITY = [
   'cohere',
   'x-ai',
 ] as const;
+
+// ----- OpenCode Go picker (T7): badges, pending suffix, limits, ordering -----
+// Single source for every Go display decision below is the served catalog
+// entry (`transport` / `sendable` / `monthlyLimitUsd`, T1): the frontend never
+// duplicates the enablement decision in its own constants.
+
+/** Transport served per Go entry (mirrors the server `OpenCodeGoTransport`). */
+export type OpencodeGoTransport = 'chat' | 'messages' | 'responses';
+
+/** Served-entry fields the picker reads (all optional: tolerate old payloads). */
+export interface OpencodeGoListFields {
+  transport?: OpencodeGoTransport | string;
+  sendable?: boolean;
+  monthlyLimitUsd?: number;
+  priceNote?: string;
+}
+
+export type OpencodeGoListModel = OpenRouterModel & OpencodeGoListFields;
+
+/** Suffix for phase-2 rows whose entry is not send-enabled yet. */
+export const OPENCODE_GO_PENDING_SUFFIX = '· pendiente de verificación';
+
+/** Transport label for accessible row names (`<Nombre>, <transporte>, <precio>`). */
+export const OPENCODE_GO_TRANSPORT_LABELS: Record<OpencodeGoTransport, string> = {
+  chat: 'Chat',
+  messages: 'Anthropic',
+  responses: 'Responses',
+};
+
+/** Transport of a Go row from its served entry, or null (non-Go / unknown). */
+export function getOpencodeGoTransport(model: OpenRouterModel): OpencodeGoTransport | null {
+  if (!isOpencodeGoModel(model.id)) return null;
+  const t = (model as OpencodeGoListFields).transport;
+  return t === 'chat' || t === 'messages' || t === 'responses' ? t : null;
+}
+
+/** Badge kind for a Go row: phase-2 only (`messages` → anthropic, `responses` → responses). */
+export function getOpencodeGoBadgeKind(model: OpenRouterModel): OpencodeGoBadgeKind | null {
+  const t = getOpencodeGoTransport(model);
+  if (t === 'messages') return 'anthropic';
+  if (t === 'responses') return 'responses';
+  return null;
+}
+
+/** Badge label for a Go row (`Anthropic` / `Responses`), or null for chat rows. */
+export function getOpencodeGoBadgeLabel(model: OpenRouterModel): string | null {
+  const kind = getOpencodeGoBadgeKind(model);
+  return kind ? OPENCODE_GO_BADGE_META[kind].label : null;
+}
+
+/**
+ * Whether the row wears the pending-verification suffix. Governed ONLY by the
+ * served `sendable` field (`=== false`); absent/old payloads never suffix.
+ */
+export function isOpencodeGoPendingVerification(model: OpenRouterModel): boolean {
+  return isOpencodeGoModel(model.id) && (model as OpencodeGoListFields).sendable === false;
+}
+
+/** Monthly-limit label for settings Go rows (`$60/mes`, or `límite n/d`). */
+export function formatOpencodeGoMonthlyLimit(model: OpenRouterModel): string {
+  const v = (model as OpencodeGoListFields).monthlyLimitUsd;
+  return typeof v === 'number' && Number.isFinite(v) ? `$${v}/mes` : 'límite n/d';
+}
+
+/**
+ * Settings intra-Go order: base price ascending (prompt/in, then
+ * completion/out). Stable: ties keep catalog order. Global provider order
+ * (`PROVIDER_PRIORITY`, Go 5th) is untouched — this only sorts inside Go.
+ */
+export function compareOpencodeGoByPriceAsc(a: OpenRouterModel, b: OpenRouterModel): number {
+  const inDiff = parseFloat(a.pricing.prompt) - parseFloat(b.pricing.prompt);
+  if (inDiff !== 0) return inDiff;
+  return parseFloat(a.pricing.completion) - parseFloat(b.pricing.completion);
+}
+
+/**
+ * Transport search criterion (T7): a Go row matches when the query (≥2 chars,
+ * case-insensitive) is a substring of its badge label (`anthropic`,
+ * `responses`) or its transport key (`messages`, `responses`, `chat`).
+ */
+export function opencodeGoMatchesTransportQuery(model: OpenRouterModel, query: string): boolean {
+  if (!isOpencodeGoModel(model.id)) return false;
+  const q = query.trim().toLowerCase();
+  if (q.length < 2) return false;
+  const t = getOpencodeGoTransport(model);
+  const badge = getOpencodeGoBadgeLabel(model);
+  return [t, badge].some((s) => typeof s === 'string' && s.toLowerCase().includes(q));
+}
+
+/**
+ * Accessible row name for a Go row: `"<Nombre>, <transporte>, <precio>"` plus
+ * `, pendiente de verificación` when the suffix is shown (the visual badge is
+ * `aria-hidden` and `aria-label` replaces content announcement, so neither
+ * signal may be lost for AT).
+ */
+export function getOpencodeGoAccessibleName(model: OpenRouterModel): string {
+  const t = getOpencodeGoTransport(model);
+  const transport = t ? OPENCODE_GO_TRANSPORT_LABELS[t] : 'OpenCode Go';
+  const base = `${model.name}, ${transport}, ${formatPrice(model.pricing.prompt)}`;
+  return isOpencodeGoPendingVerification(model) ? `${base}, pendiente de verificación` : base;
+}

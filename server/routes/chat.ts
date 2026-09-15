@@ -46,8 +46,10 @@ import {
   opencodeGoFormatMismatchMessage,
   opencodeGoHistoryReasoningField,
   opencodeGoTransportFor,
-  opencodeGoWrongTransportMessage,
   persistedModelId,
+  OPENCODE_GO_ANTHROPIC_VERSION,
+  OPENCODE_GO_MESSAGES_URL,
+  OPENCODE_GO_RESPONSES_URL,
 } from '../providers/index.js';
 import {
   createThinkStreamSplitter,
@@ -97,6 +99,306 @@ import {
   abortTurn,
   clearTurn,
 } from '../chatTurnRegistry.js';
+
+// ---------------------------------------------------------------------------
+// OpenCode Go `messages` transport sender (T4, Anthropic shape).
+// T3 VERIFIED-shape 2026-09-15 (`minimax-m3`): `POST {OPENCODE_GO_MESSAGES_URL}`
+// with `model` bare + `max_tokens` + `messages` + `stream`, headers
+// `anthropic-version: 2023-06-01` + `Authorization: Bearer` + `x-api-key`
+// (divergence: Bearer alone 401s `AuthError/Missing API key`) + operationals.
+// Tools map OpenAI→Anthropic natively in 5 lines: each
+// `{type:'function',function:{name,description,parameters}}` becomes
+// `{name,description,input_schema:parameters}`; no `tool_choice` (Anthropic
+// defaults to auto); no `parallel_tool_calls` (no Anthropic equivalent);
+// history `tool_calls` become `tool_use` blocks and `tool` rows become
+// `tool_result` blocks; `reasoning` never travels (ignored with log, D4).
+// ---------------------------------------------------------------------------
+
+type OpenRouterToolDef = { type: 'function'; function: { name: string; description: string; parameters: Record<string, unknown> } };
+
+interface GoMessagesOutboundMessage { role: string; content: unknown }
+
+/** Extracts plain text from an OpenAI chat content value (string or parts array). */
+function goMessagesTextContent(content: string | unknown[] | null | undefined): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((p) => {
+        if (typeof p === 'string') return p;
+        if (p && typeof p === 'object') {
+          const part = p as { type?: unknown; text?: unknown };
+          if (part.type === 'text' && typeof part.text === 'string') return part.text;
+        }
+        return '';
+      })
+      .join('');
+  }
+  return '';
+}
+
+/**
+ * Maps the chat-completions `messages` array (system + history + current turn,
+ * OpenAI tool shapes) to an Anthropic `POST /messages` body. System rows fold
+ * into top-level `system`; assistant `tool_calls` fold into `tool_use` blocks;
+ * `tool` rows fold into `user` `tool_result` blocks; consecutive same-role
+ * rows merge (Anthropic requires alternation); reasoning fields never travel.
+ */
+export function buildOpencodeGoMessagesBody(opts: {
+  upstreamModel: string;
+  messages: Array<{ role: string; content?: string | unknown[] | null; tool_call_id?: string; tool_calls?: unknown[] }>;
+  openRouterTools: OpenRouterToolDef[];
+  toolChoice: string;
+  temperature: number;
+  maxTokens: number;
+}): Record<string, unknown> {
+  const systemTexts: string[] = [];
+  const converted: GoMessagesOutboundMessage[] = [];
+  for (const m of opts.messages) {
+    if (m.role === 'system') {
+      const text = goMessagesTextContent(m.content);
+      if (text) systemTexts.push(text);
+      continue;
+    }
+    if (m.role === 'tool') {
+      converted.push({
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: m.tool_call_id ?? '', content: goMessagesTextContent(m.content) }],
+      });
+      continue;
+    }
+    if (m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length > 0) {
+      const blocks: unknown[] = [];
+      const text = goMessagesTextContent(m.content);
+      if (text) blocks.push({ type: 'text', text });
+      for (const raw of m.tool_calls) {
+        const tc = raw as { id?: string; function?: { name?: string; arguments?: string } };
+        let input: Record<string, unknown> = {};
+        try {
+          const parsedArgs: unknown = JSON.parse(tc.function?.arguments ?? '{}');
+          if (parsedArgs && typeof parsedArgs === 'object' && !Array.isArray(parsedArgs)) {
+            input = parsedArgs as Record<string, unknown>;
+          }
+        } catch {
+          input = {};
+        }
+        blocks.push({ type: 'tool_use', id: tc.id ?? '', name: tc.function?.name ?? '', input });
+      }
+      converted.push({ role: 'assistant', content: blocks });
+      continue;
+    }
+    converted.push({
+      role: m.role === 'assistant' ? 'assistant' : 'user',
+      content: goMessagesTextContent(m.content),
+    });
+  }
+  // Merge consecutive same-role rows so the sequence alternates.
+  const merged: GoMessagesOutboundMessage[] = [];
+  for (const m of converted) {
+    const prev = merged[merged.length - 1];
+    if (prev && prev.role === m.role) {
+      const a = Array.isArray(prev.content) ? (prev.content as unknown[]) : [{ type: 'text', text: prev.content ?? '' }];
+      const b = Array.isArray(m.content) ? (m.content as unknown[]) : [{ type: 'text', text: m.content ?? '' }];
+      prev.content = [...a, ...b];
+    } else {
+      merged.push({ role: m.role, content: m.content });
+    }
+  }
+  const body: Record<string, unknown> = {
+    model: opts.upstreamModel,
+    messages: merged,
+    max_tokens: opts.maxTokens,
+    temperature: opts.temperature,
+    stream: true,
+  };
+  if (systemTexts.length > 0) body.system = systemTexts.join('\n\n');
+  if (opts.openRouterTools.length > 0 && opts.toolChoice !== 'none') {
+    body.tools = opts.openRouterTools.map((t) => ({
+      name: t.function.name,
+      description: t.function.description,
+      input_schema: t.function.parameters,
+    }));
+  }
+  return body;
+}
+
+/** Anthropic `usage` shape (T3 P2/P3 literals) mapped onto the T2 cost engine. */
+export interface OpencodeGoMessagesUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_creation_input_tokens?: number;
+  cache_read_input_tokens?: number;
+  cost?: string | number;
+}
+
+/**
+ * Maps Anthropic messages usage onto `computeOpencodeGoCost`: explicit miss =
+ * `input_tokens`, hit = `cache_read_input_tokens`, write =
+ * `cache_creation_input_tokens` (T2 `prompt_cache_write_tokens`, priced at the
+ * row `write` rate else the miss rate, never double-counted). `contextTokens`
+ * is the real request context (total input incl. cached + output) so tiered
+ * rows bill their `above` tier. An upstream `cost` (string `"0"` in T3, always
+ * present) wins when numeric and is never overwritten.
+ */
+export function mapOpencodeGoMessagesUsage(usage: OpencodeGoMessagesUsage | null | undefined): {
+  mappedUsage: { prompt_tokens: number; completion_tokens: number; prompt_cache_hit_tokens: number; prompt_cache_miss_tokens: number; prompt_cache_write_tokens: number };
+  promptTotal: number;
+  outputTokens: number;
+  cachedTokens: number;
+  upstreamCost: number | null;
+} {
+  const input = usage?.input_tokens ?? 0;
+  const output = usage?.output_tokens ?? 0;
+  const created = usage?.cache_creation_input_tokens ?? 0;
+  const read = usage?.cache_read_input_tokens ?? 0;
+  let upstreamCost: number | null = null;
+  if (usage?.cost !== undefined) {
+    const n = typeof usage.cost === 'string' ? Number(usage.cost) : usage.cost;
+    if (typeof n === 'number' && Number.isFinite(n)) upstreamCost = n;
+  }
+  return {
+    mappedUsage: {
+      prompt_tokens: input + read + created,
+      completion_tokens: output,
+      prompt_cache_hit_tokens: read,
+      prompt_cache_miss_tokens: input,
+      prompt_cache_write_tokens: created,
+    },
+    promptTotal: input + read + created,
+    outputTokens: output,
+    cachedTokens: read,
+    upstreamCost,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// OpenCode Go `responses` transport sender (T5, Responses API).
+// T3 VERIFIED 2026-09-15 (`muse-spark-1.3-contributor`, P4/P5):
+// `POST {OPENCODE_GO_RESPONSES_URL}` with `model` bare + `input` (+ `stream`),
+// headers `Authorization: Bearer` + operationals ONLY (Bearer alone 200s;
+// no `x-api-key`, no `anthropic-version` on this path). Tools ride the native
+// OpenAI function shape (`tools:[{type:'function',...}]`, same as
+// `toOpenRouterTools` output); history `tool_calls` become `function_call`
+// items and `tool` rows become `function_call_output` items; system rows fold
+// into top-level `instructions`. Cost guard: the API reasons at `high` by
+// default (280/304 output tokens for `input:"ok"` in P4), so every request
+// caps `reasoning.effort:'low'` + `max_output_tokens`; the app reasoning
+// toggle still never travels (D4 — the builder takes no effort param).
+// ---------------------------------------------------------------------------
+
+/**
+ * Maps the chat-completions `messages` array (system + history + current turn,
+ * OpenAI tool shapes) to a Responses `POST /responses` body. System rows fold
+ * into top-level `instructions`; assistant `tool_calls` fold into
+ * `function_call` items; `tool` rows fold into `function_call_output` items.
+ */
+export function buildOpencodeGoResponsesBody(opts: {
+  upstreamModel: string;
+  messages: Array<{ role: string; content?: string | unknown[] | null; tool_call_id?: string; tool_calls?: unknown[] }>;
+  openRouterTools: OpenRouterToolDef[];
+  toolChoice: string;
+  temperature: number;
+  maxTokens: number;
+}): Record<string, unknown> {
+  const instructionTexts: string[] = [];
+  const input: unknown[] = [];
+  for (const m of opts.messages) {
+    if (m.role === 'system') {
+      const text = goMessagesTextContent(m.content);
+      if (text) instructionTexts.push(text);
+      continue;
+    }
+    if (m.role === 'tool') {
+      input.push({
+        type: 'function_call_output',
+        call_id: m.tool_call_id ?? '',
+        output: goMessagesTextContent(m.content),
+      });
+      continue;
+    }
+    if (m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length > 0) {
+      const text = goMessagesTextContent(m.content);
+      if (text) input.push({ role: 'assistant', content: text });
+      for (const raw of m.tool_calls) {
+        const tc = raw as { id?: string; function?: { name?: string; arguments?: string } };
+        input.push({
+          type: 'function_call',
+          call_id: tc.id ?? '',
+          name: tc.function?.name ?? '',
+          arguments: tc.function?.arguments ?? '{}',
+        });
+      }
+      continue;
+    }
+    input.push({
+      role: m.role === 'assistant' ? 'assistant' : 'user',
+      content: goMessagesTextContent(m.content),
+    });
+  }
+  const body: Record<string, unknown> = {
+    model: opts.upstreamModel,
+    input,
+    temperature: opts.temperature,
+    reasoning: { effort: 'low' },
+    max_output_tokens: opts.maxTokens,
+    stream: true,
+  };
+  if (instructionTexts.length > 0) body.instructions = instructionTexts.join('\n\n');
+  if (opts.openRouterTools.length > 0 && opts.toolChoice !== 'none') {
+    body.tools = opts.openRouterTools;
+  }
+  return body;
+}
+
+/** Responses `usage` shape (T3 P4/P5 literals) mapped onto the T2 cost engine. */
+export interface OpencodeGoResponsesUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  total_tokens?: number;
+  input_tokens_details?: { cached_tokens?: number };
+  output_tokens_details?: { reasoning_tokens?: number };
+  cost?: string | number;
+}
+
+/**
+ * Maps Responses usage onto `computeOpencodeGoCost` (T3 verdict): hit =
+ * `input_tokens_details.cached_tokens`, explicit miss = `input - cached`,
+ * out = `output_tokens`; `reasoning_tokens` is informative only (already
+ * inside `output_tokens`). `contextTokens` is the real request context
+ * (input + output) so tiered rows (`gpt-5.6-luna` 272K, `grok-4.x` 200K)
+ * bill their `above` tier. An upstream `cost` (string `"0"` in T3, on the
+ * response or the final `ping`) wins when numeric and is never overwritten.
+ */
+export function mapOpencodeGoResponsesUsage(usage: OpencodeGoResponsesUsage | null | undefined): {
+  mappedResponsesUsage: { prompt_tokens: number; completion_tokens: number; prompt_cache_hit_tokens: number; prompt_cache_miss_tokens: number };
+  promptTotal: number;
+  outputTokens: number;
+  cachedTokens: number;
+  reasoningTokens: number;
+  upstreamCost: number | null;
+} {
+  const input = usage?.input_tokens ?? 0;
+  const output = usage?.output_tokens ?? 0;
+  const cached = usage?.input_tokens_details?.cached_tokens ?? 0;
+  const reasoning = usage?.output_tokens_details?.reasoning_tokens ?? 0;
+  let upstreamCost: number | null = null;
+  if (usage?.cost !== undefined) {
+    const n = typeof usage.cost === 'string' ? Number(usage.cost) : usage.cost;
+    if (typeof n === 'number' && Number.isFinite(n)) upstreamCost = n;
+  }
+  return {
+    mappedResponsesUsage: {
+      prompt_tokens: input,
+      completion_tokens: output,
+      prompt_cache_hit_tokens: cached,
+      prompt_cache_miss_tokens: Math.max(input - cached, 0),
+    },
+    promptTotal: input,
+    outputTokens: output,
+    cachedTokens: cached,
+    reasoningTokens: reasoning,
+    upstreamCost,
+  };
+}
 
 const router = Router();
 
@@ -540,16 +842,9 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       return;
     }
 
-    if (provider.id === 'opencode-go') {
-      // Phase-2 transports fail named BEFORE any key lookup or network call
-      // (GC §7). 'unknown' ids fail open to chat-completions below.
-      const goTransport = opencodeGoTransportFor(upstreamModel);
-      if (goTransport === 'messages' || goTransport === 'responses') {
-        console.log(`[chat] opencode-go wrong transport: model=${upstreamModel} transport=${goTransport}`);
-        res.status(400).json({ error: opencodeGoWrongTransportMessage(upstreamModel, goTransport) });
-        return;
-      }
-    }
+    // T5: both phase-2 transports send (`messages` since T4, `responses`
+    // via the sender below); 'unknown' ids fail open to chat-completions
+    // below with the §7 mismatch mapping (GC §3).
 
     // API key for the resolved provider (decrypted server-side). The ChatGPT
     // (Codex) provider has no API key — its account state is validated in the
@@ -879,20 +1174,58 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       headers = provider.buildHeaders('');
     }
 
+    // T4: `messages`-transport models ride the Anthropic sender (URL + shape
+    // + SSE below). T5: `responses`-transport models ride the Responses API
+    // sender (URL + input + SSE below). `unknown` stays on chat-completions
+    // with the fail-open mismatch mapping.
+    const isGoMessages = provider.id === 'opencode-go' && opencodeGoTransportFor(upstreamModel) === 'messages';
+    const isGoResponses = provider.id === 'opencode-go' && opencodeGoTransportFor(upstreamModel) === 'responses';
+
     if (provider.id === 'opencode-go') {
       // Operative session header (GC §1/D9): one per chat POST, traceable upstream.
       headers['x-opencode-session'] = conversation_id;
     }
+    if (isGoMessages) {
+      // T3 divergence (VERIFIED-shape + DIVERGENTE-auth 2026-09-15): the
+      // gateway requires `x-api-key` on `/messages`; `Bearer` alone 401s
+      // `AuthError/Missing API key`. Both travel until re-probed.
+      apiUrl = OPENCODE_GO_MESSAGES_URL;
+      headers['anthropic-version'] = OPENCODE_GO_ANTHROPIC_VERSION;
+      headers['x-api-key'] = (apiKey ?? '').trim();
+    }
+    if (isGoResponses) {
+      // T3 VERIFIED (P4/P5) 2026-09-15: `/responses` authenticates with
+      // `Bearer` alone — no `x-api-key`, no `anthropic-version` on this path.
+      apiUrl = OPENCODE_GO_RESPONSES_URL;
+    }
 
     let actualModelFromResponse: string | null = null;
 
-    const requestBody: Record<string, unknown> = {
-      model: upstreamModel,
-      messages,
-      temperature: agent.temperature,
-      max_tokens: agent.max_tokens,
-      stream: true,
-    };
+    const requestBody: Record<string, unknown> = isGoMessages
+      ? buildOpencodeGoMessagesBody({
+          upstreamModel,
+          messages: messages as Array<{ role: string; content?: string | unknown[] | null; tool_call_id?: string; tool_calls?: unknown[] }>,
+          openRouterTools: openRouterTools as OpenRouterToolDef[],
+          toolChoice: agent.tool_choice === 'none' ? 'none' : 'auto',
+          temperature: agent.temperature,
+          maxTokens: agent.max_tokens,
+        })
+      : isGoResponses
+        ? buildOpencodeGoResponsesBody({
+            upstreamModel,
+            messages: messages as Array<{ role: string; content?: string | unknown[] | null; tool_call_id?: string; tool_calls?: unknown[] }>,
+            openRouterTools: openRouterTools as OpenRouterToolDef[],
+            toolChoice: agent.tool_choice === 'none' ? 'none' : 'auto',
+            temperature: agent.temperature,
+            maxTokens: agent.max_tokens,
+          })
+        : {
+            model: upstreamModel,
+            messages,
+            temperature: agent.temperature,
+            max_tokens: agent.max_tokens,
+            stream: true,
+          };
     if (isLlamacppModel(effectiveModel) && llamacppConfig) {
       // Increment 2 + 2d (§6/§10): resolution v3 — global llamacpp_sampling row
       // ⊕ per-model sampling for THIS upstream key, through the SAME ForModel
@@ -917,11 +1250,15 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
 
     // Tools attach normally for every chat-completions provider — llama.cpp
     // has no advisory capability gate; the old LM Studio tool-veto concept
-    // died with that provider.
+    // died with that provider. T4: `messages` already carries its Anthropic
+    // `input_schema` tools from the builder above; T5: `responses` already
+    // carries its native function tools — never the OpenAI shape twice.
     if (openRouterTools.length > 0) {
-      requestBody.tools = openRouterTools;
-      requestBody.tool_choice = agent.tool_choice === 'none' ? 'none' : 'auto';
-      requestBody.parallel_tool_calls = agent.parallel_tool_calls === 0 ? false : true;
+      if (!isGoMessages && !isGoResponses) {
+        requestBody.tools = openRouterTools;
+        requestBody.tool_choice = agent.tool_choice === 'none' ? 'none' : 'auto';
+        requestBody.parallel_tool_calls = agent.parallel_tool_calls === 0 ? false : true;
+      }
     }
     if (attachments.length > 0 && provider.supportsPlugins) {
       requestBody.plugins = [{ id: 'file-parser', pdf: { engine: pdf_engine } }];
@@ -1033,8 +1370,10 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         requestBody.reasoning = buildArnictReasoning(reasoningEnabled, reasoningEffort);
       }
     } else if (provider.id === 'opencode-go') {
-      // D4/GC §5: no reasoning field travels for Go in phase-1 (wire shape
-      // UNVERIFIED); the toggle is ignored with a debug log.
+      // D4/GC §5: no app reasoning field travels for Go (the toggle is
+      // ignored with a debug log). T5: the responses wire caps effort inside
+      // its own body builder (`reasoning:{effort:'low'}` + max_output_tokens),
+      // never from this toggle.
       if (reasoningEnabled) {
         console.log(`[chat] opencode-go reasoning ignored (phase-1 omit): model=${upstreamModel} effort=${reasoningEffort ?? 'none'}`);
       }
@@ -1070,11 +1409,14 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       requestBody.stream_options = { include_usage: true };
     }
 
-    if (provider.id === 'opencode-go') {
+    if (provider.id === 'opencode-go' && !isGoMessages && !isGoResponses) {
       // Usage frame required for static cost accounting (GC §6). Body stays
       // allowlisted (GC §4): provider/plugins/response_format/reasoning never
       // attach (supportsProviderRouting/supportsPlugins/supportsReasoningParam
-      // are all false), tools attach normally above.
+      // are all false), tools attach normally above. T4: `messages` carries
+      // its usage inside `message_delta` (+ final `ping` cost); T5:
+      // `responses` inside `response.completed` (+ final `ping` cost) — no
+      // `stream_options` on either wire shape.
       requestBody.stream_options = { include_usage: true };
     }
 
@@ -1590,11 +1932,45 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       draftFlushedReasoning = '';
       fullContent = '';
       fullReasoning = '';
-      requestBody.messages = messages;
-      if (openRouterTools.length > 0) {
-        requestBody.tools = openRouterTools;
-        requestBody.tool_choice = agent.tool_choice === 'none' ? 'none' : 'auto';
-        requestBody.parallel_tool_calls = agent.parallel_tool_calls === 0 ? false : true;
+      if (isGoMessages) {
+        // T4: re-map the OpenAI-shaped turn (system + tool_calls/tool rows from
+        // the tool loop below) to the Anthropic wire shape every iteration.
+        const rebuilt = buildOpencodeGoMessagesBody({
+          upstreamModel,
+          messages: messages as Array<{ role: string; content?: string | unknown[] | null; tool_call_id?: string; tool_calls?: unknown[] }>,
+          openRouterTools: openRouterTools as OpenRouterToolDef[],
+          toolChoice: agent.tool_choice === 'none' ? 'none' : 'auto',
+          temperature: agent.temperature,
+          maxTokens: agent.max_tokens,
+        });
+        requestBody.messages = rebuilt.messages;
+        if (rebuilt.system !== undefined) requestBody.system = rebuilt.system;
+        else delete requestBody.system;
+        if (rebuilt.tools !== undefined) requestBody.tools = rebuilt.tools;
+        else delete requestBody.tools;
+      } else if (isGoResponses) {
+        // T5: re-map the OpenAI-shaped turn (system + tool_calls/tool rows from
+        // the tool loop below) to Responses `input` every iteration.
+        const rebuilt = buildOpencodeGoResponsesBody({
+          upstreamModel,
+          messages: messages as Array<{ role: string; content?: string | unknown[] | null; tool_call_id?: string; tool_calls?: unknown[] }>,
+          openRouterTools: openRouterTools as OpenRouterToolDef[],
+          toolChoice: agent.tool_choice === 'none' ? 'none' : 'auto',
+          temperature: agent.temperature,
+          maxTokens: agent.max_tokens,
+        });
+        requestBody.input = rebuilt.input;
+        if (rebuilt.instructions !== undefined) requestBody.instructions = rebuilt.instructions;
+        else delete requestBody.instructions;
+        if (rebuilt.tools !== undefined) requestBody.tools = rebuilt.tools;
+        else delete requestBody.tools;
+      } else {
+        requestBody.messages = messages;
+        if (openRouterTools.length > 0) {
+          requestBody.tools = openRouterTools;
+          requestBody.tool_choice = agent.tool_choice === 'none' ? 'none' : 'auto';
+          requestBody.parallel_tool_calls = agent.parallel_tool_calls === 0 ? false : true;
+        }
       }
 
       // Per-segment <think>…</think> state — instantiated EVERY iteration so
@@ -1720,6 +2096,22 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       let readLoopAborted = false;
       const toolCallsByIndex: Record<number, { id?: string; type?: string; function?: { name?: string; arguments?: string } }> = {};
       lastFinishReason = null;
+      // T4 Anthropic stream state (message_start → content_block_* →
+      // message_delta → message_stop → ping). Text accumulates into
+      // fullContent via the shared draft/SSE path; tool_use blocks accumulate
+      // per content index; usage arrives once in message_delta.
+      const anthropicToolBlocks: Record<number, { id?: string; name?: string; inputJson: string }> = {};
+      let anthropicUsage: OpencodeGoMessagesUsage | null = null;
+      let anthropicStopReason: string | null = null;
+      let anthropicPingCost: string | number | undefined;
+      // T5 Responses stream state (response.created → output_text deltas →
+      // response.completed → ping). Text accumulates into fullContent via the
+      // shared draft/SSE path; function_call items accumulate by output
+      // index; usage + cost arrive once in response.completed.
+      const responsesToolCalls: Record<string, { callId?: string; name?: string; args: string }> = {};
+      let responsesUsage: OpencodeGoResponsesUsage | null = null;
+      let responsesInlineCost: string | number | undefined;
+      let responsesPingCost: string | number | undefined;
 
       const reader = apiResponse.body.getReader();
       const decoder = new TextDecoder();
@@ -1749,6 +2141,143 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
               if (parsed.error) {
                 if (!clientDisconnected && !res.writableEnded) {
                   res.write(`data: ${JSON.stringify({ error: parsed.error.message || 'Stream error' })}\n\n`);
+                }
+                continue;
+              }
+              if (isGoMessages) {
+                // T4 Anthropic SSE (T3 P3 literal sequence): message_start
+                // (zeros) → ping → content_block_start → content_block_delta
+                // (text_delta | input_json_delta) → content_block_stop →
+                // message_delta (stop_reason + usage, no cache_creation in
+                // stream) → message_stop → final ping {cost}.
+                const evtType = typeof parsed.type === 'string' ? parsed.type : '';
+                if (evtType === 'message_start') {
+                  const echoModel = parsed.message?.model;
+                  if (typeof echoModel === 'string' && echoModel.trim()) actualModelFromResponse = echoModel;
+                  continue;
+                }
+                if (evtType === 'content_block_start') {
+                  const idx = typeof parsed.index === 'number' ? parsed.index : 0;
+                  const block = parsed.content_block as { type?: string; id?: string; name?: string } | undefined;
+                  if (block?.type === 'tool_use') {
+                    anthropicToolBlocks[idx] = {
+                      id: typeof block.id === 'string' ? block.id : undefined,
+                      name: typeof block.name === 'string' ? block.name : undefined,
+                      inputJson: '',
+                    };
+                  } else if (!anthropicToolBlocks[idx]) {
+                    anthropicToolBlocks[idx] = { inputJson: '' };
+                  }
+                  continue;
+                }
+                if (evtType === 'content_block_delta') {
+                  const idx = typeof parsed.index === 'number' ? parsed.index : 0;
+                  const d = parsed.delta as { text?: unknown; partial_json?: unknown } | undefined;
+                  if (d && typeof d.text === 'string' && d.text) {
+                    fullContent += d.text;
+                    ensureDraftRow();
+                    flushDraft();
+                    if (!clientDisconnected && !res.writableEnded) res.write(`data: ${JSON.stringify({ content: d.text })}\n\n`);
+                  } else if (d && typeof d.partial_json === 'string' && d.partial_json) {
+                    if (!anthropicToolBlocks[idx]) anthropicToolBlocks[idx] = { inputJson: '' };
+                    anthropicToolBlocks[idx].inputJson += d.partial_json;
+                  }
+                  continue;
+                }
+                if (evtType === 'content_block_stop') continue;
+                if (evtType === 'message_delta') {
+                  const stopReason = parsed.delta?.stop_reason;
+                  if (typeof stopReason === 'string' && stopReason) anthropicStopReason = stopReason;
+                  if (parsed.usage) anthropicUsage = parsed.usage as OpencodeGoMessagesUsage;
+                  continue;
+                }
+                if (evtType === 'message_stop') continue;
+                if (evtType === 'ping') {
+                  if (parsed.cost !== undefined) anthropicPingCost = parsed.cost as string | number;
+                  continue;
+                }
+                continue;
+              }
+              if (isGoResponses) {
+                // T5 Responses SSE (T3 P5 literal sequence): response.created
+                // → response.in_progress → response.output_item.added (first
+                // the reasoning item, then the message item) →
+                // response.content_part.added → response.output_text.delta
+                // (text) → response.content_part.done →
+                // response.output_item.done → response.completed (full output
+                // + usage) → final ping {cost}. Reasoning items stay opaque
+                // (encrypted upstream); only output_text deltas stream.
+                const evtType = typeof parsed.type === 'string' ? parsed.type : '';
+                if (evtType === 'response.output_text.delta') {
+                  const d = parsed.delta;
+                  if (typeof d === 'string' && d) {
+                    fullContent += d;
+                    ensureDraftRow();
+                    flushDraft();
+                    if (!clientDisconnected && !res.writableEnded) res.write(`data: ${JSON.stringify({ content: d })}\n\n`);
+                  }
+                  continue;
+                }
+                if (evtType === 'response.output_item.added') {
+                  const item = parsed.item as { type?: unknown; call_id?: unknown; id?: unknown; name?: unknown; arguments?: unknown } | undefined;
+                  if (item?.type === 'function_call') {
+                    const key = typeof parsed.output_index === 'number'
+                      ? String(parsed.output_index)
+                      : (typeof item.call_id === 'string' ? item.call_id : String(Object.keys(responsesToolCalls).length));
+                    responsesToolCalls[key] = {
+                      callId: typeof item.call_id === 'string' ? item.call_id : (typeof item.id === 'string' ? item.id : undefined),
+                      name: typeof item.name === 'string' ? item.name : undefined,
+                      args: typeof item.arguments === 'string' ? item.arguments : '',
+                    };
+                  }
+                  continue;
+                }
+                if (evtType.indexOf('function_call_arguments') >= 0 && evtType.indexOf('delta') >= 0) {
+                  const key = typeof parsed.output_index === 'number'
+                    ? String(parsed.output_index)
+                    : (typeof parsed.item_id === 'string' ? parsed.item_id : '0');
+                  const d = parsed.delta;
+                  if (typeof d === 'string' && d) {
+                    if (!responsesToolCalls[key]) responsesToolCalls[key] = { args: '' };
+                    responsesToolCalls[key].args += d;
+                  }
+                  continue;
+                }
+                if (evtType === 'response.completed') {
+                  const resp = (parsed.response && typeof parsed.response === 'object'
+                    ? parsed.response
+                    : null) as {
+                    model?: unknown; usage?: unknown; cost?: unknown;
+                    output?: unknown;
+                  } | null;
+                  const echoModel = resp?.model;
+                  if (typeof echoModel === 'string' && echoModel.trim()) actualModelFromResponse = echoModel;
+                  const u = resp?.usage ?? parsed.usage;
+                  if (u && typeof u === 'object') responsesUsage = u as OpencodeGoResponsesUsage;
+                  if (resp?.cost !== undefined) responsesInlineCost = resp.cost as string | number;
+                  // Backstop: function_call items missed mid-stream (same
+                  // call_id merges, never duplicates).
+                  const out = Array.isArray(resp?.output) ? resp.output as unknown[] : [];
+                  for (const raw of out) {
+                    if (!raw || typeof raw !== 'object') continue;
+                    const item = raw as { type?: unknown; call_id?: unknown; id?: unknown; name?: unknown; arguments?: unknown };
+                    if (item.type !== 'function_call') continue;
+                    const callId = typeof item.call_id === 'string' ? item.call_id : (typeof item.id === 'string' ? item.id : '');
+                    const name = typeof item.name === 'string' ? item.name : '';
+                    const args = typeof item.arguments === 'string' ? item.arguments : '';
+                    const hit = Object.values(responsesToolCalls).find((t) => t.callId !== undefined && t.callId === callId);
+                    if (hit) {
+                      if (!hit.name && name) hit.name = name;
+                      if (!hit.args && args) hit.args = args;
+                    } else if (name) {
+                      responsesToolCalls[callId || `done-${Object.keys(responsesToolCalls).length}`] = { callId: callId || undefined, name, args };
+                    }
+                  }
+                  continue;
+                }
+                if (evtType === 'ping') {
+                  if (parsed.cost !== undefined) responsesPingCost = parsed.cost as string | number;
+                  continue;
                 }
                 continue;
               }
@@ -1856,11 +2385,118 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       // reasoning-tool-call fallback parser, and finalize see complete text.
       if (thinkSplitter) emitThinkSplit(thinkSplitter.flush());
 
+      if (isGoMessages) {
+        // T4 Anthropic usage → T2 engine: hit = cache_read_input_tokens,
+        // write = cache_creation_input_tokens (mapped to
+        // prompt_cache_write_tokens), explicit miss = input_tokens, tiered by
+        // the real request context (cached input + output). An upstream cost
+        // (usage `cost` or final `ping` cost) wins when numeric — never
+        // overwritten by the static computation.
+        if (anthropicUsage) {
+          const { mappedUsage, promptTotal, outputTokens, cachedTokens: hitTokens, upstreamCost } =
+            mapOpencodeGoMessagesUsage(anthropicUsage);
+          promptTokens = promptTotal;
+          completionTokens = outputTokens;
+          totalTokens = promptTotal + outputTokens;
+          cachedTokens = hitTokens;
+          if (upstreamCost !== null) {
+            cost = upstreamCost;
+          } else {
+            let pingCost: number | null = null;
+            if (anthropicPingCost !== undefined) {
+              const n = typeof anthropicPingCost === 'string' ? Number(anthropicPingCost) : anthropicPingCost;
+              if (typeof n === 'number' && Number.isFinite(n)) pingCost = n;
+            }
+            if (pingCost !== null) cost = pingCost;
+            else cost = computeOpencodeGoCost(mappedUsage, upstreamModel, { contextTokens: promptTotal + outputTokens });
+          }
+        } else if (anthropicPingCost !== undefined) {
+          const n = typeof anthropicPingCost === 'string' ? Number(anthropicPingCost) : anthropicPingCost;
+          if (typeof n === 'number' && Number.isFinite(n)) cost = n;
+        }
+        lastFinishReason = anthropicStopReason === 'tool_use' ? 'tool_calls' : anthropicStopReason;
+      }
+
+      if (isGoResponses) {
+        // T5 Responses usage → T2 engine: hit = cached_tokens, explicit miss
+        // = input − cached, out = output_tokens (reasoning_tokens informative
+        // only, already inside output), tiered by the real request context
+        // (input + output). An upstream cost (response `cost` or final `ping`
+        // cost) wins when numeric — never overwritten by the static
+        // computation.
+        const responsesEventCost = (raw: string | number | undefined): number | null => {
+          if (raw === undefined) return null;
+          const n = typeof raw === 'string' ? Number(raw) : raw;
+          return (typeof n === 'number' && Number.isFinite(n)) ? n : null;
+        };
+        if (responsesUsage) {
+          const { mappedResponsesUsage, promptTotal, outputTokens, cachedTokens: hitTokens, reasoningTokens: usageReasoning, upstreamCost } =
+            mapOpencodeGoResponsesUsage(responsesUsage);
+          promptTokens = promptTotal;
+          completionTokens = outputTokens;
+          totalTokens = promptTotal + outputTokens;
+          cachedTokens = hitTokens;
+          reasoningTokens = usageReasoning;
+          if (upstreamCost !== null) {
+            cost = upstreamCost;
+          } else {
+            const eventCost = responsesEventCost(responsesInlineCost) ?? responsesEventCost(responsesPingCost);
+            if (eventCost !== null) cost = eventCost;
+            else cost = computeOpencodeGoCost(mappedResponsesUsage, upstreamModel, { contextTokens: promptTotal + outputTokens });
+          }
+        } else {
+          const eventCost = responsesEventCost(responsesInlineCost) ?? responsesEventCost(responsesPingCost);
+          if (eventCost !== null) cost = eventCost;
+        }
+        if (Object.keys(responsesToolCalls).length > 0 && resolvedTools.length > 0) {
+          lastFinishReason = 'tool_calls';
+        }
+      }
+
       const finishReason = lastFinishReason;
 
       // Tool calls: from delta (finish_reason === 'tool_calls') or parsed from reasoning (e.g. Kimi K2)
       let toolCallsArray: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }> = [];
-      if (finishReason === 'tool_calls' && resolvedTools.length > 0) {
+      if (isGoResponses) {
+        // T5: Responses `function_call` items (streamed in
+        // response.output_item.added + argument deltas, backstopped from
+        // response.completed output) → OpenAI-shaped calls for the shared
+        // executor below; the next iteration re-maps to `function_call` /
+        // `function_call_output` items via the body builder above.
+        if (resolvedTools.length > 0) {
+          const keys = Object.keys(responsesToolCalls).sort((a, b) => Number(a) - Number(b));
+          toolCallsArray = keys.map((key) => {
+            const t = responsesToolCalls[key];
+            return {
+              id: t?.callId || `call_${nanoid()}`,
+              type: 'function' as const,
+              function: {
+                name: t?.name || '',
+                arguments: t?.args || '{}',
+              },
+            };
+          }).filter((tc) => tc.function.name);
+        }
+      } else if (isGoMessages) {
+        // T4: Anthropic `tool_use` blocks (id/name streamed in
+        // content_block_start, args in input_json_delta) → OpenAI-shaped calls
+        // for the shared executor below; the next iteration re-maps to
+        // Anthropic `tool_result` blocks via the body builder above.
+        if (finishReason === 'tool_calls' && resolvedTools.length > 0) {
+          const indices = Object.keys(anthropicToolBlocks).map(Number).sort((a, b) => a - b);
+          toolCallsArray = indices.map((idx) => {
+            const t = anthropicToolBlocks[idx];
+            return {
+              id: t?.id || `call_${nanoid()}`,
+              type: 'function' as const,
+              function: {
+                name: t?.name || '',
+                arguments: t?.inputJson || '{}',
+              },
+            };
+          }).filter((tc) => tc.function.name);
+        }
+      } else if (finishReason === 'tool_calls' && resolvedTools.length > 0) {
         const indices = Object.keys(toolCallsByIndex).map(Number).sort((a, b) => a - b);
         toolCallsArray = indices.map((idx) => {
           const t = toolCallsByIndex[idx];
