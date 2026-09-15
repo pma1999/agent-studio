@@ -136,6 +136,8 @@ interface AppState {
   setAbliterationApiKey: (key: string) => void;
   arnictApiKey: string;
   setArnictApiKey: (key: string) => void;
+  opencodeGoApiKey: string;
+  setOpencodeGoApiKey: (key: string) => void;
   loadSettings: () => Promise<void>;
 
   // OAuth PKCE callback feedback
@@ -789,6 +791,8 @@ export const useStore = create<AppState>((set, get) => ({
   setAbliterationApiKey: (key) => set({ abliterationApiKey: key }),
   arnictApiKey: '',
   setArnictApiKey: (key) => set({ arnictApiKey: key }),
+  opencodeGoApiKey: '',
+  setOpencodeGoApiKey: (key) => set({ opencodeGoApiKey: key }),
   loadSettings: async () => {
     try {
       const data = await settingsApi.getAll();
@@ -798,6 +802,7 @@ export const useStore = create<AppState>((set, get) => ({
         deepSeekApiKey: data.deepseek_api_key ?? '',
         abliterationApiKey: data.abliteration_api_key ?? '',
         arnictApiKey: data.arnict_api_key ?? '',
+        opencodeGoApiKey: data.opencode_go_api_key ?? '',
       });
     } catch (err) {
       console.error('Failed to load settings:', err);

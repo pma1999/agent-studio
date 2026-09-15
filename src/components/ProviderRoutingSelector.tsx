@@ -7,7 +7,7 @@ import { useOpenRouterEndpoints } from '../hooks/useOpenRouterEndpoints';
 import { formatContext, formatPrice, formatUptime } from '../utils/modelUtils';
 import { cheapestEndpoint } from '../utils/providerRanking';
 import { useIsMobile } from '../utils/breakpoints';
-import { isDeepSeekDirectModel, isAbliterationModel, isArnictModel } from '../utils/providers';
+import { isDeepSeekDirectModel, isAbliterationModel, isArnictModel, isOpencodeGoModel } from '../utils/providers';
 
 interface ProviderRoutingSelectorProps {
   modelId: string | null | undefined;
@@ -48,14 +48,15 @@ export function ProviderRoutingSelector({
   const isDeepSeek = isDeepSeekDirectModel(modelId);
   const isAbliteration = isAbliterationModel(modelId);
   const isArnict = isArnictModel(modelId);
+  const isOpencodeGo = isOpencodeGoModel(modelId);
   const isAutoModel = !modelId || modelId === 'openrouter/auto';
   const selectedSlug = value?.mode === 'provider' ? value.provider_slug : null;
-  const { endpoints, loading, error } = useOpenRouterEndpoints(modelId, (isOpen || !!selectedSlug) && !isDeepSeek && !isAbliteration && !isArnict);
+  const { endpoints, loading, error } = useOpenRouterEndpoints(modelId, (isOpen || !!selectedSlug) && !isDeepSeek && !isAbliteration && !isArnict && !isOpencodeGo);
 
-  // Provider routing is OpenRouter-only; clear any stale config when a DeepSeek, Abliteration, or Arnict model is selected.
+  // Provider routing is OpenRouter-only; clear any stale config when a DeepSeek, Abliteration, Arnict, or OpenCode Go model is selected.
   useEffect(() => {
-    if ((isDeepSeek || isAbliteration || isArnict) && value !== null) onChange(null);
-  }, [isDeepSeek, isAbliteration, isArnict, value, onChange]);
+    if ((isDeepSeek || isAbliteration || isArnict || isOpencodeGo) && value !== null) onChange(null);
+  }, [isDeepSeek, isAbliteration, isArnict, isOpencodeGo, value, onChange]);
 
   const selectedEndpoint = useMemo(
     () => endpoints.find((endpoint) => endpoint.tag === selectedSlug) || null,
@@ -63,7 +64,7 @@ export function ProviderRoutingSelector({
   );
 
   const cheapest = useMemo(() => cheapestEndpoint(endpoints), [endpoints]);
-  const showCheapestCta = !isDeepSeek && !isAbliteration && !isArnict && !isAutoModel && !loading && !error && endpoints.length > 0 && !!cheapest;
+  const showCheapestCta = !isDeepSeek && !isAbliteration && !isArnict && !isOpencodeGo && !isAutoModel && !loading && !error && endpoints.length > 0 && !!cheapest;
 
   const handleCheapest = () => {
     if (!cheapest) return;
@@ -164,7 +165,7 @@ export function ProviderRoutingSelector({
           : { top: 'calc(100% + 6px)' }),
       };
 
-  if (isDeepSeek || isAbliteration || isArnict) {
+  if (isDeepSeek || isAbliteration || isArnict || isOpencodeGo) {
     return (
       <div style={{ position: 'relative' }}>
         {label && (
@@ -196,7 +197,7 @@ export function ProviderRoutingSelector({
           }}
         >
           <Server size={14} style={{ opacity: 0.6, flexShrink: 0 }} />
-          <span>{isArnict ? 'Proveedor no disponible para Arnict' : isAbliteration ? 'Proveedor no disponible para Abliteration' : 'Proveedor no disponible para DeepSeek directo'}</span>
+          <span>{isOpencodeGo ? 'Proveedor no disponible para OpenCode Go' : isArnict ? 'Proveedor no disponible para Arnict' : isAbliteration ? 'Proveedor no disponible para Abliteration' : 'Proveedor no disponible para DeepSeek directo'}</span>
         </div>
       </div>
     );

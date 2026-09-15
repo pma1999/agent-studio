@@ -257,13 +257,13 @@ function seamChecks(): void {
   ok('(C4) chat healing exclusion names arnict', () => {
     assert.match(
       chatSource,
-      /provider\.id !== 'codex' && provider\.id !== 'llamacpp' && provider\.id !== 'abliteration' && provider\.id !== 'arnict';/,
+      /provider\.id !== 'codex' && provider\.id !== 'llamacpp' && provider\.id !== 'abliteration' && provider\.id !== 'arnict'( && provider\.id !== 'opencode-go')?;/,
     );
   });
   ok('(C5) chat effort-max retry exclusion names arnict', () => {
     assert.match(
       chatSource,
-      /requestedMaxEffort = reasoningEnabled && reasoningEffort === 'max' && provider\.id !== 'codex' && provider\.id !== 'llamacpp' && provider\.id !== 'abliteration' && provider\.id !== 'arnict';/,
+      /requestedMaxEffort = reasoningEnabled && reasoningEffort === 'max' && provider\.id !== 'codex' && provider\.id !== 'llamacpp' && provider\.id !== 'abliteration' && provider\.id !== 'arnict'( && provider\.id !== 'opencode-go')?;/,
     );
   });
   ok('(C6) chat stream + non-stream usage blocks compute static cost without overwriting', () => {
@@ -384,13 +384,13 @@ function seamChecks(): void {
     assert.match(selectorSource, /ARNICT_GROUP,/);
     assert.match(
       selectorSource,
-      /\[\.\.\.deepSeekModels, \.\.\.codexModels, \.\.\.abliterationModels, \.\.\.arnictModels, \.\.\.llamaCppModels, \.\.\.openRouterModels\]/,
+      /\[\.\.\.deepSeekModels, \.\.\.codexModels, \.\.\.abliterationModels, \.\.\.arnictModels, (\.\.\.opencodeGoModels, )?\.\.\.llamaCppModels, \.\.\.openRouterModels\]/,
     );
   });
   ok('(F7) routing selector excludes arnict exactly like DeepSeek/Abliteration', () => {
     assert.match(routingSource, /const isArnict = isArnictModel\(modelId\);/);
-    assert.match(routingSource, /&& !isDeepSeek && !isAbliteration && !isArnict\)/);
-    assert.match(routingSource, /if \(\(isDeepSeek \|\| isAbliteration \|\| isArnict\) && value !== null\) onChange\(null\);/);
+    assert.match(routingSource, /&& !isDeepSeek && !isAbliteration && !isArnict( && !isOpencodeGo)?\)/);
+    assert.match(routingSource, /if \(\(isDeepSeek \|\| isAbliteration \|\| isArnict( \|\| isOpencodeGo)?\) && value !== null\) onChange\(null\);/);
     assert.match(routingSource, /Proveedor no disponible para Arnict/);
   });
   ok('(F8) settings card reuses ProviderKeySection with the frozen props', () => {

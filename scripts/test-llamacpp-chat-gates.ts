@@ -98,7 +98,7 @@ function stabilityChecks(): void {
     assert.match(councilSource, /return this\.executeMemberStreamCodex\(modelId, options\);/);
   });
   ok('(S11) council reasoning-field normalization preserved', () => {
-    assert.match(councilSource, /\[assistantReasoningField\(ep\.provider\.id\)\]: fullReasoning/);
+    assert.match(councilSource, /\[(\(ep\.provider\.id === 'opencode-go' \? opencodeGoHistoryReasoningField\(ep\.upstreamModel\) : assistantReasoningField\(ep\.provider\.id\)\)|assistantReasoningField\(ep\.provider\.id\))\]: fullReasoning/);
   });
   ok('(S12) council deepseek cost fallback preserved', () => {
     assert.match(councilSource, /else if \(ep\.provider\.id === 'deepseek'\) cost = computeDeepSeekCost\(usage, ep\.upstreamModel\);/);
@@ -221,13 +221,13 @@ function seamChecks(): void {
   ok('(C7) healing exclusion names llamacpp', () => {
     assert.match(
       chatSource,
-      /useResponseHealing = !!agent\.response_healing_enabled && !!responseFormat && provider\.id !== 'codex' && provider\.id !== 'llamacpp'( && provider\.id !== 'abliteration')?( && provider\.id !== 'arnict')?;/,
+      /useResponseHealing = !!agent\.response_healing_enabled && !!responseFormat && provider\.id !== 'codex' && provider\.id !== 'llamacpp'( && provider\.id !== 'abliteration')?( && provider\.id !== 'arnict')?( && provider\.id !== 'opencode-go')?;/,
     );
   });
   ok('(C8) effort-max retry exclusion names llamacpp', () => {
     assert.match(
       chatSource,
-      /requestedMaxEffort = reasoningEnabled && reasoningEffort === 'max' && provider\.id !== 'codex' && provider\.id !== 'llamacpp'( && provider\.id !== 'abliteration')?( && provider\.id !== 'arnict')?;/,
+      /requestedMaxEffort = reasoningEnabled && reasoningEffort === 'max' && provider\.id !== 'codex' && provider\.id !== 'llamacpp'( && provider\.id !== 'abliteration')?( && provider\.id !== 'arnict')?( && provider\.id !== 'opencode-go')?;/,
     );
   });
   ok('(C9) pre-flight calls ensureLlamacppRunning under a 15 s SSE keepalive', () => {

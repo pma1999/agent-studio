@@ -15,6 +15,10 @@ import {
   ARNICT_GROUP,
   ARNICT_ACCENT,
   isArnictModel,
+  OPENCODE_GO_PREFIX,
+  OPENCODE_GO_GROUP,
+  OPENCODE_GO_ACCENT,
+  isOpencodeGoModel,
   LLAMACPP_PREFIX,
   LLAMACPP_GROUP,
   LLAMACPP_ACCENT,
@@ -36,6 +40,8 @@ export function getModelAuthor(id: string): string {
   // Arnict-direct models (`arnict:...`) group under their own label.
   // NOTE: strip the prefix before any `/` split — upstream ids have `author/slug` form.
   if (isArnictModel(id)) return ARNICT_GROUP;
+  // OpenCode Go-direct models (`opencode-go:...`) group under their own label.
+  if (isOpencodeGoModel(id)) return OPENCODE_GO_GROUP;
   // llama.cpp local models (`llamacpp:...`) group under their own label.
   if (isLlamaCppModel(id)) return LLAMACPP_GROUP;
   const slash = id.indexOf('/');
@@ -48,6 +54,7 @@ export function formatModelId(modelId: string): string {
   if (modelId.startsWith(CODEX_PREFIX)) return modelId.slice(CODEX_PREFIX.length);
   if (modelId.startsWith(ABLITERATION_PREFIX)) return modelId.slice(ABLITERATION_PREFIX.length);
   if (modelId.startsWith(ARNICT_PREFIX)) return modelId.slice(ARNICT_PREFIX.length);
+  if (modelId.startsWith(OPENCODE_GO_PREFIX)) return modelId.slice(OPENCODE_GO_PREFIX.length);
   if (modelId.startsWith(LLAMACPP_PREFIX)) return modelId.slice(LLAMACPP_PREFIX.length);
   const parts = modelId.split('/');
   if (parts.length > 1) return parts[parts.length - 1];
@@ -65,6 +72,7 @@ const AUTHOR_DISPLAY_NAMES: Record<string, string> = {
   [CODEX_DIRECT_GROUP]: 'ChatGPT · Codex',
   [ABLITERATION_GROUP]: 'Abliteration · Direct',
   [ARNICT_GROUP]: 'Arnict · Direct',
+  [OPENCODE_GO_GROUP]: 'OpenCode Go · Direct',
   [LLAMACPP_GROUP]: 'llama.cpp · Local',
   microsoft: 'Microsoft',
   amazon: 'Amazon',
@@ -89,6 +97,7 @@ const AUTHOR_COLORS: Record<string, string> = {
   [CODEX_DIRECT_GROUP]: CODEX_ACCENT,
   [ABLITERATION_GROUP]: ABLITERATION_ACCENT,
   [ARNICT_GROUP]: ARNICT_ACCENT,
+  [OPENCODE_GO_GROUP]: OPENCODE_GO_ACCENT,
   [LLAMACPP_GROUP]: LLAMACPP_ACCENT,
   microsoft: '#00a4ef',
   amazon: '#ff9900',
@@ -115,6 +124,7 @@ const PROVIDER_META: Record<string, ProviderMeta> = {
   [DEEPSEEK_DIRECT_GROUP]: { name: 'DeepSeek · Direct', color: DEEPSEEK_ACCENT, iconName: 'brain', tier: 'premium' },
   [ABLITERATION_GROUP]: { name: 'Abliteration · Direct', color: ABLITERATION_ACCENT, iconName: 'brain', tier: 'premium' },
   [ARNICT_GROUP]: { name: 'Arnict · Direct', color: ARNICT_ACCENT, iconName: 'brain', tier: 'premium' },
+  [OPENCODE_GO_GROUP]: { name: 'OpenCode Go · Direct', color: OPENCODE_GO_ACCENT, iconName: 'brain', tier: 'premium' },
   // Local models are free and their context can be unknown (0) — grouped as Economy.
   [LLAMACPP_GROUP]: { name: 'llama.cpp · Local', color: LLAMACPP_ACCENT, iconName: 'zap', tier: 'economy' },
   'meta-llama': { name: 'Meta', color: '#a78bfa', iconName: 'eye', tier: 'standard' },
@@ -168,6 +178,7 @@ export const PROVIDER_PRIORITY = [
   CODEX_DIRECT_GROUP,
   ABLITERATION_GROUP,
   ARNICT_GROUP,
+  OPENCODE_GO_GROUP,
   LLAMACPP_GROUP,
   'openai',
   'anthropic',

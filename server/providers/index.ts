@@ -11,6 +11,7 @@
  *   - OpenRouter models keep their native ids: `anthropic/claude-3.5-sonnet`, `openrouter/auto`.
  *   - DeepSeek-direct models use the `deepseek:` prefix: `deepseek:deepseek-v4-flash`.
  *   - Abliteration-direct models use the `abliteration:` prefix: `abliteration:abliterated-model`.
+ *   - OpenCode Go models use the `opencode-go:` prefix: `opencode-go:kimi-k3`.
  *   - ChatGPT (Codex app-server) models use the `codex:` prefix: `codex:gpt-5.1-codex`.
  *   - llama.cpp (local llama-server, spawned via the paired local agent) models use
  *     the `llamacpp:` prefix: `llamacpp:Qwen3.6-35B-A3B-UD-Q4_K_M`.
@@ -23,7 +24,7 @@
  * OpenRouter's own `deepseek/...` slugs.
  */
 
-export type ProviderId = 'openrouter' | 'deepseek' | 'codex' | 'lmstudio' | 'llamacpp' | 'abliteration' | 'arnict';
+export type ProviderId = 'openrouter' | 'deepseek' | 'codex' | 'lmstudio' | 'llamacpp' | 'abliteration' | 'arnict' | 'opencode-go';
 
 export const DEEPSEEK_PREFIX = 'deepseek:';
 export const DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
@@ -34,6 +35,12 @@ export const ARNICT_BASE_URL = 'https://api.arnict.com';
 export const CODEX_PREFIX = 'codex:';
 export const LMSTUDIO_PREFIX = 'lmstudio:';
 export const LLAMACPP_PREFIX = 'llamacpp:';
+export const OPENCODE_GO_PREFIX = 'opencode-go:';
+export const OPENCODE_GO_BASE_URL = 'https://opencode.ai/zen/go/v1';
+export const OPENCODE_GO_CHAT_COMPLETIONS_URL = `${OPENCODE_GO_BASE_URL}/chat/completions`;
+export const OPENCODE_GO_USER_AGENT = 'agent-studio/1.0';
+export const OPENCODE_GO_DOCS_URL = 'https://opencode.ai/docs/go/';
+export const OPENCODE_GO_VALIDATE_MODEL = 'kimi-k3';
 
 export interface ProviderConfig {
   id: ProviderId;
@@ -126,6 +133,30 @@ const ARNICT_CONFIG: ProviderConfig = {
 };
 
 /**
+ * OpenCode Go (Direct). OpenAI-compatible `POST /chat/completions` gateway
+ * rooted at `OPENCODE_GO_BASE_URL` with `Authorization: Bearer <key>` plus a
+ * `User-Agent` operational header (GC §1). Phase 1 serves ONLY the
+ * chat-completions transport: ids in `OPENCODE_GO_NON_CHAT_TRANSPORT` must
+ * hard-fail before any network call (T3/T4), never misroute. Flags F,F,F,F
+ * (plan D3: smallest blast radius until a paid-key probe says otherwise).
+ */
+const OPENCODE_GO_CONFIG: ProviderConfig = {
+  id: 'opencode-go',
+  label: 'OpenCode Go',
+  chatCompletionsUrl: OPENCODE_GO_CHAT_COMPLETIONS_URL,
+  apiKeySetting: 'opencode_go_api_key',
+  buildHeaders: (apiKey) => ({
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${apiKey}`,
+    'User-Agent': OPENCODE_GO_USER_AGENT,
+  }),
+  supportsProviderRouting: false,
+  supportsPlugins: false,
+  supportsReasoningParam: false,
+  supportsJsonSchema: false,
+};
+
+/**
  * ChatGPT (Codex app-server). There is no chat-completions URL or API key: the
  * backend bridges to a per-user `codex app-server` process over JSON-RPC/stdio
  * and usage is billed to the user's ChatGPT plan. apiKeySetting is left empty
@@ -190,6 +221,7 @@ const CONFIGS: Record<ProviderId, ProviderConfig> = {
   llamacpp: LLAMACPP_CONFIG,
   abliteration: ABLITERATION_CONFIG,
   arnict: ARNICT_CONFIG,
+  'opencode-go': OPENCODE_GO_CONFIG,
 };
 
 /** Returns the provider that should serve a given namespaced model id. */
@@ -202,6 +234,7 @@ export function resolveProviderId(modelId: string | null | undefined): ProviderI
   // NEVER to openrouter.
   if (typeof modelId === 'string' && modelId.startsWith(LMSTUDIO_PREFIX)) return 'lmstudio';
   if (typeof modelId === 'string' && modelId.startsWith(LLAMACPP_PREFIX)) return 'llamacpp';
+  if (typeof modelId === 'string' && modelId.startsWith(OPENCODE_GO_PREFIX)) return 'opencode-go';
   return 'openrouter';
 }
 
@@ -213,6 +246,7 @@ export function toUpstreamModelId(modelId: string): string {
   if (modelId.startsWith(CODEX_PREFIX)) return modelId.slice(CODEX_PREFIX.length);
   if (modelId.startsWith(LMSTUDIO_PREFIX)) return modelId.slice(LMSTUDIO_PREFIX.length);
   if (modelId.startsWith(LLAMACPP_PREFIX)) return modelId.slice(LLAMACPP_PREFIX.length);
+  if (modelId.startsWith(OPENCODE_GO_PREFIX)) return modelId.slice(OPENCODE_GO_PREFIX.length);
   return modelId;
 }
 
@@ -243,6 +277,11 @@ export function isAbliterationModel(modelId: string | null | undefined): boolean
 /** True when the model id targets the Arnict-direct provider. */
 export function isArnictModel(modelId: string | null | undefined): boolean {
   return resolveProviderId(modelId) === 'arnict';
+}
+
+/** True when the model id targets the OpenCode Go provider. */
+export function isOpencodeGoModel(modelId: string | null | undefined): boolean {
+  return resolveProviderId(modelId) === 'opencode-go';
 }
 
 /** Exact shared guard message for text-only Abliteration large models (GC §5). */
@@ -288,7 +327,7 @@ export function persistedModelId(
   effectiveModel: string,
   actualModelFromResponse: string | null,
 ): string {
-  if (providerId === 'deepseek' || providerId === 'lmstudio' || providerId === 'llamacpp' || providerId === 'abliteration' || providerId === 'arnict') return effectiveModel;
+  if (providerId === 'deepseek' || providerId === 'lmstudio' || providerId === 'llamacpp' || providerId === 'abliteration' || providerId === 'arnict' || providerId === 'opencode-go') return effectiveModel;
   return actualModelFromResponse ?? effectiveModel;
 }
 
@@ -634,4 +673,325 @@ export function computeArnictCost(
 export function arnictCachedTokens(usage: ArnictUsage | null | undefined): number {
   if (!usage) return 0;
   return usage.prompt_tokens_details?.cached_tokens ?? 0;
+}
+
+// ---------------------------------------------------------------------------
+// OpenCode Go catalog / transports / cost / replay (GC §§1,3,5,6,7, phase-1)
+// Transport table: https://opencode.ai/docs/go/ (fetched 2026-09-15,
+// "Last updated: Sep 14, 2026"; docs win over api.json on Qwen rows, Gotcha 2).
+// Context windows: https://models.opencode.ai/api.json key `opencode-go`
+// (fetched 2026-09-15, 36 models) `limit.context` per model.
+// Pricing: docs "Usage limits" price table ($ per 1M tokens, same fetch);
+// per-token decimals = $/1M / 1M. DeepSeek peak/off-peak rows are booked at
+// the off-peak (base) rate (R3/D10: windows are dollar-based, usage carries
+// no `cost`). Static catalog: only chat-transport ids with a sourced price
+// (fail-closed catalog, GC §3); unknown `opencode-go:` ids fail OPEN on send
+// with the §7 mismatch mapping (T3).
+// ---------------------------------------------------------------------------
+
+export type OpenCodeGoTransport = 'chat' | 'messages' | 'responses';
+
+/**
+ * Bare chat-transport ids (fase-1 allowlist): docs endpoint-table rows on
+ * `POST /chat/completions` ∩ api.json — `kimi-k3` is chat, so
+ * `OPENCODE_GO_VALIDATE_MODEL` stays `'kimi-k3'`.
+ */
+export const OPENCODE_GO_CHAT_TRANSPORT_MODELS: ReadonlySet<string> = new Set([
+  'glm-5.3-flash',
+  'glm-5.3',
+  'glm-5.2',
+  'glm-5.1',
+  'kimi-k3',
+  'kimi-k2.7-code',
+  'kimi-k2.6',
+  'longcat-2.0',
+  'deepseek-v4.1-flash',
+  'deepseek-v4-pro',
+  'deepseek-v4-flash',
+  'deepseek-v4-flash-vision-exp',
+  'mimo-v2.5',
+  'mimo-v2.5-pro',
+  'hy4-preview',
+  'hy3',
+]);
+
+/**
+ * Bare ids served over a phase-2 transport (docs table rows + api.json
+ * `provider.npm` overrides: `@ai-sdk/anthropic` → 'messages',
+ * `@ai-sdk/openai` → 'responses'; docs win on Qwen rows). `grok-4.5` comes
+ * solely from the api.json `@ai-sdk/openai` override (no docs row).
+ */
+export const OPENCODE_GO_NON_CHAT_TRANSPORT: ReadonlyMap<string, 'messages' | 'responses'> = new Map([
+  ['minimax-m3', 'messages'],
+  ['minimax-m2.7', 'messages'],
+  ['minimax-m2.5', 'messages'],
+  ['qwen3.8-max', 'messages'],
+  ['qwen3.8-flash', 'messages'],
+  ['qwen3.7-max', 'messages'],
+  ['qwen3.7-plus', 'messages'],
+  ['qwen3.6-plus', 'messages'],
+  ['grok-4.6', 'responses'],
+  ['gpt-5.6-luna', 'responses'],
+  ['muse-spark-1.3-contributor', 'responses'],
+  ['muse-spark-1.2-contributor', 'responses'],
+  ['grok-4.5', 'responses'],
+]);
+
+/**
+ * Transport for a Go model id (accepts the bare upstream id or the
+ * namespaced `opencode-go:` form). `'unknown'` = fail-open on send with the
+ * §7 mismatch mapping, never a silent misroute.
+ */
+export function opencodeGoTransportFor(upstreamModel: string): OpenCodeGoTransport | 'unknown' {
+  const bare = upstreamModel.startsWith(OPENCODE_GO_PREFIX)
+    ? upstreamModel.slice(OPENCODE_GO_PREFIX.length)
+    : upstreamModel;
+  const nonChat = OPENCODE_GO_NON_CHAT_TRANSPORT.get(bare);
+  if (nonChat) return nonChat;
+  if (OPENCODE_GO_CHAT_TRANSPORT_MODELS.has(bare)) return 'chat';
+  return 'unknown';
+}
+
+/** Phase-2 hard-fail message for a known non-chat-transport model (GC §7, frozen literal). */
+export function opencodeGoWrongTransportMessage(upstream: string, t: 'messages' | 'responses'): string {
+  return `Model ${upstream} is served by OpenCode Go over POST ${t === 'messages' ? '/messages (Anthropic shape)' : '/responses (Responses API)'}, which is phase-2 and not supported yet. Use a chat-transport model such as opencode-go:kimi-k3.`;
+}
+
+/** Fail-open mismatch message when chat-completions rejects an unknown id (GC §7, frozen literal). */
+export function opencodeGoFormatMismatchMessage(upstream: string, detail: string): string {
+  return `OpenCode Go rejected model ${upstream} on the chat-completions transport (${detail}). It likely needs a phase-2 transport; use a chat-transport model such as opencode-go:kimi-k3.`;
+}
+
+export interface OpencodeGoCatalogModel {
+  id: string; // namespaced, e.g. 'opencode-go:kimi-k3'
+  name: string;
+  description: string;
+  context_length: number;
+  pricing: { prompt: string; completion: string };
+}
+
+export const OPENCODE_GO_CATALOG: OpencodeGoCatalogModel[] = [
+  {
+    id: `${OPENCODE_GO_PREFIX}glm-5.3-flash`,
+    name: 'GLM-5.3-Flash',
+    description:
+      'Fast low-cost GLM. 1M context, tool calls.',
+    context_length: 1000000,
+    pricing: { prompt: '0.00000015', completion: '0.0000005' }, // $0.15 / $0.50 per 1M
+  },
+  {
+    id: `${OPENCODE_GO_PREFIX}glm-5.3`,
+    name: 'GLM-5.3',
+    description:
+      'Flagship GLM. 1M context, tool calls.',
+    context_length: 1000000,
+    pricing: { prompt: '0.0000014', completion: '0.0000044' }, // $1.40 / $4.40 per 1M
+  },
+  {
+    id: `${OPENCODE_GO_PREFIX}glm-5.2`,
+    name: 'GLM-5.2',
+    description:
+      'GLM generation. 1M context, tool calls.',
+    context_length: 1000000,
+    pricing: { prompt: '0.0000014', completion: '0.0000044' }, // $1.40 / $4.40 per 1M
+  },
+  {
+    id: `${OPENCODE_GO_PREFIX}glm-5.1`,
+    name: 'GLM-5.1',
+    description:
+      'GLM generation. 202K context, tool calls.',
+    context_length: 202752,
+    pricing: { prompt: '0.0000014', completion: '0.0000044' }, // $1.40 / $4.40 per 1M
+  },
+  {
+    id: `${OPENCODE_GO_PREFIX}kimi-k3`,
+    name: 'Kimi K3',
+    description:
+      'Flagship Kimi. 1M context, tool calls.',
+    context_length: 1048576,
+    pricing: { prompt: '0.000003', completion: '0.000015' }, // $3.00 / $15.00 per 1M
+  },
+  {
+    id: `${OPENCODE_GO_PREFIX}kimi-k2.7-code`,
+    name: 'Kimi K2.7 Code',
+    description:
+      'Kimi coding model. 256K context, tool calls.',
+    context_length: 262144,
+    pricing: { prompt: '0.00000095', completion: '0.000004' }, // $0.95 / $4.00 per 1M
+  },
+  {
+    id: `${OPENCODE_GO_PREFIX}kimi-k2.6`,
+    name: 'Kimi K2.6',
+    description:
+      'Kimi generation. 256K context, tool calls.',
+    context_length: 262144,
+    pricing: { prompt: '0.00000095', completion: '0.000004' }, // $0.95 / $4.00 per 1M
+  },
+  {
+    id: `${OPENCODE_GO_PREFIX}longcat-2.0`,
+    name: 'LongCat-2.0',
+    description:
+      'Long-context model. 1M context, tool calls.',
+    context_length: 1000000,
+    pricing: { prompt: '0.0000003', completion: '0.0000012' }, // $0.30 / $1.20 per 1M
+  },
+  {
+    id: `${OPENCODE_GO_PREFIX}deepseek-v4.1-flash`,
+    name: 'DeepSeek V4.1 Flash',
+    description:
+      'Fast DeepSeek V4. 1M context, tool calls. Peak/off-peak billed at base rate.',
+    context_length: 1000000,
+    pricing: { prompt: '0.00000015', completion: '0.0000006' }, // $0.15 / $0.60 per 1M off-peak (base)
+  },
+  {
+    id: `${OPENCODE_GO_PREFIX}deepseek-v4-pro`,
+    name: 'DeepSeek V4 Pro',
+    description:
+      'Highest-quality DeepSeek V4. 1M context, tool calls. Peak/off-peak billed at base rate.',
+    context_length: 1000000,
+    pricing: { prompt: '0.00000066', completion: '0.00000198' }, // $0.66 / $1.98 per 1M off-peak (base)
+  },
+  {
+    id: `${OPENCODE_GO_PREFIX}deepseek-v4-flash`,
+    name: 'DeepSeek V4 Flash',
+    description:
+      'Fast, low-cost DeepSeek V4. 1M context, tool calls. Peak/off-peak billed at base rate.',
+    context_length: 1000000,
+    pricing: { prompt: '0.00000015', completion: '0.0000006' }, // $0.15 / $0.60 per 1M off-peak (base)
+  },
+  {
+    id: `${OPENCODE_GO_PREFIX}deepseek-v4-flash-vision-exp`,
+    name: 'DeepSeek V4 Flash Vision Exp',
+    description:
+      'DeepSeek V4 Flash with vision. 1M context, tool calls. Peak/off-peak billed at base rate.',
+    context_length: 1000000,
+    pricing: { prompt: '0.00000015', completion: '0.0000006' }, // $0.15 / $0.60 per 1M off-peak (base)
+  },
+  {
+    id: `${OPENCODE_GO_PREFIX}mimo-v2.5`,
+    name: 'MiMo-V2.5',
+    description:
+      'MiMo generation. 1M context, tool calls.',
+    context_length: 1000000,
+    pricing: { prompt: '0.00000014', completion: '0.00000028' }, // $0.14 / $0.28 per 1M
+  },
+  {
+    id: `${OPENCODE_GO_PREFIX}mimo-v2.5-pro`,
+    name: 'MiMo-V2.5-Pro',
+    description:
+      'MiMo pro generation. 1M context, tool calls.',
+    context_length: 1048576,
+    pricing: { prompt: '0.000000435', completion: '0.00000087' }, // $0.435 / $0.87 per 1M
+  },
+  {
+    id: `${OPENCODE_GO_PREFIX}hy4-preview`,
+    name: 'Hy4 preview',
+    description:
+      'Hy preview model. 1M context, tool calls.',
+    context_length: 1024000,
+    pricing: { prompt: '0.000000834', completion: '0.000002501' }, // $0.834 / $2.501 per 1M
+  },
+  {
+    id: `${OPENCODE_GO_PREFIX}hy3`,
+    name: 'Hy3',
+    description:
+      'Hy generation. 256K context, tool calls.',
+    context_length: 256000,
+    pricing: { prompt: '0.00000014', completion: '0.00000058' }, // $0.14 / $0.58 per 1M
+  },
+];
+
+/** Per-1M-token pricing used to compute cost (Go usage frames carry no `cost` field). */
+interface OpencodeGoPrice {
+  inHit: number; // input, cache hit (docs "Cached Read" $/1M)
+  inMiss: number; // input, cache miss (docs "Input" $/1M, base rate)
+  out: number; // output (docs "Output" $/1M, base rate)
+}
+
+const OPENCODE_GO_PRICING: Record<string, OpencodeGoPrice> = {
+  'glm-5.3-flash': { inHit: 0.03, inMiss: 0.15, out: 0.5 },
+  'glm-5.3': { inHit: 0.26, inMiss: 1.4, out: 4.4 },
+  'glm-5.2': { inHit: 0.26, inMiss: 1.4, out: 4.4 },
+  'glm-5.1': { inHit: 0.26, inMiss: 1.4, out: 4.4 },
+  'kimi-k3': { inHit: 0.3, inMiss: 3.0, out: 15.0 },
+  'kimi-k2.7-code': { inHit: 0.19, inMiss: 0.95, out: 4.0 },
+  'kimi-k2.6': { inHit: 0.16, inMiss: 0.95, out: 4.0 },
+  'longcat-2.0': { inHit: 0.006, inMiss: 0.3, out: 1.2 },
+  'deepseek-v4.1-flash': { inHit: 0.003, inMiss: 0.15, out: 0.6 },
+  'deepseek-v4-pro': { inHit: 0.022, inMiss: 0.66, out: 1.98 },
+  'deepseek-v4-flash': { inHit: 0.003, inMiss: 0.15, out: 0.6 },
+  'deepseek-v4-flash-vision-exp': { inHit: 0.003, inMiss: 0.15, out: 0.6 },
+  'mimo-v2.5': { inHit: 0.0028, inMiss: 0.14, out: 0.28 },
+  'mimo-v2.5-pro': { inHit: 0.003625, inMiss: 0.435, out: 0.87 },
+  'hy4-preview': { inHit: 0.042, inMiss: 0.834, out: 2.501 },
+  'hy3': { inHit: 0.035, inMiss: 0.14, out: 0.58 },
+};
+
+export interface OpencodeGoUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  prompt_cache_hit_tokens?: number;
+  prompt_cache_miss_tokens?: number;
+  prompt_tokens_details?: { cached_tokens?: number };
+}
+
+/**
+ * Best-effort cost (USD) for an OpenCode Go response, using the static price
+ * table and the cache hit/miss token split. Returns 0 for unknown models or
+ * absent usage. Callers only use it when `usage.cost === undefined` — the
+ * upstream value, if ever present, is never overwritten.
+ */
+export function computeOpencodeGoCost(
+  usage: OpencodeGoUsage | null | undefined,
+  upstreamModel: string,
+): number {
+  const price = OPENCODE_GO_PRICING[upstreamModel];
+  if (!price || !usage) return 0;
+  const hit = usage.prompt_cache_hit_tokens ?? usage.prompt_tokens_details?.cached_tokens ?? 0;
+  const miss = usage.prompt_cache_miss_tokens ?? Math.max((usage.prompt_tokens ?? 0) - hit, 0);
+  const out = usage.completion_tokens ?? 0;
+  return (hit * price.inHit + miss * price.inMiss + out * price.out) / 1_000_000;
+}
+
+/** Cache-hit tokens from a Go usage object (for the app's cached_tokens metric). */
+export function opencodeGoCachedTokens(usage: OpencodeGoUsage | null | undefined): number {
+  if (!usage) return 0;
+  return usage.prompt_cache_hit_tokens ?? usage.prompt_tokens_details?.cached_tokens ?? 0;
+}
+
+/**
+ * Bare ids whose trace replays as `reasoning_content` (api.json `opencode-go`
+ * `interleaved.field: reasoning_content`, fetched 2026-09-15; plan D5). Every
+ * other Go model replays as `reasoning`. Phase-1 sends no reasoning field;
+ * this only names the history-replay field (T3/T4).
+ */
+export const OPENCODE_GO_REASONING_CONTENT_MODELS: ReadonlySet<string> = new Set([
+  'longcat-2.0',
+  'deepseek-v4-flash-vision-exp',
+  'kimi-k2.6',
+  'glm-5.2',
+  'deepseek-v4-flash',
+  'kimi-k2.7-code',
+  'ox-alpha-free',
+  'deepseek-v4.1-flash',
+  'omen-alpha',
+  'kimi-k3',
+  'glm-5.3-flash',
+  'mimo-v2-pro',
+  'glm-5',
+  'mimo-v2-omni',
+  'kimi-k2.5',
+  'glm-5.1',
+  'deepseek-v4-pro',
+  'glm-5.3',
+  'mimo-v2.5',
+  'mimo-v2.5-pro',
+]);
+
+/** History-replay reasoning field for a Go model (accepts bare or namespaced id). */
+export function opencodeGoHistoryReasoningField(upstreamModel: string): 'reasoning' | 'reasoning_content' {
+  const bare = upstreamModel.startsWith(OPENCODE_GO_PREFIX)
+    ? upstreamModel.slice(OPENCODE_GO_PREFIX.length)
+    : upstreamModel;
+  return OPENCODE_GO_REASONING_CONTENT_MODELS.has(bare) ? 'reasoning_content' : 'reasoning';
 }

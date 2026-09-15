@@ -921,6 +921,7 @@ export const modelsApi = {
   codex: () => request<{ data: OpenRouterModel[] }>('/models/codex'),
   abliteration: () => request<{ data: OpenRouterModel[] }>('/models/abliteration'),
   arnict: () => request<{ data: OpenRouterModel[] }>('/models/arnict'),
+  opencodego: () => request<{ data: OpenRouterModel[] }>('/models/opencodego'),
   llamacpp: () => request<{ data: LlamaCppModel[] }>('/models/llamacpp'),
   /** NEVER-THROWS §5 status payload. */
   llamacppStatus: () => request<LlamaCppStatus>('/models/llamacpp/status'),
@@ -997,6 +998,18 @@ export interface ArnictValidateResult {
 
 export const arnictApi = {
   validate: () => request<ArnictValidateResult>('/models/arnict/validate'),
+};
+
+// OpenCode Go (direct provider)
+export interface OpencodeGoValidateResult {
+  ok: boolean;
+  model?: string;
+  ids?: string[];
+  error?: string;
+}
+
+export const opencodeGoApi = {
+  validate: () => request<OpencodeGoValidateResult>('/models/opencodego/validate'),
 };
 
 // llama.cpp (local provider via the paired local agent) — response types

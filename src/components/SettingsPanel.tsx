@@ -2,9 +2,9 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { CheckCircle, AlertCircle, ExternalLink, Zap, Coins, BarChart3, Loader2, Globe, KeyRound, Database, MessageSquare, Brain, Check, ChevronDown, Sparkles, Lightbulb, SlidersHorizontal, Wrench, Plug, Layers, Link, Box, LogOut, Copy, RefreshCw } from 'lucide-react';
 import { useStore } from '../stores/store';
-import { settingsApi, toolsApi, mcpServersApi, skillsApi, deepseekApi, abliterationApi, arnictApi } from '../api/client';
+import { settingsApi, toolsApi, mcpServersApi, skillsApi, deepseekApi, abliterationApi, arnictApi, opencodeGoApi } from '../api/client';
 import type { ProviderRoutingConfig, ReasoningEffort, Tool, McpServer, Skill } from '../types';
-import { DEEPSEEK_ACCENT, CODEX_ACCENT, LLAMACPP_ACCENT, ABLITERATION_ACCENT, ARNICT_ACCENT } from '../utils/providers';
+import { DEEPSEEK_ACCENT, CODEX_ACCENT, LLAMACPP_ACCENT, ABLITERATION_ACCENT, ARNICT_ACCENT, OPENCODE_GO_ACCENT } from '../utils/providers';
 import { chatgptApi, type ChatgptStatus } from '../api/client';
 import { CHATGPT_STATUS_CHANGED_EVENT } from '../hooks/useCodexModels';
 import { LlamaCppSection } from './LlamaCppSection';
@@ -394,6 +394,45 @@ function ArnictSection() {
       helpText="Use Arnict models directly with your own Arnict API key (arn_live-...) — billed by Arnict. Create one at"
       helpUrl="https://arnict.com/"
       helpLabel="Arnict"
+      onTest={handleTest}
+    />
+  );
+}
+
+/** OpenCode Go direct-provider API key section. Reuses ProviderKeySection with live key validation. */
+function OpenCodeGoSection() {
+  const { opencodeGoApiKey, setOpencodeGoApiKey } = useStore();
+  const [localKey, setLocalKey] = useState('');
+
+  const hasSavedKey = !!opencodeGoApiKey;
+
+  const handleTest = async (): Promise<{ ok: boolean; message: string }> => {
+    try {
+      const result = await opencodeGoApi.validate();
+      if (result.ok) {
+        return { ok: true, message: `OpenCode Go key is valid (probe model: ${result.model ?? 'kimi-k3'}).` };
+      }
+      return { ok: false, message: result.error || 'Invalid OpenCode Go API key' };
+    } catch (err) {
+      if (err instanceof TypeError) return { ok: false, message: 'Could not reach OpenCode Go' };
+      return { ok: false, message: err instanceof Error ? err.message : 'Could not reach OpenCode Go' };
+    }
+  };
+
+  return (
+    <ProviderKeySection
+      providerName="OpenCode Go"
+      providerIcon={<Sparkles size={15} />}
+      accentColor={OPENCODE_GO_ACCENT}
+      settingKey="opencode_go_api_key"
+      localKey={localKey}
+      setLocalKey={setLocalKey}
+      savedKey={opencodeGoApiKey}
+      setSavedKey={setOpencodeGoApiKey}
+      placeholder={hasSavedKey ? `Saved: ${opencodeGoApiKey} — enter a new key to replace` : 'Paste your OpenCode Go API key'}
+      helpText="Requires an OpenCode Go subscription — a Zen key without Go will not work. Test Connection spends a ~1-token probe. Phase 1 supports chat-transport models only. See"
+      helpUrl="https://opencode.ai/docs/go/"
+      helpLabel="OpenCode Go docs"
       onTest={handleTest}
     />
   );
@@ -2087,6 +2126,12 @@ export function SettingsPanel() {
 
         {/* Arnict (Direct) */}
         <ArnictSection />
+
+        {/* Divider */}
+        <div style={{ height: '1px', background: 'var(--border)' }} />
+
+        {/* OpenCode Go (Direct) */}
+        <OpenCodeGoSection />
 
         {/* Divider */}
         <div style={{ height: '1px', background: 'var(--border)' }} />

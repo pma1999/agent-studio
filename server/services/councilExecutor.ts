@@ -26,8 +26,13 @@ import {
   computeAbliterationCost,
   computeArnictCost,
   computeDeepSeekCost,
+  computeOpencodeGoCost,
   isAbliterationLargeModel,
   ABLITERATION_LARGE_TEXT_ONLY_MESSAGE,
+  opencodeGoFormatMismatchMessage,
+  opencodeGoHistoryReasoningField,
+  opencodeGoTransportFor,
+  opencodeGoWrongTransportMessage,
   resolveProviderId,
   type ProviderConfig,
   type ProviderId,
@@ -416,6 +421,10 @@ export class CouncilExecutor {
 
     const ep = this.resolveEndpoint(modelId);
     const headers = ep.headers;
+    if (ep.provider.id === 'opencode-go') {
+      // D9: upstream flags clients without a session as problematic (GC §1).
+      ep.headers['x-opencode-session'] = options.conversationId ?? options.userId ?? 'unknown';
+    }
 
     // Build messages
     const messages: Array<{ role: string; content?: string | unknown[] | null; tool_call_id?: string; tool_calls?: unknown[] }> = [
@@ -479,6 +488,18 @@ export class CouncilExecutor {
       const reasoning = this.resolveCouncilReasoning(options.conversationId, options.userId);
       requestBody.reasoning = buildArnictReasoning(reasoning.enabled, reasoning.effort);
     }
+    if (ep.provider.id === 'opencode-go') {
+      // Phase-1 is chat-completions only: known phase-2 transports fail named
+      // BEFORE any network call (GC §7); 'unknown' ids fail open below (GC §3).
+      const goTransport = opencodeGoTransportFor(ep.upstreamModel);
+      if (goTransport === 'messages' || goTransport === 'responses') {
+        console.log(`[council] opencode-go wrong transport: model=${ep.upstreamModel} transport=${goTransport}`);
+        throw new Error(opencodeGoWrongTransportMessage(ep.upstreamModel, goTransport));
+      }
+      // Usage frame for static cost accounting (GC §6). No reasoning arm in
+      // fase-1: the toggle is ignored, never sent (GC §4/§5, D4).
+      requestBody.stream_options = { include_usage: true };
+    }
     // §10 (+ Increment 2d): council members share the chat sampling resolver —
     // the fixed temp 0.7 above is superseded for llamacpp arms by resolution
     // v3 (global row ⊕ per-model sampling for THIS upstream key; single
@@ -541,6 +562,10 @@ export class CouncilExecutor {
 
       if (!response.ok) {
         const errorText = await response.text();
+        if (ep.provider.id === 'opencode-go' && /not supported for format|oa-compat/i.test(errorText)) {
+          console.log(`[council] opencode-go format mismatch: model=${ep.upstreamModel}`);
+          throw new Error(opencodeGoFormatMismatchMessage(ep.upstreamModel, errorText.slice(0, 200)));
+        }
         throw new Error(`API error (${response.status}): ${errorText}`);
       }
 
@@ -614,6 +639,7 @@ export class CouncilExecutor {
                 else if (ep.provider.id === 'deepseek') cost = computeDeepSeekCost(usage, ep.upstreamModel);
                 else if (ep.provider.id === 'abliteration') cost = computeAbliterationCost(usage, ep.upstreamModel);
                 else if (ep.provider.id === 'arnict') cost = computeArnictCost(usage, ep.upstreamModel);
+                else if (ep.provider.id === 'opencode-go') cost = computeOpencodeGoCost(usage, ep.upstreamModel);
                 if (usage.completion_tokens_details?.reasoning_tokens) {
                   reasoningTokens = usage.completion_tokens_details.reasoning_tokens;
                 }
@@ -656,7 +682,9 @@ export class CouncilExecutor {
           content: fullContent || null,
           tool_calls: toolCallsArray,
           // DeepSeek thinking mode requires reasoning_content back on tool-call turns (else HTTP 400).
-          ...(fullReasoning.trim() ? { [assistantReasoningField(ep.provider.id)]: fullReasoning } : {}),
+          // OpenCode Go replays per-model (D5): kimi-k3/deepseek-* need
+          // `reasoning_content`, the rest use `reasoning`.
+          ...(fullReasoning.trim() ? { [(ep.provider.id === 'opencode-go' ? opencodeGoHistoryReasoningField(ep.upstreamModel) : assistantReasoningField(ep.provider.id))]: fullReasoning } : {}),
         });
 
         // Execute tools
@@ -791,6 +819,10 @@ export class CouncilExecutor {
 
     const ep = this.resolveEndpoint(synthesizerModel);
     const headers = ep.headers;
+    if (ep.provider.id === 'opencode-go') {
+      // D9: upstream flags clients without a session as problematic (GC §1).
+      ep.headers['x-opencode-session'] = options.conversationId ?? options.userId ?? 'unknown';
+    }
 
     const providerRouting: ProviderRoutingConfig = ep.provider.supportsProviderRouting
       ? resolveProviderRouting(parseProviderRoutingConfig(options.synthesizerProviderRouting))
@@ -841,6 +873,17 @@ export class CouncilExecutor {
       const reasoning = this.resolveCouncilReasoning(options.conversationId, options.userId);
       requestBody.reasoning = buildArnictReasoning(reasoning.enabled, reasoning.effort);
     }
+    if (ep.provider.id === 'opencode-go') {
+      // Same relay contract as member bodies: phase-2 transports fail named
+      // BEFORE any network call (GC §7); usage frame for static cost (GC §6).
+      // No reasoning arm in fase-1: the toggle is ignored, never sent (GC §4/§5, D4).
+      const goTransport = opencodeGoTransportFor(ep.upstreamModel);
+      if (goTransport === 'messages' || goTransport === 'responses') {
+        console.log(`[council] opencode-go wrong transport: model=${ep.upstreamModel} transport=${goTransport}`);
+        throw new Error(opencodeGoWrongTransportMessage(ep.upstreamModel, goTransport));
+      }
+      requestBody.stream_options = { include_usage: true };
+    }
 
     // Notify synthesis start
     console.log(`\n🧠 SYNTHESIS STARTED`);
@@ -863,6 +906,10 @@ export class CouncilExecutor {
     if (!response.ok) {
       const errorText = await response.text();
       console.log(`   ❌ Synthesis API Error: ${response.status} - ${errorText.slice(0, 100)}`);
+      if (ep.provider.id === 'opencode-go' && /not supported for format|oa-compat/i.test(errorText)) {
+        console.log(`[council] opencode-go format mismatch: model=${ep.upstreamModel}`);
+        throw new Error(opencodeGoFormatMismatchMessage(ep.upstreamModel, errorText.slice(0, 200)));
+      }
       throw new Error(`Synthesis API error (${response.status}): ${errorText}`);
     }
 
@@ -926,6 +973,7 @@ export class CouncilExecutor {
                 else if (ep.provider.id === 'deepseek') cost = computeDeepSeekCost(usage, ep.upstreamModel);
                 else if (ep.provider.id === 'abliteration') cost = computeAbliterationCost(usage, ep.upstreamModel);
                 else if (ep.provider.id === 'arnict') cost = computeArnictCost(usage, ep.upstreamModel);
+                else if (ep.provider.id === 'opencode-go') cost = computeOpencodeGoCost(usage, ep.upstreamModel);
               }
             } catch {
               // Skip malformed
@@ -1034,6 +1082,11 @@ export class CouncilExecutor {
       return raw;
     }
     const ep = this.resolveEndpoint(synthesizerModel);
+    if (ep.provider.id === 'opencode-go') {
+      // D9 session header (GC §1). Only reachable when another provider
+      // compares: a Go synthesizer skips comparison via supportsJsonSchema:false.
+      ep.headers['x-opencode-session'] = userId ?? 'unknown';
+    }
     const providerPreference = ep.provider.supportsProviderRouting
       ? buildOpenRouterProviderPreference(providerRouting)
       : undefined;

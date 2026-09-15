@@ -36,11 +36,17 @@ import {
   computeAbliterationCost,
   computeArnictCost,
   computeDeepSeekCost,
+  computeOpencodeGoCost,
   deepSeekCachedTokens,
   isAbliterationLargeModel,
   ABLITERATION_LARGE_TEXT_ONLY_MESSAGE,
   isCodexModel,
   isLlamacppModel,
+  opencodeGoCachedTokens,
+  opencodeGoFormatMismatchMessage,
+  opencodeGoHistoryReasoningField,
+  opencodeGoTransportFor,
+  opencodeGoWrongTransportMessage,
   persistedModelId,
 } from '../providers/index.js';
 import {
@@ -534,6 +540,17 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       return;
     }
 
+    if (provider.id === 'opencode-go') {
+      // Phase-2 transports fail named BEFORE any key lookup or network call
+      // (GC §7). 'unknown' ids fail open to chat-completions below.
+      const goTransport = opencodeGoTransportFor(upstreamModel);
+      if (goTransport === 'messages' || goTransport === 'responses') {
+        console.log(`[chat] opencode-go wrong transport: model=${upstreamModel} transport=${goTransport}`);
+        res.status(400).json({ error: opencodeGoWrongTransportMessage(upstreamModel, goTransport) });
+        return;
+      }
+    }
+
     // API key for the resolved provider (decrypted server-side). The ChatGPT
     // (Codex) provider has no API key — its account state is validated in the
     // codex branch below. llama.cpp requests are valid WITHOUT an API key too
@@ -686,7 +703,9 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         if (annotations?.length) out.annotations = annotations;
         // DeepSeek thinking mode requires reasoning_content on tool-call turns (else HTTP 400);
         // OpenRouter uses `reasoning`. Field name follows the resolved provider.
-        if (row.reasoning_content?.trim()) out[assistantReasoningField(provider.id)] = row.reasoning_content;
+        // OpenCode Go replays per-model (D5): kimi-k3/deepseek-* need
+        // `reasoning_content`, the rest use `reasoning`.
+        if (row.reasoning_content?.trim()) out[provider.id === 'opencode-go' ? opencodeGoHistoryReasoningField(upstreamModel) : assistantReasoningField(provider.id)] = row.reasoning_content;
         return out;
       }
       return { role: row.role as 'user' | 'assistant', content: row.content };
@@ -860,6 +879,11 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       headers = provider.buildHeaders('');
     }
 
+    if (provider.id === 'opencode-go') {
+      // Operative session header (GC §1/D9): one per chat POST, traceable upstream.
+      headers['x-opencode-session'] = conversation_id;
+    }
+
     let actualModelFromResponse: string | null = null;
 
     const requestBody: Record<string, unknown> = {
@@ -1008,6 +1032,12 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       } else {
         requestBody.reasoning = buildArnictReasoning(reasoningEnabled, reasoningEffort);
       }
+    } else if (provider.id === 'opencode-go') {
+      // D4/GC §5: no reasoning field travels for Go in phase-1 (wire shape
+      // UNVERIFIED); the toggle is ignored with a debug log.
+      if (reasoningEnabled) {
+        console.log(`[chat] opencode-go reasoning ignored (phase-1 omit): model=${upstreamModel} effort=${reasoningEffort ?? 'none'}`);
+      }
     }
 
     if (isLlamacppModel(effectiveModel)) {
@@ -1040,12 +1070,20 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       requestBody.stream_options = { include_usage: true };
     }
 
+    if (provider.id === 'opencode-go') {
+      // Usage frame required for static cost accounting (GC §6). Body stays
+      // allowlisted (GC §4): provider/plugins/response_format/reasoning never
+      // attach (supportsProviderRouting/supportsPlugins/supportsReasoningParam
+      // are all false), tools attach normally above.
+      requestBody.stream_options = { include_usage: true };
+    }
+
     // Response healing is an OpenRouter plugin: codex has no chat-completions
     // fetch and llama.cpp serves response_format json_schema natively (the
     // 'response-healing' field is meaningless upstream), so both are excluded.
     // Abliteration is excluded too: the healing plugin is a 422 risk there
     // (GC §2) and healing forces stream:false, which abliteration never uses.
-    const useResponseHealing = !!agent.response_healing_enabled && !!responseFormat && provider.id !== 'codex' && provider.id !== 'llamacpp' && provider.id !== 'abliteration' && provider.id !== 'arnict';
+    const useResponseHealing = !!agent.response_healing_enabled && !!responseFormat && provider.id !== 'codex' && provider.id !== 'llamacpp' && provider.id !== 'abliteration' && provider.id !== 'arnict' && provider.id !== 'opencode-go';
     if (useResponseHealing) {
       requestBody.stream = false;
       const plugins = (requestBody.plugins as { id: string; pdf?: { engine: string } }[]) || [];
@@ -1059,7 +1097,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     // receives a reasoning param, so a local model error merely mentioning
     // "max" must never trigger this retry. Abliteration receives 'max' as-is
     // with no retry (GC §4).
-    const requestedMaxEffort = reasoningEnabled && reasoningEffort === 'max' && provider.id !== 'codex' && provider.id !== 'llamacpp' && provider.id !== 'abliteration' && provider.id !== 'arnict';
+    const requestedMaxEffort = reasoningEnabled && reasoningEffort === 'max' && provider.id !== 'codex' && provider.id !== 'llamacpp' && provider.id !== 'abliteration' && provider.id !== 'arnict' && provider.id !== 'opencode-go';
     let maxEffortFallbackDone = false;
     const effortMaxRejected = (msg: string): boolean =>
       /unsupported value: ?'?max|'max' is not supported|max is not supported/i.test(msg);
@@ -1487,6 +1525,13 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
           cachedTokens = arnictCachedTokens(au);
           if (u.cost === undefined) cost = computeArnictCost(au, upstreamModel);
         }
+        if (provider.id === 'opencode-go') {
+          // Static cost: upstream usage carries no `cost` (GC §6). Never
+          // overwrite an upstream cost if one ever appears.
+          const au = u as unknown as Parameters<typeof opencodeGoCachedTokens>[0];
+          cachedTokens = opencodeGoCachedTokens(au);
+          if (u.cost === undefined) cost = computeOpencodeGoCost(au, upstreamModel);
+        }
       }
       const dataWithModel = data as { model?: string };
       if (dataWithModel.model && typeof dataWithModel.model === 'string' && dataWithModel.model.trim()) {
@@ -1618,6 +1663,27 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         } catch {
           errorMsg = errorText || errorMsg;
         }
+        if (provider.id === 'opencode-go') {
+          // Billing/transport mapping (GC §7): the body above is already
+          // parsed as text-then-JSON (Content-Type: text/plain lies); SSE
+          // headers flushed before fetch, so the mapped status rides in the
+          // message/log while the event carries the frozen literal.
+          const goStatus = apiResponse.status;
+          const goDetail = (typeof errorMsg === 'string' && errorMsg.trim() ? errorMsg : errorText).trim();
+          const goPrefix = goDetail.slice(0, 300);
+          if (goStatus === 401) {
+            console.warn(`[chat] opencode-go billing: status=401 model=${upstreamModel}`);
+            errorMsg = 'Invalid OpenCode Go API key. Check your key in Settings → OpenCode Go.';
+          } else if (goStatus === 402 || goStatus === 429) {
+            console.warn(`[chat] opencode-go billing: status=${goStatus} model=${upstreamModel}`);
+            errorMsg = 'OpenCode Go usage limit reached for this model. Check usage in the OpenCode console (https://opencode.ai/docs/go/) or enable the Zen-balance fallback there.';
+          } else if (goStatus >= 400 && goStatus < 500 && /not supported for format|oa-compat/i.test(`${errorText} ${goDetail}`)) {
+            console.log(`[chat] opencode-go format mismatch: model=${upstreamModel} status=${goStatus}`);
+            errorMsg = opencodeGoFormatMismatchMessage(upstreamModel, goPrefix || `status ${goStatus}`);
+          } else {
+            errorMsg = `OpenCode Go request failed (status ${goStatus}): ${goPrefix || 'unknown error'}`;
+          }
+        }
         if (shouldRetryMaxEffort(errorMsg)) {
           // Retry is upstream-driven: connection state must not cancel it (GC4).
           console.warn('[chat] Model rejected reasoning effort "max", retrying with "xhigh":', errorMsg);
@@ -1747,6 +1813,11 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
                   cachedTokens = arnictCachedTokens(usage);
                   if (usage.cost === undefined) cost = computeArnictCost(usage, upstreamModel);
                 }
+                if (provider.id === 'opencode-go') {
+                  // Static cost (GC §6): never overwrite an upstream cost.
+                  cachedTokens = opencodeGoCachedTokens(usage);
+                  if (usage.cost === undefined) cost = computeOpencodeGoCost(usage, upstreamModel);
+                }
               }
 
               // Capture file (and other) annotations from stream for PDF skip-reparse on follow-ups
@@ -1833,7 +1904,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
           role: 'assistant',
           content: fullContent || null,
           tool_calls: toolCallsArray,
-          ...(fullReasoning.trim() ? { [assistantReasoningField(provider.id)]: fullReasoning } : {}),
+          ...(fullReasoning.trim() ? { [provider.id === 'opencode-go' ? opencodeGoHistoryReasoningField(upstreamModel) : assistantReasoningField(provider.id)]: fullReasoning } : {}),
         });
 
         // Milestone persist via the segment draft (plan S2): the row already

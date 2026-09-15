@@ -4,7 +4,7 @@ import { AuthRequest } from '../middleware/auth.js';
 import db from '../db.js';
 import { getSettingValue } from './settings.js';
 import { normalizeOpenRouterEndpoints } from '../providerRouting.js';
-import { ABLITERATION_BASE_URL, ABLITERATION_CATALOG, ARNICT_BASE_URL, ARNICT_CATALOG, DEEPSEEK_BASE_URL, DEEPSEEK_CATALOG, LLAMACPP_PREFIX } from '../providers/index.js';
+import { ABLITERATION_BASE_URL, ABLITERATION_CATALOG, ARNICT_BASE_URL, ARNICT_CATALOG, DEEPSEEK_BASE_URL, DEEPSEEK_CATALOG, LLAMACPP_PREFIX, OPENCODE_GO_CATALOG, OPENCODE_GO_CHAT_COMPLETIONS_URL, OPENCODE_GO_USER_AGENT, OPENCODE_GO_VALIDATE_MODEL } from '../providers/index.js';
 import {
   LLAMACPP_ACTIVE_PRESET_SCHEMA,
   LLAMACPP_CANONICAL_PRESETS,
@@ -200,6 +200,11 @@ router.get('/arnict', (_req: AuthRequest, res: Response) => {
   res.json({ data: ARNICT_CATALOG });
 });
 
+// GET /api/models/opencodego - Curated OpenCode Go catalog (static; no key needed)
+router.get('/opencodego', (_req: AuthRequest, res: Response) => {
+  res.json({ data: OPENCODE_GO_CATALOG });
+});
+
 // GET /api/models/codex - Models available to the user's connected ChatGPT account
 const codexModelsCache = new Map<string, { data: unknown[]; timestamp: number }>();
 const CODEX_MODELS_CACHE_TTL = 60_000; // 1 minute
@@ -317,6 +322,86 @@ router.get('/abliteration/validate', async (req: AuthRequest, res: Response) => 
   } catch (err) {
     console.error('Error validating Abliteration key:', err);
     res.status(500).json({ ok: false, error: 'Failed to reach Abliteration' });
+  }
+});
+// GET /api/models/opencodego/validate - Verify the saved OpenCode Go key with a
+// minimal 1-token POST probe. GET /models needs no auth upstream, so it cannot
+// validate honestly; this probe costs ~1 completion token per call.
+router.get('/opencodego/validate', async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.userId;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const apiKey = getSettingValue(userId, 'opencode_go_api_key');
+    if (!apiKey?.trim()) {
+      return res.status(400).json({ error: 'OpenCode Go API key not configured' });
+    }
+
+    const response = await fetch(OPENCODE_GO_CHAT_COMPLETIONS_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+        'User-Agent': OPENCODE_GO_USER_AGENT,
+        'x-opencode-session': `validate-${nanoid()}`,
+      },
+      body: JSON.stringify({
+        model: OPENCODE_GO_VALIDATE_MODEL,
+        messages: [{ role: 'user', content: 'ok' }],
+        max_tokens: 1,
+        stream: false,
+      }),
+    });
+
+    if (!response.ok) {
+      // Upstream lies about Content-Type (text/plain on JSON bodies): read as
+      // text first, then parse by content, not by header.
+      const raw = await response.text().catch(() => '');
+      let code = '';
+      let message = '';
+      try {
+        const errJson = JSON.parse(raw) as {
+          error?: { type?: unknown; code?: unknown; message?: unknown };
+        };
+        const errObj = errJson?.error;
+        if (errObj !== null && typeof errObj === 'object') {
+          if (typeof errObj.code === 'string') code = errObj.code;
+          else if (typeof errObj.type === 'string') code = errObj.type;
+          if (typeof errObj.message === 'string') message = errObj.message;
+        }
+      } catch {
+        // Non-JSON body (e.g. 404 HTML): surface status + body prefix below.
+      }
+      if (
+        response.status === 401
+        || code === 'AuthError'
+        || /invalid api key/i.test(message)
+      ) {
+        return res.status(401).json({
+          ok: false,
+          error: 'Invalid OpenCode Go API key. Check your key in Settings → OpenCode Go.',
+        });
+      }
+      if (response.status === 402 || response.status === 429) {
+        return res.status(response.status).json({
+          ok: false,
+          error:
+            'OpenCode Go usage limit reached for this model. Check usage in the OpenCode console (https://opencode.ai/docs/go/) or enable the Zen-balance fallback there.',
+        });
+      }
+      const detail = message || (raw ? raw.slice(0, 300) : '');
+      return res.status(response.status).json({
+        ok: false,
+        error: detail
+          ? `OpenCode Go error (${response.status}): ${detail}`
+          : `OpenCode Go error (${response.status})`,
+      });
+    }
+
+    res.json({ ok: true, model: OPENCODE_GO_VALIDATE_MODEL });
+  } catch (err) {
+    console.error('Error validating OpenCode Go key:', err);
+    res.status(500).json({ ok: false, error: 'Failed to reach OpenCode Go' });
   }
 });
 // GET /api/models/arnict/validate - Verify the saved Arnict key via keyed GET /v1/models probe

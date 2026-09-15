@@ -228,13 +228,13 @@ function seamChecks(): void {
   ok('(C5) chat healing exclusion names abliteration', () => {
     assert.match(
       chatSource,
-      /provider\.id !== 'codex' && provider\.id !== 'llamacpp' && provider\.id !== 'abliteration'( && provider\.id !== 'arnict')?;/,
+      /provider\.id !== 'codex' && provider\.id !== 'llamacpp' && provider\.id !== 'abliteration'( && provider\.id !== 'arnict')?( && provider\.id !== 'opencode-go')?;/,
     );
   });
   ok('(C6) chat effort-max retry exclusion names abliteration', () => {
     assert.match(
       chatSource,
-      /requestedMaxEffort = reasoningEnabled && reasoningEffort === 'max' && provider\.id !== 'codex' && provider\.id !== 'llamacpp' && provider\.id !== 'abliteration'( && provider\.id !== 'arnict')?;/,
+      /requestedMaxEffort = reasoningEnabled && reasoningEffort === 'max' && provider\.id !== 'codex' && provider\.id !== 'llamacpp' && provider\.id !== 'abliteration'( && provider\.id !== 'arnict')?( && provider\.id !== 'opencode-go')?;/,
     );
   });
   ok('(C7) chat stream + non-stream usage blocks compute static cost without overwriting', () => {
@@ -307,14 +307,14 @@ function seamChecks(): void {
     assert.match(selectorSource, /ABLITERATION_GROUP,/);
     assert.match(
       selectorSource,
-      /\[\.\.\.deepSeekModels, \.\.\.codexModels, \.\.\.abliterationModels, (\.\.\.arnictModels, )?\.\.\.llamaCppModels, \.\.\.openRouterModels\]/,
+      /\[\.\.\.deepSeekModels, \.\.\.codexModels, \.\.\.abliterationModels, (\.\.\.arnictModels, )?(\.\.\.opencodeGoModels, )?\.\.\.llamaCppModels, \.\.\.openRouterModels\]/,
     );
   });
   ok('(F7) routing selector excludes abliteration exactly like DeepSeek', () => {
-    assert.match(routingSource, /import \{ isDeepSeekDirectModel, isAbliterationModel(, isArnictModel)? \} from '\.\.\/utils\/providers';/);
+    assert.match(routingSource, /import \{ isDeepSeekDirectModel, isAbliterationModel(, isArnictModel)?(, isOpencodeGoModel)? \} from '\.\.\/utils\/providers';/);
     assert.match(routingSource, /const isAbliteration = isAbliterationModel\(modelId\);/);
-    assert.match(routingSource, /&& !isDeepSeek && !isAbliteration( && !isArnict)?\)/);
-    assert.match(routingSource, /if \(\(isDeepSeek \|\| isAbliteration( \|\| isArnict)?\) && value !== null\) onChange\(null\);/);
+    assert.match(routingSource, /&& !isDeepSeek && !isAbliteration( && !isArnict)?( && !isOpencodeGo)?\)/);
+    assert.match(routingSource, /if \(\(isDeepSeek \|\| isAbliteration( \|\| isArnict)?( \|\| isOpencodeGo)?\) && value !== null\) onChange\(null\);/);
     assert.match(routingSource, /Proveedor no disponible para Abliteration/);
   });
   ok('(F8) settings card reuses ProviderKeySection with the frozen props', () => {
