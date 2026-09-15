@@ -551,7 +551,9 @@ export function useChat() {
         onEnded: async (ended) => {
           await store.loadMessages(conversationId, { silent: true });
           await store.loadConversations(store.selectedAgentId || undefined);
-          opts?.onEnded?.(ended);
+          // Awaited so the ChatView `lastCompact` marker lands inside the
+          // compact turn, after the store refresh above (same-turn invariant).
+          await opts?.onEnded?.(ended);
         },
         ...(opts?.onFailed ? { onFailed: opts.onFailed } : {}),
       });
