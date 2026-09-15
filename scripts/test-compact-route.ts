@@ -193,7 +193,7 @@ try {
       assert.ok(evts[0]!.data.compaction_id);
       assert.equal(evts[0]!.data.conversation_id, conv);
       const ended = evts[evts.length - 1]!.data;
-      for (const k of ['compaction_id', 'conversation_id', 'tail_message_ids', 'tokens_before', 'tokens_after', 'pre_compact_leaf_id', 'model', 'focus']) {
+      for (const k of ['compaction_id', 'conversation_id', 'tail_message_ids', 'tokens_before', 'tokens_after', 'messages_compacted', 'pre_compact_leaf_id', 'model', 'focus']) {
         assert.ok(k in ended, `ended missing ${k}`);
       }
       assert.equal(ended.conversation_id, conv);
@@ -201,6 +201,8 @@ try {
       assert.equal(ended.focus, 'auth');
       assert.equal(ended.compaction_id, evts[0]!.data.compaction_id);
       assert.ok(Array.isArray(ended.tail_message_ids) && ended.tail_message_ids.length > 0);
+      assert.equal(typeof ended.messages_compacted, 'number');
+      assert.ok(Number.isFinite(ended.messages_compacted));
       assert.equal(counter.n, 1);
       // DB asserts
       const row = db.prepare('SELECT * FROM messages WHERE id=?').get(ended.compaction_id) as any;
@@ -216,6 +218,7 @@ try {
       }
       assert.equal(meta.v, 1);
       assert.deepEqual(meta.tail_message_ids, ended.tail_message_ids);
+      assert.equal(ended.messages_compacted, meta.messages_compacted);
       assert.equal(meta.pre_compact_leaf_id, preLeaf);
       assert.equal(meta.supersedes, null);
       const convRow = db.prepare('SELECT active_leaf_id, codex_thread_id, active_turn_id FROM conversations WHERE id=?').get(conv) as any;
@@ -279,6 +282,8 @@ try {
     const first = await call('POST', `/${conv}/compact`, { user: USER_A, body: { request_id: 'req-replay-1' } });
     assert.equal(first.status, 200);
     const firstEnded = parseSSE(first.text).at(-1)!.data;
+    assert.equal(parseSSE(first.text).at(-1)!.event, 'compaction.ended');
+    assert.ok('messages_compacted' in firstEnded, 'fresh ended missing messages_compacted');
     assert.equal(counter.n, 1);
     counter.n = 0;
     setSummarizeFetchImplForTests(stubFetchOk(counter));
@@ -287,6 +292,8 @@ try {
       assert.equal(second.status, 200);
       const secondEnded = parseSSE(second.text).at(-1)!.data;
       assert.equal(secondEnded.compaction_id, firstEnded.compaction_id);
+      assert.ok('messages_compacted' in secondEnded, 'replay ended missing messages_compacted');
+      assert.equal(secondEnded.messages_compacted, firstEnded.messages_compacted);
       assert.equal(counter.n, 0);
     } finally { setSummarizeFetchImplForTests(null); }
   });

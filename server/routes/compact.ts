@@ -178,6 +178,10 @@ router.post('/:id/compact', async (req: AuthRequest, res: Response): Promise<voi
             tail_message_ids: meta.tail_message_ids ?? [],
             tokens_before: meta.tokens_before ?? 0,
             tokens_after: meta.tokens_after ?? 0,
+            messages_compacted:
+              typeof meta.messages_compacted === 'number' && Number.isFinite(meta.messages_compacted)
+                ? meta.messages_compacted
+                : null,
             pre_compact_leaf_id: meta.pre_compact_leaf_id ?? null,
             model: meta.model ?? null,
             focus: meta.focus ?? null,
@@ -517,6 +521,7 @@ router.post('/:id/compact', async (req: AuthRequest, res: Response): Promise<voi
       tail_message_ids: tail.tailIds,
       tokens_before: tokensBefore,
       tokens_after: tokensAfter,
+      messages_compacted: messagesCompacted,
       pre_compact_leaf_id: preCompactLeafId,
       model: effectiveModel,
       focus,

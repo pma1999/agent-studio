@@ -199,7 +199,9 @@ export interface Message {
 }
 
 /** Newest checkpoint descriptor in the visible thread (`GET :id/messages`
- *  `compaction` view field, G7). `count` is conversation-wide. */
+ *  `compaction` view field, G7). `count` is conversation-wide.
+ *  `messages_compacted` / `tail_message_ids` mirror `compaction_meta` when
+ *  present (fail-soft: null for old rows or corrupt meta). */
 export interface CompactInfo {
   id: string;
   created_at: unknown;
@@ -208,6 +210,8 @@ export interface CompactInfo {
   tokens_after: unknown;
   focus: unknown;
   pre_compact_leaf_id: unknown;
+  messages_compacted: unknown;
+  tail_message_ids: unknown;
   count: number;
 }
 

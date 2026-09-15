@@ -45,6 +45,8 @@ export interface CompactionDescriptor {
   tokens_after: unknown;
   focus: unknown;
   pre_compact_leaf_id: unknown;
+  messages_compacted: unknown;
+  tail_message_ids: unknown;
   count: number;
 }
 
@@ -74,6 +76,8 @@ export function selectVisibleCompaction(
   if (!newest) return null;
   const meta = parseCompactionMeta(newest.compaction_meta ?? null);
   const numOrNull = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const strArrayOrNull = (v: unknown): string[] | null =>
+    Array.isArray(v) && v.every((id): id is string => typeof id === 'string') ? [...v] : null;
   return {
     id: newest.id,
     created_at: newest.created_at ?? null,
@@ -82,6 +86,8 @@ export function selectVisibleCompaction(
     tokens_after: numOrNull(meta.tokens_after),
     focus: (meta.focus as unknown) ?? null,
     pre_compact_leaf_id: (meta.pre_compact_leaf_id as unknown) ?? null,
+    messages_compacted: numOrNull(meta.messages_compacted),
+    tail_message_ids: strArrayOrNull(meta.tail_message_ids),
     count: totalCount,
   };
 }

@@ -709,6 +709,7 @@ export interface CompactEndedInfo {
   tail_message_ids: string[];
   tokens_before: number;
   tokens_after: number;
+  messages_compacted: number | null;
   pre_compact_leaf_id: string | null;
   model: string;
   focus: string | null;
@@ -869,6 +870,10 @@ export async function compactConversation(
               ),
               tokens_before: typeof parsed.tokens_before === 'number' ? parsed.tokens_before : 0,
               tokens_after: typeof parsed.tokens_after === 'number' ? parsed.tokens_after : 0,
+              messages_compacted:
+                typeof parsed.messages_compacted === 'number' && Number.isFinite(parsed.messages_compacted)
+                  ? parsed.messages_compacted
+                  : null,
               pre_compact_leaf_id:
                 typeof parsed.pre_compact_leaf_id === 'string' ? parsed.pre_compact_leaf_id : null,
               model: typeof parsed.model === 'string' ? parsed.model : '',

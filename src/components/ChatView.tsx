@@ -32,6 +32,7 @@ import { ConversationTokenSummary, StreamingTokenCounter } from './TokenCounter'
 import { ArtifactPanel } from './artifacts/ArtifactPanel';
 import { ArtifactGallery } from './artifacts/ArtifactGallery';
 import { artifactsApi } from '../api/client';
+import type { CompactEndedInfo } from '../api/client';
 import { buildArtifactsByMessageIndex, clampPanelPct } from '../utils/artifactWiring';
 import type { ChatArtifact } from '../types';
 import type {
@@ -314,6 +315,18 @@ export function ChatView() {
   const [compactError, setCompactError] = useState<string | null>(null);
   const [dismissedSuggestByConversation, setDismissedSuggestByConversation] = useState<Record<string, boolean>>({});
   const [compactBusy, setCompactBusy] = useState(false);
+  // Post-compaction card freshness (compact-indicator): local, per-conversation,
+  // cleared on switch. `onEnded` arrives after `loadMessages`, so the store is
+  // already fresh when this is set.
+  const [lastCompact, setLastCompact] = useState<{
+    convId: string;
+    compactionId: string;
+    tailIds: string[];
+    messagesCompacted: number | null;
+    at: number;
+  } | null>(null);
+  const [summaryOpen, setSummaryOpen] = useState(false);
+  const scrolledForRef = useRef<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const reasoningBtnRef = useRef<HTMLButtonElement>(null);
   const reasoningPopoverRef = useRef<HTMLDivElement>(null);
@@ -668,7 +681,14 @@ export function ChatView() {
   useEffect(() => {
     setCompactNotice(null);
     setCompactError(null);
+    setLastCompact(null);
+    setSummaryOpen(false);
   }, [activeConversationId]);
+
+  // Collapse an expanded summary when a different checkpoint arrives.
+  useEffect(() => {
+    setSummaryOpen(false);
+  }, [compaction?.id]);
 
   // Tool results memo (must be before early return)
   const toolResultsByCallId = useMemo(() => {
@@ -745,6 +765,63 @@ export function ChatView() {
     }
     return map;
   }, [messages]);
+
+  // Post-compaction card derivations (compact-indicator). `activeThread` is the
+  // source of `displayMessages` (same tool/compaction filter), so `anchorIndex`
+  // matches the index inside the rendered `displayMessages` array.
+  const fresh = useMemo(() => (
+    !!compaction && !!lastCompact && !!activeConversationId &&
+    lastCompact.convId === activeConversationId &&
+    lastCompact.compactionId === compaction.id
+  ), [compaction, lastCompact, activeConversationId]);
+
+  const descTail = useMemo(() => {
+    if (!compaction) return null;
+    const raw = compaction.tail_message_ids;
+    if (!Array.isArray(raw)) return null;
+    return raw.filter((x): x is string => typeof x === 'string');
+  }, [compaction]);
+
+  const anchorIds = useMemo(() => (
+    descTail ?? (fresh && lastCompact ? lastCompact.tailIds : null)
+  ), [descTail, fresh, lastCompact]);
+
+  const anchorIndex = useMemo(() => {
+    if (!anchorIds || anchorIds.length === 0) return -1;
+    const set = new Set(anchorIds);
+    const visible = activeThread.filter((m) => m.role !== 'tool' && m.role !== 'compaction');
+    return visible.findIndex((m) => set.has(m.id));
+  }, [anchorIds, activeThread]);
+
+  const archived = useMemo(() => (
+    compaction
+      ? (compactNum(compaction.messages_compacted) ?? (fresh && lastCompact ? lastCompact.messagesCompacted : null))
+      : null
+  ), [compaction, fresh, lastCompact]);
+
+  const kept = useMemo(() => (anchorIds?.length ?? null), [anchorIds]);
+
+  const summaryText = useMemo(() => {
+    if (!compaction) return null;
+    const row = messages.find((m) => m.role === 'compaction' && m.id === compaction.id);
+    const content = row?.content;
+    if (typeof content !== 'string' || !content) return null;
+    // Local copy of SUMMARY_PREFIX (server/compaction/prompt.ts L12-13), cited
+    // not imported: server modules must never leak into the client bundle.
+    const SUMMARY_PREFIX_LOCAL =
+      'Another language model summarized this conversation so it could continue in a smaller context. Use the summary as prior state; the verbatim tail after it is newest. Do not duplicate completed work. Summary:\n';
+    if (content.startsWith(SUMMARY_PREFIX_LOCAL)) return content.slice(SUMMARY_PREFIX_LOCAL.length);
+    return content;
+  }, [compaction, messages]);
+
+  // One auto-scroll per fresh compaction (guarded by id; `fresh` already gates
+  // on the active conversation, and the guard key makes a switch-back safe).
+  useEffect(() => {
+    if (!fresh || !compaction) return;
+    if (scrolledForRef.current === compaction.id) return;
+    scrolledForRef.current = compaction.id;
+    scrollToBottom('auto');
+  }, [fresh, compaction, scrollToBottom]);
 
   const handleStartEdit = useCallback((msg: Message) => {
     if (isStreaming) return;
@@ -993,6 +1070,18 @@ export function ChatView() {
       try {
         await compactActiveConversation(focus, {
           ...(outgoingModel ? { model: outgoingModel } : {}),
+          onEnded: (ended: CompactEndedInfo) => {
+            const cur = useStore.getState().activeConversationId;
+            if (!cur || ended.conversation_id !== cur) return;
+            setLastCompact({
+              convId: cur,
+              compactionId: ended.compaction_id,
+              tailIds: (ended.tail_message_ids ?? []).filter((x): x is string => typeof x === 'string'),
+              messagesCompacted: typeof ended.messages_compacted === 'number' &&
+                Number.isFinite(ended.messages_compacted) ? ended.messages_compacted : null,
+              at: Date.now(),
+            });
+          },
           onFailed: (reason, details) => {
             // 409s get the brief's exact notices; other failures surface
             // reason (+ code) with history untouched.
@@ -1092,6 +1181,122 @@ export function ChatView() {
   // Error bubbles are temp- prefixed but carry their FINAL content — they must
   // render through the normal content path, not as an empty streaming placeholder.
   const isLastMsgStreamingPlaceholder = lastMsg && lastMsg.role === 'assistant' && lastMsg.id.startsWith('temp-') && !lastMsg.id.startsWith('temp-error-');
+
+  // Post-compaction inline card (compact-indicator): persistent stats derived
+  // from `compaction` (+ fresh `lastCompact` fallback) with the checkpoint text
+  // read from the `role='compaction'` row in `messages[]`. Complements the
+  // banner above — no Undo/Fork, no precision notice (banner property).
+  const compactCard = (() => {
+    if (!compaction) return null;
+    const tokensBefore = compactNum(compaction.tokens_before);
+    const tokensAfter = compactNum(compaction.tokens_after);
+    const model = compactText(compaction.model);
+    const at = compactText(compaction.created_at);
+    const focus = compactText(compaction.focus);
+    let when: string | null = null;
+    if (at) {
+      try {
+        when = new Date(at).toLocaleString();
+      } catch {
+        when = at;
+      }
+    }
+    const summaryId = `compact-summary-${compaction.id}`;
+    return (
+      <motion.div
+        role="status"
+        aria-label="Compaction summary"
+        initial={fresh && !prefersReducedMotion ? { opacity: 0, y: 6 } : false}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.25, ease: [0.4, 0, 0.2, 1] }}
+        style={{
+          margin: '12px 0',
+          padding: '10px 12px',
+          background: 'var(--bg-surface)',
+          border: `1px solid ${fresh ? 'var(--border-accent)' : 'var(--border)'}`,
+          borderRadius: 'var(--radius-md)',
+          fontSize: '0.8125rem',
+          color: 'var(--text-secondary)',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '8px',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+          <History size={12} aria-hidden="true" />
+          <span>
+            <strong style={{ color: 'var(--text-primary)', fontWeight: 600 }}>
+              Conversation compacted
+            </strong>
+            <span>
+              {' · '}
+              {tokensBefore !== null ? tokensBefore.toLocaleString() : '?'}
+              {' → '}
+              {tokensAfter !== null ? tokensAfter.toLocaleString() : '?'}
+              {' tokens'}
+              {archived !== null ? ` · ${archived.toLocaleString()} archived` : ''}
+              {kept !== null ? ` · ${kept.toLocaleString()} kept` : ''}
+              {model ? ` · ${model}` : ''}
+              {when ? ` · ${when}` : ''}
+              {focus ? ` · Focus: ${focus}` : ''}
+            </span>
+          </span>
+          {fresh && (
+            <span
+              style={{
+                fontSize: '0.6875rem',
+                fontWeight: 600,
+                color: 'var(--accent)',
+                background: 'var(--accent-ghost)',
+                border: '1px solid var(--border-accent)',
+                borderRadius: '999px',
+                padding: '1px 8px',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              Just compacted
+            </span>
+          )}
+        </div>
+        {summaryText !== null && (
+          <div>
+            <button
+              type="button"
+              className="message-older-variant-banner-link"
+              aria-expanded={summaryOpen}
+              aria-controls={summaryId}
+              onClick={() => setSummaryOpen((v) => !v)}
+              style={{
+                background: 'none',
+                border: 'none',
+                padding: 0,
+                cursor: 'pointer',
+                fontSize: 'inherit',
+                fontFamily: 'var(--font-body)',
+                ...(isMobile ? { minHeight: '44px', display: 'inline-flex', alignItems: 'center' } : undefined),
+              }}
+            >
+              {summaryOpen ? 'Hide summary' : 'View summary'}
+            </button>
+          </div>
+        )}
+        {summaryOpen && summaryText !== null && (
+          <div
+            id={summaryId}
+            style={{
+              fontSize: '0.75rem',
+              color: 'var(--text-primary)',
+              whiteSpace: 'pre-wrap',
+              maxHeight: '240px',
+              overflow: 'auto',
+            }}
+          >
+            {summaryText}
+          </div>
+        )}
+      </motion.div>
+    );
+  })();
 
   return (
     <div
@@ -1387,6 +1592,9 @@ export function ChatView() {
                   </div>
                 );
               })()}
+              {/* Post-compaction card fallback: anchor unresolved (old payload,
+                  variant changed) → pinned under the banner, never duplicated. */}
+              {anchorIndex === -1 && compactCard}
               {/* Council Streaming View */}
               {(councilEnabled || councilMemberProgress.size > 0) && isStreaming && (
                 <CouncilStreamingView
@@ -1429,8 +1637,9 @@ export function ChatView() {
                 !msg.council_run_id &&
                 i === displayMessages.length - 1;
               return (
-                <MessageBubble
-                  key={msg.id}
+                <React.Fragment key={msg.id}>
+                  {i === anchorIndex && compactCard}
+                  <MessageBubble
                   message={msg}
                   isStreaming={isLiveMsg}
                   streamingContent={isStreamingMsg ? streamingContent : isPolledStreamingMsg ? (msg.content || '') : undefined}
@@ -1463,6 +1672,7 @@ export function ChatView() {
                   linkedArtifacts={artifactsByMessageId.get(msg.id)}
                   onOpenArtifact={handleOpenArtifact}
                 />
+                </React.Fragment>
               );
             })}
             </>

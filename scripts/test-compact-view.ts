@@ -219,6 +219,8 @@ t('selectVisibleCompaction picks the newest checkpoint in the visible thread wit
   assert.equal(desc.focus, 'new');
   assert.equal(desc.tokens_before, 7);
   assert.equal(desc.pre_compact_leaf_id, 'u1');
+  assert.equal(desc.messages_compacted, 2);
+  assert.deepEqual(desc.tail_message_ids, []);
   assert.equal(desc.count, 5);
 });
 
@@ -234,6 +236,18 @@ t('selectVisibleCompaction survives corrupt meta (fields null, never throws)', (
   assert.equal(desc.model, 'm');
   assert.equal(desc.tokens_before, null);
   assert.equal(desc.focus, null);
+  assert.equal(desc.messages_compacted, null);
+  assert.equal(desc.tail_message_ids, null);
+});
+
+t('selectVisibleCompaction with legacy meta (keys absent) degrades to null without throwing', () => {
+  const legacyMeta = JSON.stringify({ v: 1, model: 'm', focus: 'old', tokens_before: 5, tokens_after: 3 });
+  const desc = selectVisibleCompaction(
+    [{ id: 'c-old', created_at: 't', role: 'compaction', content: 'S', model: 'm', compaction_meta: legacyMeta }], 1,
+  ) as Record<string, unknown>;
+  assert.equal(desc.id, 'c-old');
+  assert.equal(desc.messages_compacted, null);
+  assert.equal(desc.tail_message_ids, null);
 });
 
 t('buildContextEstimate: unknown window -> limit/pct null, advisory off', () => {
@@ -297,6 +311,8 @@ t('GET messages keeps flat array + cursors and adds compaction + context_estimat
     assert.equal(body.compaction.tokens_before, 100);
     assert.equal(body.compaction.tokens_after, 50);
     assert.equal(body.compaction.pre_compact_leaf_id, 'u1');
+    assert.equal(body.compaction.messages_compacted, 2);
+    assert.deepEqual(body.compaction.tail_message_ids, []);
     assert.equal(body.compaction.count, 1);
     assert.ok(body.context_estimate);
     assert.ok(typeof body.context_estimate.tokens === 'number');
