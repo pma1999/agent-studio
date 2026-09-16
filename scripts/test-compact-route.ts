@@ -92,6 +92,9 @@ function setKey(userId: string, key: string, value: string) {
 }
 setKey(USER_A, 'openrouter_api_key', 'dummy-key');
 
+/** Local mirror of the frozen G5 estimator (server module is ESM-imported above). */
+const estimateTokensLocal = (t: string): number => Math.ceil(t.length / 4);
+
 const VALID_SUMMARY = [
   '## Objective', '- goal', '## Important Details', '- d', '## Work State',
   '### Completed', '- c', '### Active', '- a', '### Blocked', '- (none)',
@@ -321,6 +324,12 @@ try {
       assert.equal(meta.v, 1);
       assert.deepEqual(meta.tail_message_ids, ended.tail_message_ids);
       assert.equal(meta.keep_tokens, 0);
+      // Codex-style retention: the checkpoint records how many user messages
+      // the chat builder replays verbatim after it, and tokens_after counts
+      // them (the summary alone would under-report the next turn's cost).
+      assert.equal(typeof meta.retained_user_messages, 'number');
+      assert.ok(meta.retained_user_messages > 0, 'user turns must be retained for replay');
+      assert.ok(meta.tokens_after > estimateTokensLocal(SUMMARY_PREFIX + 'x'), 'tokens_after must include the retained messages');
       // Whole visible slice archived: every non-checkpoint row of the thread.
       assert.equal(meta.archived_message_ids.length, ended.messages_compacted);
       assert.equal(ended.messages_compacted, meta.messages_compacted);

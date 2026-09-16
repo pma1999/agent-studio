@@ -109,13 +109,14 @@ test('tool output of exactly 2000 chars has no marker', () => {
   assert.equal(serializeHead([toolRow('t1', 'y'.repeat(2000))]), `[Tool result] ${'y'.repeat(2000)}`);
 });
 
-test('tool-call args truncated to 500 chars', () => {
-  const longArgs = 'a'.repeat(600);
+test('tool-call args travel whole (never truncated — OpenCode parity)', () => {
+  const longArgs = 'a'.repeat(6000);
   const calls = JSON.stringify([
-    { id: 'tc1', type: 'function', function: { name: 'read_file', arguments: longArgs } },
+    { id: 'tc1', type: 'function', function: { name: 'write_file', arguments: longArgs } },
   ]);
   const head = serializeHead([assistantRow('a1', '', null, { tool_calls: calls })]);
-  assert.equal(head, `[Assistant tool call]: read_file(${'a'.repeat(500)}...)`);
+  assert.equal(head, `[Assistant tool call]: write_file(${longArgs})`);
+  assert.ok(!head.includes('...'), 'no truncation marker on arguments');
 });
 
 // --- serializeHead: attachments + array content ---

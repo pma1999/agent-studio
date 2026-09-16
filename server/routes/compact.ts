@@ -25,6 +25,7 @@ import {
   clearTurn,
 } from '../chatTurnRegistry.js';
 import { runCompactionSummary } from '../compaction/summarize.js';
+import { retentionBudgetFor, selectRetainedUserMessages } from '../compaction/retain.js';
 
 const router = Router();
 
@@ -499,9 +500,18 @@ router.post('/:id/compact', async (req: AuthRequest, res: Response): Promise<voi
       }
     }
 
-    // Nothing is kept verbatim, so the post-compaction view is exactly the
-    // stored checkpoint content.
-    const tokensAfter = estimateTokens(SUMMARY_PREFIX + summary);
+    // Post-compaction view = the stored checkpoint content PLUS the Codex-style
+    // user messages the chat builder replays before it (same selector, same
+    // candidates: every row of the thread ahead of this checkpoint). Counting
+    // only the summary would under-report what the next turn actually costs.
+    const retainCandidates = threadRows.map((r) => ({ role: String(r['role']), content: r['content'] }));
+    const retainedAfter = selectRetainedUserMessages(
+      retainCandidates,
+      retentionBudgetFor(retainCandidates, SUMMARY_PREFIX + summary),
+    );
+    const tokensAfter =
+      estimateTokens(SUMMARY_PREFIX + summary) +
+      retainedAfter.reduce((sum, m) => sum + estimateTokens(m.content), 0);
     const compactedAt = new Date().toISOString();
     const meta = {
       v: 1,
@@ -511,6 +521,9 @@ router.post('/:id/compact', async (req: AuthRequest, res: Response): Promise<voi
       keep_tokens: 0,
       tokens_before: tokensBefore,
       tokens_after: tokensAfter,
+      // How many user messages the chat builder replays verbatim after this
+      // checkpoint (Codex COMPACT_USER_MESSAGE_MAX_TOKENS retention).
+      retained_user_messages: retainedAfter.length,
       messages_compacted: messagesCompacted,
       // Always empty now (no verbatim tail); kept in the payload so the
       // documented SSE/meta shape does not change under old readers.

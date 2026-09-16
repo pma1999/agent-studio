@@ -31,8 +31,35 @@ function test(name: string, fn: () => void) {
   }
 }
 
-const CODEX_CORE =
-  'You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task. Include: - Current progress and key decisions made - Important context, constraints, or user preferences - What remains to be done (clear next steps) - Any critical data, examples, or references needed to continue. Be concise, structured, and focused on helping the next LLM seamlessly continue the work.';
+// Byte-identical to openai/codex@main
+// `codex-rs/prompts/templates/compact/prompt.md` (425 bytes without the
+// trailing newline). The bullet list keeps its line breaks on purpose: a
+// previous version flattened it to one line and appended a full stop.
+const CODEX_CORE = [
+  'You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.',
+  '',
+  'Include:',
+  '- Current progress and key decisions made',
+  '- Important context, constraints, or user preferences',
+  '- What remains to be done (clear next steps)',
+  '- Any critical data, examples, or references needed to continue',
+  '',
+  'Be concise, structured, and focused on helping the next LLM seamlessly continue the work.',
+].join('\n');
+
+// Byte-identical to sst/opencode@dev `packages/core/src/session/compaction.ts`
+// (`SUMMARY_TEMPLATE` head + `Rules:` tail, and `SUMMARY_UPDATE_INSTRUCTIONS`).
+const OPENCODE_TEMPLATE_LEAD =
+  'Output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.';
+const OPENCODE_RULES = [
+  'Rules:',
+  '- Keep every section, even when empty.',
+  '- Use terse bullets, not prose paragraphs.',
+  '- Preserve exact file paths, symbols, commands, error strings, URLs, and identifiers when known.',
+  '- Do not mention the summary process or that context was compacted.',
+].join('\n');
+const OPENCODE_MERGE_LEAD =
+  'The <prior-summary> summarizes everything that happened before the <conversation>. Construct a new summary that combines both. The <prior-summary> is discarded after this: anything you do not carry into the new summary is lost.';
 
 const EXPECTED_PREFIX =
   'Another language model summarized this conversation so it could continue in a smaller context. Use the summary as prior state; the verbatim tail after it is newest. Do not duplicate completed work. Summary:\n';
@@ -65,8 +92,8 @@ const baseVars = {
 };
 
 // --- prompt constants ---
-test('COMPACTION_PROMPT_VERSION is v1', () => {
-  assert.equal(COMPACTION_PROMPT_VERSION, 'v1');
+test('COMPACTION_PROMPT_VERSION is v2 (verbatim Codex core + OpenCode template)', () => {
+  assert.equal(COMPACTION_PROMPT_VERSION, 'v2');
 });
 
 test('SUMMARY_PREFIX matches G2 verbatim', () => {
@@ -100,23 +127,35 @@ test('no {{ template variable left unsubstituted', () => {
   assert.ok(!minimal.includes('{{'), 'found unsubstituted {{ in minimal output');
 });
 
-test('<template> wrapper tags excluded from wire output', () => {
+test('OpenCode template travels verbatim, tags included', () => {
   const out = buildCompactionPrompt(baseVars);
-  assert.ok(!out.includes('<template>'), 'must not contain <template>');
-  assert.ok(!out.includes('</template>'), 'must not contain </template>');
+  assert.ok(out.includes(OPENCODE_TEMPLATE_LEAD), 'template lead sentence not verbatim');
+  assert.ok(out.includes('<template>') && out.includes('</template>'), 'template tags missing');
+  assert.ok(out.includes(OPENCODE_RULES), 'Rules block not verbatim');
+  // The agent-studio section lives INSIDE the template, so the model emits it.
+  assert.ok(out.indexOf('## Session Facts') < out.indexOf('</template>'), 'Session Facts must sit inside <template>');
+  assert.ok(out.includes('- Reproduce the "## Session Facts" line exactly as given.'), 'Session Facts rule missing');
+});
+
+test('Codex core is not flattened and gains no full stop', () => {
+  const out = buildCompactionPrompt(baseVars);
+  assert.ok(!out.includes('task. Include: -'), 'bullet list was flattened onto one line');
+  assert.ok(!out.includes('references needed to continue.'), 'a full stop was appended to the last bullet');
+  assert.ok(out.includes('Include:\n- Current progress and key decisions made'), 'bullets lost their line breaks');
 });
 
 test('prior block absent when null', () => {
   const out = buildCompactionPrompt(baseVars);
   assert.ok(!out.includes('<prior-summary>'), 'prior block should be absent when null');
-  assert.ok(!out.includes('Merge rules'), 'merge rules should be absent when prior null');
+  assert.ok(!out.includes(OPENCODE_MERGE_LEAD), 'merge instructions should be absent when prior null');
 });
 
 test('prior block + merge rules present when set', () => {
   const out = buildCompactionPrompt({ ...baseVars, priorSummary: 'EARLIER-DECISION-XYZ' });
   assert.ok(out.includes('EARLIER-DECISION-XYZ'), 'prior summary text missing');
   assert.ok(out.includes('<prior-summary>'), 'prior-summary wrapper missing');
-  assert.ok(out.includes('Merge rules'), 'merge-rules paragraph missing when prior set');
+  assert.ok(out.includes(OPENCODE_MERGE_LEAD), 'OpenCode merge instructions missing when prior set');
+  assert.ok(out.includes('Move completed work from "Active" to "Completed".'), 'merge instructions not verbatim');
 });
 
 test('focus line absent when null, present when set', () => {

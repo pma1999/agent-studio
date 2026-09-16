@@ -684,12 +684,14 @@ export function arnictCachedTokens(usage: ArnictUsage | null | undefined): numbe
 // Pricing: docs "Usage limits" price table ($ per 1M tokens, same fetch);
 // per-token decimals = $/1M / 1M. DeepSeek peak/off-peak rows are booked at
 // the off-peak (base) rate (R3/D10: windows are dollar-based, usage carries
-// no `cost`). Phase-2 tranche (T1): 8 `messages` + 5 `responses` rows from the
-// docs endpoint table in docs order (`grok-4.5` api.json-only, last) with
-// api.json `limit.context` + docs base-rate price + docs $/mo limit per row
-// (`grok-4.5`: no known limit → `priceNote`, no `monthlyLimitUsd`).
-// 29-vs-38: the 9 ids with no sendable transport stay out of the catalog in
-// `OPENCODE_GO_LIST_EXCLUDED` with reason (fail-closed list); 29 = 38 − 9.
+// no `cost`). Phase-2 tranche (T1): 8 `messages` + 4 `responses` rows from the
+// docs endpoint table in docs order (muse-spark-1.2-contributor last) with
+// api.json `limit.context` + docs base-rate price + docs $/mo limit per row.
+// T8/F-04: `grok-4.5` (deprecated, K3 2026-09-15 `Model is unavailable` ×3,
+// sustituto live `grok-4.6`) sale del catálogo a `OPENCODE_GO_LIST_EXCLUDED`
+// con motivo (decisión de producto).
+// 28-vs-38: the 10 ids with no sendable transport stay out of the catalog in
+// `OPENCODE_GO_LIST_EXCLUDED` with reason (fail-closed list); 28 = 38 − 10.
 // Static catalog: only chat-transport ids with a sourced price
 // (fail-closed catalog, GC §3); unknown `opencode-go:` ids fail OPEN on send
 // with the §7 mismatch mapping (T3).
@@ -700,7 +702,7 @@ export const OPENCODE_GO_RESPONSES_URL = `${OPENCODE_GO_BASE_URL}/responses`;
 /** `anthropic-version` header value required on `POST /messages` (docs prose, VERIFIED 401-shape 2026-09-15). */
 export const OPENCODE_GO_ANTHROPIC_VERSION = '2023-06-01';
 /** Catalog version: `YYYY-MM-DD.N` per entry count (GC; bump on every catalog change). */
-export const OPENCODE_GO_CATALOG_VERSION = '2026-09-15.29';
+export const OPENCODE_GO_CATALOG_VERSION = '2026-09-15.28';
 
 export type OpenCodeGoTransport = 'chat' | 'messages' | 'responses';
 
@@ -732,8 +734,9 @@ export const OPENCODE_GO_CHAT_TRANSPORT_MODELS: ReadonlySet<string> = new Set([
 /**
  * Bare ids served over a phase-2 transport (docs table rows + api.json
  * `provider.npm` overrides: `@ai-sdk/anthropic` → 'messages',
- * `@ai-sdk/openai` → 'responses'; docs win on Qwen rows). `grok-4.5` comes
- * solely from the api.json `@ai-sdk/openai` override (no docs row).
+ * `@ai-sdk/openai` → 'responses'; docs win on Qwen rows). T8/F-04 excluye
+ * `grok-4.5` (api.json-only `@ai-sdk/openai`, deprecated e inalcanzable):
+ * resuelve `unknown` (fail-open) como el resto de excluidos.
  */
 export const OPENCODE_GO_NON_CHAT_TRANSPORT: ReadonlyMap<string, 'messages' | 'responses'> = new Map([
   ['minimax-m3', 'messages'],
@@ -748,7 +751,6 @@ export const OPENCODE_GO_NON_CHAT_TRANSPORT: ReadonlyMap<string, 'messages' | 'r
   ['gpt-5.6-luna', 'responses'],
   ['muse-spark-1.3-contributor', 'responses'],
   ['muse-spark-1.2-contributor', 'responses'],
-  ['grok-4.5', 'responses'],
 ]);
 
 /**
@@ -785,7 +787,7 @@ export interface OpencodeGoCatalogModel {
   transport: OpenCodeGoTransport;
   /** True only once the transport is send-enabled (chat: T1; messages: T4; responses: T5). */
   sendable: boolean;
-  /** Docs $/mes limit; absent only when unknown (`grok-4.5`) — then `priceNote` explains. */
+  /** Docs $/mes limit por fila (todas las filas listadas lo declaran). */
   monthlyLimitUsd?: number;
   priceNote?: string;
 }
@@ -968,8 +970,8 @@ export const OPENCODE_GO_CATALOG: OpencodeGoCatalogModel[] = [
     monthlyLimitUsd: 60, // docs usage-limits $/mes limit
   },
   // -- Phase-2 tranche (T1 catalog; T4 send-enables the 8 messages rows,
-  // T5 the 5 responses rows): docs endpoint-table
-  // order, 8 messages + 5 responses (`grok-4.5` api.json-only, last). Context
+  // T5 the 4 responses rows; T8/F-04 excluye grok-4.5): docs endpoint-table
+  // order, 8 messages + 4 responses (muse-spark-1.2-contributor last). Context
   // from api.json `limit.context`, pricing = docs base/off-peak $/1M rate,
   // limit = docs $/mes. Tiered rows book the base tier (T2 models write/tiers).
   {
@@ -1104,24 +1106,15 @@ export const OPENCODE_GO_CATALOG: OpencodeGoCatalogModel[] = [
     sendable: true,
     monthlyLimitUsd: 60, // docs usage-limits $/mes limit
   },
-  {
-    id: `${OPENCODE_GO_PREFIX}grok-4.5`,
-    name: 'Grok-4.5',
-    description:
-      'Grok generation. 500K context, responses transport (phase-2).',
-    context_length: 500000,
-    pricing: { prompt: '0.000002', completion: '0.000006' }, // api.json base tier <=200K $2 / $6 per 1M
-    transport: 'responses',
-    sendable: true,
-    priceNote: 'Deprecated upstream, sin fila en docs: limite $ mensual desconocido (UNVERIFIED, probe T3 pendiente)',
-  },
 ];
 
 /**
  * Bare ids observable but NOT listable: deprecated api.json rows with no docs
- * endpoint-table row, one api.json-only id missing from live, and two
- * live-only ids with no official metadata. Inventing them context or price is
- * forbidden — they resolve `unknown` (fail-open) until a keyed T3 probe.
+ * endpoint-table row, one api.json-only id missing from live, two
+ * live-only ids with no official metadata, and `grok-4.5` (deprecated e
+ * inalcanzable en vivo, excluido por decisión de producto T8/F-04).
+ * Inventing them context or price is forbidden — they resolve `unknown`
+ * (fail-open) until a keyed T3 probe.
  */
 export const OPENCODE_GO_LIST_EXCLUDED: ReadonlyMap<string, string> = new Map([
   ['glm-5', 'deprecated en api.json, sin fila en docs endpoint table (UNVERIFIED, probe T3 pendiente)'],
@@ -1133,6 +1126,7 @@ export const OPENCODE_GO_LIST_EXCLUDED: ReadonlyMap<string, string> = new Map([
   ['ox-alpha-free', 'deprecated en api.json ($0 "Unlimited"), ausente en live /v1/models: posible retirado (UNVERIFIED, probe T3 pendiente)'],
   ['deepseek-flash', 'sin metadata oficial (UNVERIFIED, probe T3 pendiente)'],
   ['hy3-preview', 'sin metadata oficial (UNVERIFIED, probe T3 pendiente)'],
+  ['grok-4.5', 'deprecated en api.json, inalcanzable en vivo (K3 2026-09-15: `Model is unavailable` ×3 en responses; sustituto live grok-4.6)'],
 ]);
 
 /** Per-1M-token pricing used to compute cost (Go usage frames carry no `cost` field).
@@ -1199,10 +1193,6 @@ export const OPENCODE_GO_PRICING: Record<string, OpencodeGoPrice> = {
   },
   'muse-spark-1.3-contributor': { inHit: 0.002, inMiss: 0.1, out: 0.2 },
   'muse-spark-1.2-contributor': { inHit: 0.002, inMiss: 0.1, out: 0.2 },
-  'grok-4.5': {
-    inHit: 0.3, inMiss: 2.0, out: 6.0, // api.json-only, no docs row (UNVERIFIED, probe T3 pendiente)
-    tier: { upToTokens: 200000, above: { inHit: 0.6, inMiss: 4.0, out: 12.0 } },
-  },
 };
 
 export interface OpencodeGoUsage {

@@ -4,6 +4,7 @@ import db from '../db.js';
 import { getSettingValue } from './settings.js';
 import { resolveToolsForAgent, resolveToolsFromIds, toOpenRouterTools, appendToolInstructionsIfNeeded } from '../tools/index.js';
 import { CouncilExecutor } from '../services/councilExecutor.js';
+import { selectModelView } from './chat.js';
 import { getProviderConfig, resolveProviderId, resolveAssistantHistoryContent, type ProviderId } from '../providers/index.js';
 import { isLegacyLmStudioModel, REMOVED_LMSTUDIO_MESSAGE } from '../providers/llamacpp.js';
 import { isUserAllowed } from '../codex/instanceManager.js';
@@ -363,6 +364,23 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       return { role: row.role as 'user' | 'assistant', content: row.content };
     });
 
+    // Compact-view cut (G10), same builder as chat: without it a council run
+    // after a compaction would still send the FULL pre-compaction history —
+    // and the `role:'compaction'` rows with it, which no provider accepts.
+    // Known remaining divergence from chat: these rows are `created_at`-ordered
+    // and not thread-scoped, so the cut lands on the newest checkpoint row in
+    // the conversation rather than the newest one on the visible thread.
+    const {
+      retainedRows: councilRetainedRows,
+      prefixRow: councilPrefixRow,
+      viewRows: councilViewRows,
+    } = selectModelView(history);
+    const councilHistory = [
+      ...councilRetainedRows,
+      ...(councilPrefixRow ? [councilPrefixRow] : []),
+      ...councilViewRows,
+    ];
+
     // Resolve tools for council (same logic as chat: general → settings tool_ids, else agent tools)
     const resolved =
       agent.id === 'general' && generalSettings
@@ -477,7 +495,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       // System prompt stays static (cacheable prefix); date/time goes on the current turn.
       systemPrompt: appendToolInstructionsIfNeeded(agent.system_prompt, resolvedTools),
       dateTimeContext: buildDateTimeContext(bodyTimezone),
-      messageHistory: history as Array<{ role: string; content: string }>,
+      messageHistory: councilHistory as Array<{ role: string; content: string }>,
       attachments: attachments.length > 0 ? attachments : undefined,
       pdfEngine: pdf_engine,
       tools: resolvedTools,

@@ -63,10 +63,16 @@ import {
   resolveLlamacppConfig,
   resolveLlamacppSamplingForModel,
 } from '../providers/llamacppTransport.js';
+import {
+  retentionBudgetFor,
+  selectRetainedUserMessages,
+  type RetainedMessage,
+} from '../compaction/retain.js';
 import { runCodexTurn } from '../codex/chat.js';
 import { CodexUnavailableError } from '../codex/instanceManager.js';
 import { getCachedOpenRouterSupportedEfforts } from './models.js';
 import { clampReasoningEffort } from '../../shared/reasoningEfforts.js';
+import { goReasoningKnobFor, goReasoningNoControl, goReasoningOff, planGoMessagesBudget, planGoReasoningEffort } from '../../shared/opencodeGoReasoning.js';
 import { buildDateTimeContext, injectDateTimeIntoCurrentTurn } from '../dateTimeContext.js';
 import {
   appendSkillCatalogIfNeeded,
@@ -111,7 +117,11 @@ import {
 // `{name,description,input_schema:parameters}`; no `tool_choice` (Anthropic
 // defaults to auto); no `parallel_tool_calls` (no Anthropic equivalent);
 // history `tool_calls` become `tool_use` blocks and `tool` rows become
-// `tool_result` blocks; `reasoning` never travels (ignored with log, D4).
+// `tool_result` blocks. T5 K2-GO condicionado: el toggle (+ esfuerzo/
+// presupuesto donde aplique) viaja vía `planOpencodeGoMessagesThinking`
+// (wire por familia verificado con key 2026-09-15, DERIVA-NO 2026-09-16);
+// `temperature`, tools `input_schema`, comparación y headers `x-api-key`
+// intactos.
 // ---------------------------------------------------------------------------
 
 type OpenRouterToolDef = { type: 'function'; function: { name: string; description: string; parameters: Record<string, unknown> } };
@@ -137,11 +147,72 @@ function goMessagesTextContent(content: string | unknown[] | null | undefined): 
 }
 
 /**
+ * Messages `thinking`/`output_config` planificado (T5 K2-GO condicionado,
+ * VERIFIED con key 2026-09-15, DERIVA-NO api.json 2026-09-16; vivo sin key
+ * unverified desde entonces).
+ *
+ * - `[]` (`minimax-m2.7/m2.5`, always-on del proveedor) o unknown → `{}`:
+ *   nunca se envía thinking (a `m2.7` ni siquiera `disabled` está probado).
+ * - Off → `thinking:{type:"disabled"}` en ambas familias (minimax disabled =
+ *   default 36/1; qwen disabled = off real 26/1 texto; en qwen omitir NO
+ *   apaga — default always-thinks 62/1 — así que off siempre es explícito).
+ * - Toggle + budget sin gradación (`minimax-m3`, `qwen3.6-plus`,
+ *   `qwen3.7-max/plus`) on → clásico por presencia
+ *   `thinking:{type:"enabled",budget_tokens}` (K2 minimax enabled/1024 →
+ *   thinking-path; bogus-type → enabled: solo la presencia conmuta; con
+ *   `max_tokens:1` y budget 1024 → 200, sin enforcement budget<max_tokens).
+ *   Budget = `planGoMessagesBudget` (default 8192, clamp `[1024, ceil]`;
+ *   techos 81920 / 262144 / 32768). Para `qwen3.6/3.7` el clásico viaja por
+ *   analogía de familia toggle+budget (K2 solo probeó clásico en minimax y
+ *   su rechazo en `qwen3.8-flash` adaptativo): si algún 400 lo rechaza, el
+ *   fallback es waiver para esa familia (omit+log+badge), nunca envío
+ *   parcial roto.
+ * - Adaptativo con gradación (`qwen3.8-max/flash`) on → SOLO
+ *   `output_config:{effort:<clampado>}` (K2: clásico `thinking.enabled` →
+ *   400 `{"model":"qwen3.8-flash"}`; `effort` top-level ignorado sin
+ *   validar). Clamp = `planGoReasoningEffort` (`max`→`xhigh`, nunca crudo)
+ *   validado contra la allowlist (un `want` typo cae a omit, no a 400);
+ *   on sin esfuerzo → omit (default always-thinks = on). El budget
+ *   (`reasoningMaxTokens`) no tiene wire confirmado en adaptativo → se
+ *   ignora (honesto, sin campo inventado).
+ * - `reasoning_max_tokens` viaja SOLO como budget clampado vía este planner;
+ *   ningún otro campo reasoning/effort/thinking se emite aquí.
+ */
+function planOpencodeGoMessagesThinking(
+  upstreamModel: string,
+  reasoningEnabled: boolean,
+  reasoningEffort: string | null,
+  reasoningMaxTokens: number | null,
+): Record<string, unknown> {
+  if (goReasoningNoControl(upstreamModel)) return {};
+  const knob = goReasoningKnobFor(upstreamModel);
+  if (knob === null) return {};
+  if (!reasoningEnabled) return { thinking: { type: 'disabled' } };
+  const levels = knob.effortValues;
+  if (levels !== null && levels.length > 0) {
+    if (reasoningEffort == null) return {};
+    const planned = planGoReasoningEffort(upstreamModel, reasoningEffort);
+    if (planned === null || !levels.includes(planned)) return {};
+    return { output_config: { effort: planned } };
+  }
+  const budget = planGoMessagesBudget(upstreamModel, { maxTokens: reasoningMaxTokens });
+  // Presencia sin budget: fail-safe imposible por matriz (todo toggle tiene
+  // ceil), pero K2 demuestra que la presencia sola ya conmuta — nunca omitir
+  // un on por falta de budget.
+  if (budget === null) return { thinking: { type: 'enabled' } };
+  return { thinking: { type: 'enabled', budget_tokens: budget } };
+}
+
+/**
  * Maps the chat-completions `messages` array (system + history + current turn,
  * OpenAI tool shapes) to an Anthropic `POST /messages` body. System rows fold
  * into top-level `system`; assistant `tool_calls` fold into `tool_use` blocks;
  * `tool` rows fold into `user` `tool_result` blocks; consecutive same-role
- * rows merge (Anthropic requires alternation); reasoning fields never travel.
+ * rows merge (Anthropic requires alternation). T5: the thinking wire threads
+ * the app reasoning toggle via `planOpencodeGoMessagesThinking` (K2 wire por
+ * familia); history `reasoning`/`reasoning_content` rows keep travelling as
+ * plain `content` (K2 replay: con y sin thinking 200, sin bloques exigidos —
+ * no se fabrican bloques thinking/signature).
  */
 export function buildOpencodeGoMessagesBody(opts: {
   upstreamModel: string;
@@ -150,6 +221,9 @@ export function buildOpencodeGoMessagesBody(opts: {
   toolChoice: string;
   temperature: number;
   maxTokens: number;
+  reasoningEnabled: boolean;
+  reasoningEffort: string | null;
+  reasoningMaxTokens: number | null;
 }): Record<string, unknown> {
   const systemTexts: string[] = [];
   const converted: GoMessagesOutboundMessage[] = [];
@@ -210,6 +284,10 @@ export function buildOpencodeGoMessagesBody(opts: {
     temperature: opts.temperature,
     stream: true,
   };
+  // T5 K2-GO condicionado: el thinking viaja SOLO por el wire verificado con
+  // key (ver `planOpencodeGoMessagesThinking`); `effort` top-level jamás
+  // (K2: ignorado sin validar — un typo sería no-op silencioso).
+  Object.assign(body, planOpencodeGoMessagesThinking(opts.upstreamModel, opts.reasoningEnabled, opts.reasoningEffort, opts.reasoningMaxTokens));
   if (systemTexts.length > 0) body.system = systemTexts.join('\n\n');
   if (opts.openRouterTools.length > 0 && opts.toolChoice !== 'none') {
     body.tools = opts.openRouterTools.map((t) => ({
@@ -279,11 +357,30 @@ export function mapOpencodeGoMessagesUsage(usage: OpencodeGoMessagesUsage | null
 // OpenAI function shape (`tools:[{type:'function',...}]`, same as
 // `toOpenRouterTools` output); history `tool_calls` become `function_call`
 // items and `tool` rows become `function_call_output` items; system rows fold
-// into top-level `instructions`. Cost guard: the API reasons at `high` by
-// default (280/304 output tokens for `input:"ok"` in P4), so every request
-// caps `reasoning.effort:'low'` + `max_output_tokens`; the app reasoning
-// toggle still never travels (D4 — the builder takes no effort param).
+// into top-level `instructions`. Cost guard: the API reasons at `high`/`medium`
+// by default (T3 K3: spark `high`, luna `medium` for `input:"ok"`), so every
+// request carries `reasoning:{effort:<planificado>}` + `max_output_tokens` —
+// omitting `reasoning` is forbidden (omit = burn). The effort threads the app
+// reasoning toggle via the T1 matrix (`planGoReasoningEffort`/`goReasoningOff`,
+// clamp por modelo, veredicto K3).
 // ---------------------------------------------------------------------------
+
+/**
+ * Responses `reasoning.effort` planificado (T3): nunca se omite. Off →
+ * `goReasoningOff` (luna `none`, grok floor `low`, spark floor `minimal`) con
+ * fallback `low`; on sin esfuerzo → `low`; on con esfuerzo →
+ * `planGoReasoningEffort` (clamp por matriz T1: spark `max`→`xhigh`, luna
+ * `max`→`max`). Sin retry `max→xhigh` (el clamp lo cubre).
+ */
+function planOpencodeGoResponsesEffort(
+  upstreamModel: string,
+  reasoningEnabled: boolean,
+  reasoningEffort: string | null,
+): string {
+  if (!reasoningEnabled) return goReasoningOff(upstreamModel) ?? 'low';
+  if (reasoningEffort == null) return 'low';
+  return planGoReasoningEffort(upstreamModel, reasoningEffort) ?? 'low';
+}
 
 /**
  * Maps the chat-completions `messages` array (system + history + current turn,
@@ -298,6 +395,8 @@ export function buildOpencodeGoResponsesBody(opts: {
   toolChoice: string;
   temperature: number;
   maxTokens: number;
+  reasoningEnabled: boolean;
+  reasoningEffort: string | null;
 }): Record<string, unknown> {
   const instructionTexts: string[] = [];
   const input: unknown[] = [];
@@ -338,7 +437,7 @@ export function buildOpencodeGoResponsesBody(opts: {
     model: opts.upstreamModel,
     input,
     temperature: opts.temperature,
-    reasoning: { effort: 'low' },
+    reasoning: { effort: planOpencodeGoResponsesEffort(opts.upstreamModel, opts.reasoningEnabled, opts.reasoningEffort) },
     max_output_tokens: opts.maxTokens,
     stream: true,
   };
@@ -505,6 +604,15 @@ export function excludeReservedSkillToolNames<T extends { name: string }>(
  * synthetic `{role:'user'}` prefix row (never inserted). Threads without a
  * compaction row pass through untouched.
  *
+ * Codex-style retention: the cut is not total. Up to
+ * `RETAINED_USER_MAX_TOKENS` (20 000, Codex `COMPACT_USER_MESSAGE_MAX_TOKENS`)
+ * of the most recent USER messages come back as `retainedRows`, verbatim and
+ * in chronological order. The caller places them BEFORE `prefixRow`, so the
+ * model reads: recent asks → summary → new material — Codex's ordering, where
+ * the summary is pushed last precisely because the model is trained to read it
+ * as the freshest state. Assistant prose and tool traffic stay cut; the
+ * summary is what carries them.
+ *
  * Dangling-head guard: after the cut, a leading `role='tool'` row is dropped,
  * as is a leading assistant row with non-empty `tool_calls` whose tool rows
  * were cut (no immediate `tool` rows follow it — a bare tool-calling turn
@@ -539,6 +647,7 @@ function modelViewHasToolCalls(item: ModelViewItem): boolean {
 }
 
 export function selectModelView<T extends ModelViewItem>(threadItems: T[]): {
+  retainedRows: RetainedMessage[];
   prefixRow: { role: 'user'; content: string } | null;
   viewRows: T[];
 } {
@@ -546,7 +655,7 @@ export function selectModelView<T extends ModelViewItem>(threadItems: T[]): {
   for (let i = 0; i < threadItems.length; i++) {
     if (threadItems[i]!.role === 'compaction') lastCompIdx = i;
   }
-  if (lastCompIdx < 0) return { prefixRow: null, viewRows: threadItems };
+  if (lastCompIdx < 0) return { retainedRows: [], prefixRow: null, viewRows: threadItems };
   const rawContent = (threadItems[lastCompIdx] as ModelViewItem).content;
   const prefixContent = typeof rawContent === 'string' ? rawContent : String(rawContent ?? '');
   let viewRows = threadItems.slice(lastCompIdx + 1);
@@ -570,7 +679,17 @@ export function selectModelView<T extends ModelViewItem>(threadItems: T[]): {
     }
     break;
   }
-  return { prefixRow: { role: 'user', content: prefixContent }, viewRows };
+  // Candidates are exactly the rows the cut removed (the checkpoint itself is
+  // excluded: its content travels as `prefixRow`, and older checkpoints inside
+  // the slice are skipped by the selector's summary guard). The budget is
+  // Codex's 20 000 capped by the headroom the checkpoint actually bought, so
+  // the replay can never make the view bigger than what it replaced.
+  const cutRows = threadItems.slice(0, lastCompIdx);
+  const retainedRows = selectRetainedUserMessages(
+    cutRows,
+    retentionBudgetFor(cutRows, prefixContent),
+  );
+  return { retainedRows, prefixRow: { role: 'user', content: prefixContent }, viewRows };
 }
 
 export function buildToolOutputChunkEvent(
@@ -1032,7 +1151,11 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     // indexing still targets the current user turn. (`turn_id` is selected
     // above per contract but intentionally unused: the dangling-head guard
     // keys on tool presence, never on turn equality.)
-    const { prefixRow: compactionPrefixRow, viewRows: compactViewRows } = selectModelView(history);
+    const {
+      retainedRows: compactRetainedRows,
+      prefixRow: compactionPrefixRow,
+      viewRows: compactViewRows,
+    } = selectModelView(history);
 
     // User timezone: request body (browser) overrides stored setting; invalid values are ignored
     const userTimezone =
@@ -1043,6 +1166,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     // System prompt is kept STATIC (no volatile timestamp) so it stays a cacheable prefix.
     let messages: Array<{ role: string; content?: string | unknown[] | null; tool_call_id?: string; tool_calls?: unknown[]; annotations?: unknown[] }> = [
       { role: 'system', content: agent.system_prompt },
+      ...compactRetainedRows,
       ...(compactionPrefixRow ? [compactionPrefixRow] : []),
       ...compactViewRows,
     ];
@@ -1218,6 +1342,20 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
 
     let actualModelFromResponse: string | null = null;
 
+    // Reasoning / Thinking: per-message override takes precedence over agent defaults.
+    // T3: resuelto ANTES del primer envío para threadearlo al builder responses
+    // (precedencia mensaje > agente > general intacta).
+    const reasoningOverride = reasoning as { enabled?: boolean; effort?: string; max_tokens?: number } | undefined;
+    let reasoningEnabled = !!agent.reasoning_enabled;
+    let reasoningEffort = agent.reasoning_effort || null;
+    let reasoningMaxTokens = agent.reasoning_max_tokens || null;
+
+    if (reasoningOverride) {
+      if (reasoningOverride.enabled !== undefined) reasoningEnabled = reasoningOverride.enabled;
+      if (reasoningOverride.effort !== undefined) reasoningEffort = reasoningOverride.effort;
+      if (reasoningOverride.max_tokens !== undefined) reasoningMaxTokens = reasoningOverride.max_tokens;
+    }
+
     const requestBody: Record<string, unknown> = isGoMessages
       ? buildOpencodeGoMessagesBody({
           upstreamModel,
@@ -1226,6 +1364,9 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
           toolChoice: agent.tool_choice === 'none' ? 'none' : 'auto',
           temperature: agent.temperature,
           maxTokens: agent.max_tokens,
+          reasoningEnabled,
+          reasoningEffort,
+          reasoningMaxTokens,
         })
       : isGoResponses
         ? buildOpencodeGoResponsesBody({
@@ -1235,6 +1376,8 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
             toolChoice: agent.tool_choice === 'none' ? 'none' : 'auto',
             temperature: agent.temperature,
             maxTokens: agent.max_tokens,
+            reasoningEnabled,
+            reasoningEffort,
           })
         : {
             model: upstreamModel,
@@ -1281,17 +1424,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       requestBody.plugins = [{ id: 'file-parser', pdf: { engine: pdf_engine } }];
     }
 
-    // Reasoning / Thinking: per-message override takes precedence over agent defaults
-    const reasoningOverride = reasoning as { enabled?: boolean; effort?: string; max_tokens?: number } | undefined;
-    let reasoningEnabled = !!agent.reasoning_enabled;
-    let reasoningEffort = agent.reasoning_effort || null;
-    let reasoningMaxTokens = agent.reasoning_max_tokens || null;
-
-    if (reasoningOverride) {
-      if (reasoningOverride.enabled !== undefined) reasoningEnabled = reasoningOverride.enabled;
-      if (reasoningOverride.effort !== undefined) reasoningEffort = reasoningOverride.effort;
-      if (reasoningOverride.max_tokens !== undefined) reasoningMaxTokens = reasoningOverride.max_tokens;
-    }
+    // (Resolución reasoning movida arriba, antes del primer envío, para T3.)
 
     // T2-enforce: clamp pre-flight del effort resuelto (precedencia ya
     // aplicada arriba) contra la lista del catálogo en caché. SOLO OpenRouter:
@@ -1305,6 +1438,19 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       if (clamped !== reasoningEffort) {
         console.log(`[chat] Reasoning effort clamped: requested=${reasoningEffort} applied=${clamped ?? 'omitted'} model=${upstreamModel}`);
         reasoningEffort = clamped;
+      }
+    }
+
+    // T4 K1-GO: clamp pre-vuelo del effort para el chat-transport Go (mismo
+    // formato de log que T2, marca `(go)`). Solo chat-transport (`unknown`
+    // incluido): messages/responses llevan su propio wire (builders) y la
+    // rama responses de T3 sigue intacta. `[]`/toggle-only → null (omit)
+    // con log; unknown → passthrough (fail-open, sin log).
+    if (provider.id === 'opencode-go' && !isGoMessages && !isGoResponses && reasoningEnabled && reasoningEffort !== null && reasoningEffort !== undefined) {
+      const goClamped = planGoReasoningEffort(upstreamModel, reasoningEffort);
+      if (goClamped !== reasoningEffort) {
+        console.log(`[chat] Reasoning effort clamped (go): requested=${reasoningEffort} applied=${goClamped ?? 'omitted'} model=${upstreamModel}`);
+        reasoningEffort = goClamped;
       }
     }
 
@@ -1387,12 +1533,26 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         requestBody.reasoning = buildArnictReasoning(reasoningEnabled, reasoningEffort);
       }
     } else if (provider.id === 'opencode-go') {
-      // D4/GC §5: no app reasoning field travels for Go (the toggle is
-      // ignored with a debug log). T5: the responses wire caps effort inside
-      // its own body builder (`reasoning:{effort:'low'}` + max_output_tokens),
-      // never from this toggle.
-      if (reasoningEnabled) {
-        console.log(`[chat] opencode-go reasoning ignored (phase-1 omit): model=${upstreamModel} effort=${reasoningEffort ?? 'none'}`);
+      // T4 K1-GO (VERIFIED 2026-09-15, DERIVA-NO 2026-09-16): el toggle +
+      // esfuerzo viajan al chat-transport Go vía `reasoning_effort`
+      // top-level planificado por matriz T1. K1 midió: enum de 7 valores
+      // (`bogus`→400/422 en 5/6 familias); `none`=off también fuera de hy;
+      // `thinking` no-op jamás viaja; mimo (`[]`) acepta-no-op y longcat no
+      // valida (knob ignorado) → ambos omiten con log; `unknown` fail-open.
+      // Off → `goReasoningOff` (`none` donde listado, floor donde K1 midió
+      // burn con default-sin-knob); on → effort ya clampado pre-vuelo;
+      // null → omit (default del proveedor). Solo chat-transport
+      // (`unknown` incluido): messages/responses llevan su propio wire.
+      if (!isGoMessages && !isGoResponses) {
+        const plannedGoEffort = reasoningEnabled
+          ? reasoningEffort
+          : (goReasoningOff(upstreamModel) ?? null);
+        if (plannedGoEffort) {
+          requestBody.reasoning_effort = plannedGoEffort;
+          console.log(`[chat] opencode-go reasoning_effort: model=${upstreamModel} effort=${plannedGoEffort}`);
+        } else {
+          console.log(`[chat] opencode-go reasoning omitted (no control): model=${upstreamModel} effort=${reasoningEffort ?? 'none'}`);
+        }
       }
     }
 
@@ -1952,6 +2112,8 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       if (isGoMessages) {
         // T4: re-map the OpenAI-shaped turn (system + tool_calls/tool rows from
         // the tool loop below) to the Anthropic wire shape every iteration.
+        // T5: el mismo toggle+esfuerzo+budget cada vuelta (sin drift; el wire
+        // thinking/output_config se conserva lap a lap).
         const rebuilt = buildOpencodeGoMessagesBody({
           upstreamModel,
           messages: messages as Array<{ role: string; content?: string | unknown[] | null; tool_call_id?: string; tool_calls?: unknown[] }>,
@@ -1959,15 +2121,23 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
           toolChoice: agent.tool_choice === 'none' ? 'none' : 'auto',
           temperature: agent.temperature,
           maxTokens: agent.max_tokens,
+          reasoningEnabled,
+          reasoningEffort,
+          reasoningMaxTokens,
         });
         requestBody.messages = rebuilt.messages;
+        if (rebuilt.thinking !== undefined) requestBody.thinking = rebuilt.thinking;
+        else delete requestBody.thinking;
+        if (rebuilt.output_config !== undefined) requestBody.output_config = rebuilt.output_config;
+        else delete requestBody.output_config;
         if (rebuilt.system !== undefined) requestBody.system = rebuilt.system;
         else delete requestBody.system;
         if (rebuilt.tools !== undefined) requestBody.tools = rebuilt.tools;
         else delete requestBody.tools;
       } else if (isGoResponses) {
         // T5: re-map the OpenAI-shaped turn (system + tool_calls/tool rows from
-        // the tool loop below) to Responses `input` every iteration.
+        // the tool loop below) to Responses `input` every iteration. T3:
+        // re-deriva el mismo effort cada vuelta (sin drift entre vueltas).
         const rebuilt = buildOpencodeGoResponsesBody({
           upstreamModel,
           messages: messages as Array<{ role: string; content?: string | unknown[] | null; tool_call_id?: string; tool_calls?: unknown[] }>,
@@ -1975,8 +2145,11 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
           toolChoice: agent.tool_choice === 'none' ? 'none' : 'auto',
           temperature: agent.temperature,
           maxTokens: agent.max_tokens,
+          reasoningEnabled,
+          reasoningEffort,
         });
         requestBody.input = rebuilt.input;
+        requestBody.reasoning = rebuilt.reasoning;
         if (rebuilt.instructions !== undefined) requestBody.instructions = rebuilt.instructions;
         else delete requestBody.instructions;
         if (rebuilt.tools !== undefined) requestBody.tools = rebuilt.tools;
@@ -2164,9 +2337,11 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
               if (isGoMessages) {
                 // T4 Anthropic SSE (T3 P3 literal sequence): message_start
                 // (zeros) → ping → content_block_start → content_block_delta
-                // (text_delta | input_json_delta) → content_block_stop →
-                // message_delta (stop_reason + usage, no cache_creation in
-                // stream) → message_stop → final ping {cost}.
+                // (text_delta | input_json_delta | thinking_delta) →
+                // content_block_stop → message_delta (stop_reason + usage, no
+                // cache_creation in stream) → message_stop → final ping {cost}.
+                // T5: thinking_delta acumula `reasoning_content` (misma
+                // vía SSE/draft que el resto de reasoning).
                 const evtType = typeof parsed.type === 'string' ? parsed.type : '';
                 if (evtType === 'message_start') {
                   const echoModel = parsed.message?.model;
@@ -2182,6 +2357,11 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
                       name: typeof block.name === 'string' ? block.name : undefined,
                       inputJson: '',
                     };
+                  } else if (block?.type === 'thinking' || block?.type === 'redacted_thinking') {
+                    // T5: bloques thinking del modelo con thinking activo — su
+                    // texto llega en deltas `thinking_delta` (captura abajo);
+                    // `redacted_thinking` solo trae signature (replay K2 no
+                    // exige bloques: se ignora). Nunca placeholder de tool.
                   } else if (!anthropicToolBlocks[idx]) {
                     anthropicToolBlocks[idx] = { inputJson: '' };
                   }
@@ -2189,8 +2369,17 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
                 }
                 if (evtType === 'content_block_delta') {
                   const idx = typeof parsed.index === 'number' ? parsed.index : 0;
-                  const d = parsed.delta as { text?: unknown; partial_json?: unknown } | undefined;
-                  if (d && typeof d.text === 'string' && d.text) {
+                  // T5: `thinking_delta` (`{thinking:"..."}`) captura el trace
+                  // hacia `reasoning_content` (persiste vía finalizeDraft como
+                  // el resto de reasoning); `signature_delta` se ignora (el
+                  // replay K2 preserva `content` sin reinyectar bloques).
+                  const d = parsed.delta as { type?: unknown; text?: unknown; partial_json?: unknown; thinking?: unknown } | undefined;
+                  if (d && typeof d.thinking === 'string' && d.thinking) {
+                    fullReasoning += d.thinking;
+                    ensureDraftRow();
+                    flushDraft();
+                    if (!clientDisconnected && !res.writableEnded) res.write(`data: ${JSON.stringify({ reasoning: d.thinking })}\n\n`);
+                  } else if (d && typeof d.text === 'string' && d.text) {
                     fullContent += d.text;
                     ensureDraftRow();
                     flushDraft();

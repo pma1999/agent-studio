@@ -1,14 +1,29 @@
 /**
  * Compaction prompt builder (pure, no db/network imports).
  *
- * Source of truth for wording: plans/compact-command/integration-compact.md §6.1
- * with G3 (verbatim Codex core + 9-heading order) and G2 (SUMMARY_PREFIX literal)
- * authoritative on conflict per global-constraints.md.
+ * The wire prompt is assembled from TWO upstream originals, kept VERBATIM so
+ * they can be re-diffed against their sources at any time:
+ *
+ *  - `CODEX_CORE` — byte-identical to `openai/codex@main`
+ *    `codex-rs/prompts/templates/compact/prompt.md` (425 bytes, trailing
+ *    newline stripped). Its markdown bullet list KEEPS its line breaks: an
+ *    earlier version flattened it onto one line and added a full stop.
+ *  - `TEMPLATE_HEAD` / `TEMPLATE_RULES` — byte-identical halves of
+ *    `sst/opencode@dev` `packages/core/src/session/compaction.ts`
+ *    `SUMMARY_TEMPLATE`, `<template>` tags and `Rules:` block included. The
+ *    only agent-studio addition is the `## Session Facts` section inserted
+ *    inside the template, plus one matching rule.
+ *  - `SUMMARY_UPDATE_INSTRUCTIONS` — byte-identical to the same OpenCode file;
+ *    it replaces the old hand-written `MERGE_RULES` paragraph.
+ *
+ * `scripts/test-compact-prompt.ts` pins these blocks against the upstream text.
  */
 
-export const COMPACTION_PROMPT_VERSION = 'v1';
+export const COMPACTION_PROMPT_VERSION = 'v2';
 
-/** G2 compaction-row prefix (Codex SUMMARY_PREFIX pattern, adapted). Exact literal. */
+/** G2 compaction-row prefix (Codex `SUMMARY_PREFIX` pattern, adapted to what we
+ *  actually retain: the summary plus the recent user messages replayed after
+ *  it). It is stored ON the row, so readers strip it — never change it lightly. */
 export const SUMMARY_PREFIX =
   'Another language model summarized this conversation so it could continue in a smaller context. Use the summary as prior state; the verbatim tail after it is newest. Do not duplicate completed work. Summary:\n';
 
@@ -27,73 +42,102 @@ export interface CompactionPromptVars {
   tokensBefore: number;
 }
 
-/** G3 Codex core — verbatim, do not reword. */
-const CODEX_CORE =
-  'You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task. Include: - Current progress and key decisions made - Important context, constraints, or user preferences - What remains to be done (clear next steps) - Any critical data, examples, or references needed to continue. Be concise, structured, and focused on helping the next LLM seamlessly continue the work.';
+/** Verbatim: openai/codex `codex-rs/prompts/templates/compact/prompt.md`. */
+const CODEX_CORE = `You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
 
-const PRIOR_LEAD =
-  'Prior summary (combines everything before <conversation>; it is discarded after this — anything not carried forward is lost):';
+Include:
+- Current progress and key decisions made
+- Important context, constraints, or user preferences
+- What remains to be done (clear next steps)
+- Any critical data, examples, or references needed to continue
 
-const MERGE_RULES =
-  'Merge rules: carry forward objectives, constraints, user directives, decisions, and parallel workstreams even when <conversation> omits them; on conflict, <conversation> wins — state the corrected fact, drop the old claim; move finished Active→Completed; refresh Objective and Next Move.';
+Be concise, structured, and focused on helping the next LLM seamlessly continue the work.`;
 
-// §6.1 instruction, minus the "<template>" wrapper sentences: the wire format
-// sends the template body without literal <template> tags, so referencing them
-// would be incoherent. All other normative content is kept verbatim.
-const OUTPUT_INSTRUCTION =
-  'Output exactly the Markdown structure below, keep section order, keep every section even when empty (write "(none)"). Terse bullets, not prose. Preserve exact file paths, symbols, commands, error strings, URLs, model names, and identifiers. Do not mention summarization/compaction.';
+/** Verbatim: sst/opencode `core/src/session/compaction.ts`
+ *  `SUMMARY_UPDATE_INSTRUCTIONS`. */
+const SUMMARY_UPDATE_INSTRUCTIONS = `The <prior-summary> summarizes everything that happened before the <conversation>. Construct a new summary that combines both. The <prior-summary> is discarded after this: anything you do not carry into the new summary is lost.
+
+When combining:
+- Carry forward objectives, constraints, user directives, decisions, and parallel workstreams from the <prior-summary> even when the <conversation> does not mention them. Drop only what is finished and no longer needed.
+- The <conversation> is more recent than the <prior-summary>. Where they conflict, the conversation wins: state the corrected fact and drop the old claim.
+- Add new progress, decisions, constraints, and context from the conversation.
+- Move completed work from "Active" to "Completed".
+- If a blocker has been resolved, update the summary to reflect that while keeping any details still needed to continue the work.
+- Update "Objective" and "Next Move" to reflect the current work state.`;
+
+/** Verbatim: the same file's `SUMMARY_TEMPLATE`, split in two so the
+ *  agent-studio `## Session Facts` section lands inside `<template>`. */
+const TEMPLATE_HEAD = `Output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.
+<template>
+## Objective
+- [one or two brief sentences describing what the user is trying to accomplish]
+
+## Important Details
+- [constraints/preferences, decisions and why, important facts/assumptions, exact context needed to continue, or "(none)"]
+
+## Work State
+### Completed
+- [finished work, verified facts, or changes made; otherwise "(none)"]
+
+### Active
+- [current work, partial changes, or investigation state; otherwise "(none)"]
+
+### Blocked
+- [blockers, failing commands, or unknowns; otherwise "(none)"]
+
+## Next Move
+1. [immediate concrete action, or "(none)"]
+2. [next action if known, or "(none)"]
+
+## Relevant Files
+- [file or directory path: why it matters, or "(none)"]
+`;
+const TEMPLATE_RULES = `
+
+Rules:
+- Keep every section, even when empty.
+- Use terse bullets, not prose paragraphs.
+- Preserve exact file paths, symbols, commands, error strings, URLs, and identifiers when known.
+- Do not mention the summary process or that context was compacted.`;
+
+function summaryTemplate(vars: CompactionPromptVars): string {
+  const sessionFacts = [
+    '',
+    '## Session Facts',
+    `- conversation_id: ${vars.conversationId} | model: ${vars.modelId} | provider: ${vars.provider} | compacted_at: ${vars.compactedAtIso} | messages_compacted: ${vars.messagesCompacted} | tokens_before: ${vars.tokensBefore}`,
+  ].join('\n');
+  return (
+    TEMPLATE_HEAD +
+    sessionFacts +
+    '\n</template>' +
+    TEMPLATE_RULES +
+    '\n- Reproduce the "## Session Facts" line exactly as given.'
+  );
+}
 
 /**
- * Builds the summarizer prompt: G3 Codex core verbatim followed by the §6.1
- * template body (9 headings in order, no <template> wrapper tags). The prior
- * block (lead + <prior-summary> + merge rules) is omitted entirely when
- * priorSummary is null; the focus line is omitted when focus is null/empty.
- * Every variable is substituted — no `{{...}}` remains in the output.
+ * Builds the summarizer prompt: Codex core, then the OpenCode conversation
+ * block, then (only when a prior checkpoint exists) the prior-summary block +
+ * the OpenCode merge instructions, then the optional operator-focus line, then
+ * the template. Blocks are joined with a blank line, as OpenCode does.
  */
 export function buildCompactionPrompt(vars: CompactionPromptVars): string {
-  const parts: string[] = [];
-
-  parts.push(CODEX_CORE);
-  parts.push('');
-  parts.push('Conversation to summarize:');
-  parts.push('<conversation>');
-  parts.push(vars.serializedHead);
-  parts.push('</conversation>');
+  const blocks: string[] = [
+    CODEX_CORE,
+    `Here is the conversation so far:\n\n<conversation>\n${vars.serializedHead}\n</conversation>`,
+  ];
 
   if (vars.priorSummary != null) {
-    parts.push(PRIOR_LEAD);
-    parts.push('<prior-summary>');
-    parts.push(vars.priorSummary);
-    parts.push('</prior-summary>');
-    parts.push(MERGE_RULES);
+    blocks.push(
+      `Here is the summary of the conversation before the <conversation> above:\n\n<prior-summary>\n${vars.priorSummary}\n</prior-summary>`,
+    );
+    blocks.push(SUMMARY_UPDATE_INSTRUCTIONS);
   }
 
   if (vars.focus != null && vars.focus !== '') {
-    parts.push(`Operator focus (prioritize this; compress everything else harder): ${vars.focus}`);
+    blocks.push(`Operator focus (prioritize this; compress everything else harder): ${vars.focus}`);
   }
 
-  parts.push('');
-  parts.push(OUTPUT_INSTRUCTION);
-  parts.push('## Objective');
-  parts.push('- [1–2 sentences: what the user is trying to accomplish]');
-  parts.push('## Important Details');
-  parts.push('- [constraints/preferences, decisions + why, facts/assumptions, exact context to continue, or "(none)"]');
-  parts.push('## Work State');
-  parts.push('### Completed');
-  parts.push('- [finished + verified work/changes, or "(none)"]');
-  parts.push('### Active');
-  parts.push('- [current/partial work + investigation state, or "(none)"]');
-  parts.push('### Blocked');
-  parts.push('- [blockers, failing commands, unknowns, or "(none)"]');
-  parts.push('## Next Move');
-  parts.push('1. [immediate concrete action, or "(none)"]');
-  parts.push('2. [next action if known, or "(none)"]');
-  parts.push('## Relevant Files');
-  parts.push('- [path: why it matters, or "(none)"]');
-  parts.push('## Session Facts');
-  parts.push(
-    `- conversation_id: ${vars.conversationId} | model: ${vars.modelId} | provider: ${vars.provider} | compacted_at: ${vars.compactedAtIso} | messages_compacted: ${vars.messagesCompacted} | tokens_before: ${vars.tokensBefore}`,
-  );
-
-  return parts.join('\n');
+  blocks.push(summaryTemplate(vars));
+  return blocks.join('\n\n');
 }

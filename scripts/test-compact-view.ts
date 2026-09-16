@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import os from 'node:os';
 import path from 'node:path';
 import express from 'express';
@@ -85,16 +87,16 @@ const SUMMARY = 'Another language model summarized this conversation so it could
 // Seed: 3 turns + tool pair, then a mid-thread checkpoint + post-compact turn.
 const conv = 'cv-conv-1';
 newConversation(conv);
-insertMsg({ id: 'u1', conv, role: 'user', content: 'first', parent: null, turn: 'u1' });
+insertMsg({ id: 'u1', conv, role: 'user', content: `first ask ${'q'.repeat(600)}`, parent: null, turn: 'u1' });
 insertMsg({ id: 'a1', conv, role: 'assistant', content: 'ans1', parent: 'u1', turn: 'u1' });
-insertMsg({ id: 'u2', conv, role: 'user', content: 'second', parent: 'a1', turn: 'u2' });
+insertMsg({ id: 'u2', conv, role: 'user', content: `second ask ${'q'.repeat(600)}`, parent: 'a1', turn: 'u2' });
 insertMsg({
   id: 'a2t', conv, role: 'assistant', content: '', parent: 'u2', turn: 'u2',
   toolCalls: JSON.stringify([{ id: 'tc1', type: 'function', function: { name: 'lookup', arguments: '{}' } }]),
 });
 insertMsg({ id: 't2', conv, role: 'tool', content: 'tool-out', parent: 'a2t', turn: 'u2' });
 insertMsg({ id: 'a2b', conv, role: 'assistant', content: 'done2', parent: 't2', turn: 'u2' });
-insertMsg({ id: 'u3', conv, role: 'user', content: 'third', parent: 'a2b', turn: 'u3' });
+insertMsg({ id: 'u3', conv, role: 'user', content: `third ask ${'q'.repeat(600)}`, parent: 'a2b', turn: 'u3' });
 insertMsg({ id: 'a3', conv, role: 'assistant', content: 'ans3', parent: 'u3', turn: 'u3' });
 insertMsg({ id: 'c1', conv, role: 'compaction', content: SUMMARY, parent: 'a3', turn: 'c1', meta: META(), model: 'deepseek:deepseek-v4-flash' });
 insertMsg({ id: 'u4', conv, role: 'user', content: 'fourth', parent: 'c1', turn: 'u4' });
@@ -118,6 +120,57 @@ t('system string passes through byte-identical with prefix at index 1', () => {
   assert.equal(messages[0]!.content, system);
   assert.equal((messages[1] as { content: string }).content, SUMMARY);
   assert.equal(messages.length, 3);
+});
+
+// --- selectModelView: Codex-style retention ---
+t('retained user messages come back verbatim, before the summary', () => {
+  // Sized like a real compaction: the archived turns outweigh the summary, so
+  // the headroom cap is inert and plain Codex retention applies.
+  const ask1 = `first ask ${'q'.repeat(600)}`;
+  const ask2 = `second ask ${'q'.repeat(600)}`;
+  // Assistant/tool bulk dominates, as in any real thread, so the headroom is
+  // far larger than the user text and both asks survive whole.
+  const items = [u(ask1), a('A'.repeat(8000)), u(ask2), comp(SUMMARY), u('new')];
+  const { retainedRows, prefixRow, viewRows } = selectModelView(items as never[]);
+  assert.deepEqual(
+    retainedRows.map((r: { content: string }) => r.content),
+    [ask1, ask2],
+    'both user asks are replayed, assistant prose is not',
+  );
+  // Codex ordering: recent asks -> summary -> new material.
+  const messages = [
+    { role: 'system', content: 'SYS' },
+    ...retainedRows,
+    ...(prefixRow ? [prefixRow] : []),
+    ...viewRows,
+  ];
+  assert.deepEqual(
+    messages.map((m: { role: string; content: unknown }) => `${m.role}:${String(m.content).slice(0, 10)}`),
+    ['system:SYS', 'user:first ask ', 'user:second ask', `user:${SUMMARY.slice(0, 10)}`, 'user:new'],
+  );
+});
+
+t('a thread with no checkpoint retains nothing (nothing was cut)', () => {
+  const { retainedRows } = selectModelView([u('hi'), a('yo')] as never[]);
+  assert.deepEqual(retainedRows, []);
+});
+
+t('an older checkpoint is not replayed as a retained user message', () => {
+  const one = `one ${'q'.repeat(600)}`;
+  const two = `two ${'q'.repeat(600)}`;
+  const items = [u(one), a('A'.repeat(8000)), comp('OLD-SUMMARY'), u(two), comp(SUMMARY), u('three')];
+  const { retainedRows } = selectModelView(items as never[]);
+  assert.deepEqual(
+    retainedRows.map((r: { content: string }) => r.content),
+    [one, two],
+  );
+});
+
+t('headroom cap: a thread too small to be worth compacting retains nothing', () => {
+  // The template summary alone outweighs what it archived, so replaying on top
+  // of it would only add cost. The cap is inert on real (large) threads.
+  const { retainedRows } = selectModelView([u('hi'), a('yo'), comp(SUMMARY), u('next')] as never[]);
+  assert.deepEqual(retainedRows, []);
 });
 
 // --- selectModelView: cut rule ---
@@ -177,9 +230,37 @@ t('db thread after compact exposes summary+tail only via the cut', () => {
     const r = byId.get(id)!;
     return r.role === 'compaction' ? comp(String(r.content)) : { role: String(r.role), content: r.content as string | null };
   });
-  const { prefixRow, viewRows } = selectModelView(mapped as never[]);
+  const { retainedRows, prefixRow, viewRows } = selectModelView(mapped as never[]);
   assert.equal((prefixRow as { content: string } | null)?.content, SUMMARY);
   assert.deepEqual(viewRows.map((m) => (m as { content: string }).content), ['fourth', 'ans4']);
+  // Codex retention over a real DB thread: every pre-checkpoint user turn is
+  // replayed verbatim; assistant prose and tool rows stay cut.
+  assert.deepEqual(
+    retainedRows.map((r: { content: string }) => r.content.slice(0, 10)),
+    ['first ask ', 'second ask', 'third ask '],
+  );
+});
+
+// --- call sites: the composed model view must keep Codex's order ---
+t('chat.ts spreads retained rows BEFORE the summary prefix row', () => {
+  const src = readFileSync(resolve(process.cwd(), 'server/routes/chat.ts'), 'utf8');
+  const assembly = src.slice(src.indexOf("{ role: 'system', content: agent.system_prompt },"));
+  const retained = assembly.indexOf('...compactRetainedRows,');
+  const prefix = assembly.indexOf('...(compactionPrefixRow ? [compactionPrefixRow] : []),');
+  const view = assembly.indexOf('...compactViewRows,');
+  assert.ok(retained > 0, 'chat.ts no longer spreads compactRetainedRows');
+  assert.ok(retained < prefix && prefix < view, 'order must be retained -> summary -> new material');
+});
+
+t('chatCouncil.ts applies the same compact view in the same order', () => {
+  const src = readFileSync(resolve(process.cwd(), 'server/routes/chatCouncil.ts'), 'utf8');
+  assert.ok(src.includes('selectModelView(history)'), 'council must cut the compacted history');
+  const assembly = src.slice(src.indexOf('const councilHistory = ['));
+  const retained = assembly.indexOf('...councilRetainedRows,');
+  const prefix = assembly.indexOf('...(councilPrefixRow ? [councilPrefixRow] : []),');
+  const view = assembly.indexOf('...councilViewRows,');
+  assert.ok(retained >= 0 && retained < prefix && prefix < view, 'council order must match chat');
+  assert.ok(src.includes('messageHistory: councilHistory'), 'council must send the cut history');
 });
 
 t('undo: moving active_leaf_id back to pre_compact_leaf_id restores the full pre-compact view', () => {

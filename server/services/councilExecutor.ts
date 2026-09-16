@@ -45,6 +45,7 @@ import db from '../db.js';
 import { getSettingValue } from '../routes/settings.js';
 import { getAgentCapabilities } from '../agentRelay/registry.js';
 import { isLegacyLmStudioModel, REMOVED_LMSTUDIO_MESSAGE } from '../providers/llamacpp.js';
+import { goReasoningKnobFor, goReasoningNoControl, goReasoningOff, planGoMessagesBudget, planGoReasoningEffort } from '../../shared/opencodeGoReasoning.js';
 
 import { llamacppFetch, LLAMACPP_CAPABILITY_ERROR, resolveLlamacppSamplingForModel } from '../providers/llamacppTransport.js';
 
@@ -66,7 +67,10 @@ const MAX_MEMBER_CONTENT_FOR_COMPARISON = 2800; // chars per member to stay with
 // `{type:'function',function:{name,description,parameters}}` →
 // `{name,description,input_schema:parameters}` (sin `tool_choice` ni
 // `parallel_tool_calls`); `tool_calls`→`tool_use`, `tool`→`tool_result`;
-// `reasoning` nunca viaja (se ignora, D4).
+// T5 K2-GO condicionado: el toggle (+ esfuerzo/presupuesto donde aplique)
+// viaja vía `planCouncilGoMessagesThinking` (mismo contrato que el planner
+// de chat.ts); `temperature`, tools `input_schema` y headers `x-api-key`
+// intactos.
 // ---------------------------------------------------------------------------
 
 type CouncilOpenRouterToolDef = { type: 'function'; function: { name: string; description: string; parameters: Record<string, unknown> } };
@@ -99,11 +103,41 @@ interface CouncilGoMessagesUsage {
 }
 
 /**
+ * Messages `thinking`/`output_config` planificado (T5, mismo contrato que
+ * `planOpencodeGoMessagesThinking` en chat.ts — ver su comentario para el
+ * wire K2 por familia): `[]`/unknown → omit; off → `disabled`; toggle+budget
+ * on → clásico `thinking:{enabled,budget_tokens}`; adaptativo on →
+ * `output_config:{effort}` clampado y validado (on sin esfuerzo → omit).
+ */
+function planCouncilGoMessagesThinking(
+  upstreamModel: string,
+  reasoningEnabled: boolean,
+  reasoningEffort: string | null,
+  reasoningMaxTokens: number | null,
+): Record<string, unknown> {
+  if (goReasoningNoControl(upstreamModel)) return {};
+  const knob = goReasoningKnobFor(upstreamModel);
+  if (knob === null) return {};
+  if (!reasoningEnabled) return { thinking: { type: 'disabled' } };
+  const levels = knob.effortValues;
+  if (levels !== null && levels.length > 0) {
+    if (reasoningEffort == null) return {};
+    const planned = planGoReasoningEffort(upstreamModel, reasoningEffort);
+    if (planned === null || !levels.includes(planned)) return {};
+    return { output_config: { effort: planned } };
+  }
+  const budget = planGoMessagesBudget(upstreamModel, { maxTokens: reasoningMaxTokens });
+  if (budget === null) return { thinking: { type: 'enabled' } };
+  return { thinking: { type: 'enabled', budget_tokens: budget } };
+}
+
+/**
  * Maps the chat-completions `messages` array to an Anthropic `POST /messages`
  * body (same contract as `buildOpencodeGoMessagesBody` in chat.ts): system
  * rows fold into top-level `system`, assistant `tool_calls` into `tool_use`
  * blocks, `tool` rows into `user` `tool_result` blocks, consecutive same-role
- * rows merge; reasoning fields never travel.
+ * rows merge; history reasoning rows keep travelling as plain `content` (K2
+ * replay sin bloques exigidos — no se fabrican thinking/signature).
  */
 function buildCouncilGoMessagesBody(opts: {
   upstreamModel: string;
@@ -112,6 +146,9 @@ function buildCouncilGoMessagesBody(opts: {
   includeTools: boolean;
   temperature: number;
   maxTokens: number;
+  reasoningEnabled: boolean;
+  reasoningEffort: string | null;
+  reasoningMaxTokens: number | null;
 }): Record<string, unknown> {
   const systemTexts: string[] = [];
   const converted: Array<{ role: string; content: unknown }> = [];
@@ -171,6 +208,8 @@ function buildCouncilGoMessagesBody(opts: {
     temperature: opts.temperature,
     stream: true,
   };
+  // T5: mismo wire K2 que el builder de chat (nunca `effort` top-level).
+  Object.assign(body, planCouncilGoMessagesThinking(opts.upstreamModel, opts.reasoningEnabled, opts.reasoningEffort, opts.reasoningMaxTokens));
   if (systemTexts.length > 0) body.system = systemTexts.join('\n\n');
   if (opts.includeTools && opts.openRouterTools.length > 0) {
     body.tools = opts.openRouterTools.map((t) => ({
@@ -227,9 +266,45 @@ function mapCouncilGoMessagesUsage(usage: CouncilGoMessagesUsage | null | undefi
 // con `model` bare + `input` + `stream`, `Bearer` solo (sin `x-api-key`, sin
 // `anthropic-version`) + `x-opencode-session`. Tools en forma función OpenAI
 // nativa; `tool_calls`→`function_call`, `tool`→`function_call_output`;
-// `system`→`instructions`. `reasoning.effort:'low'` + `max_output_tokens`
-// acotan el burn de `high`-por-defecto (T3); el toggle nunca viaja (D4).
+// `system`→`instructions`. `reasoning:{effort:<planificado>}` +
+// `max_output_tokens` acotan el burn de `high`/`medium`-por-defecto (T3 K3);
+// omitir `reasoning` está prohibido. El effort thread-ea el toggle vía
+// `resolveCouncilReasoning` + matriz T1 (réplica del sender de chat.ts).
 // ---------------------------------------------------------------------------
+
+/**
+ * Responses `reasoning.effort` planificado (T3, mismo contrato que
+ * `planOpencodeGoResponsesEffort` en chat.ts): nunca se omite. Off →
+ * `goReasoningOff` con fallback `low`; on sin esfuerzo → `low`; on con
+ * esfuerzo → `planGoReasoningEffort` (clamp por matriz T1). Sin retry.
+ */
+function planCouncilGoResponsesEffort(
+  upstreamModel: string,
+  reasoningEnabled: boolean,
+  reasoningEffort: string | null,
+): string {
+  if (!reasoningEnabled) return goReasoningOff(upstreamModel) ?? 'low';
+  if (reasoningEffort == null) return 'low';
+  return planGoReasoningEffort(upstreamModel, reasoningEffort) ?? 'low';
+}
+
+/**
+ * Chat `reasoning_effort` planificado (T4 K1-GO, mismo contrato que el arm
+ * de chat.ts): off → `goReasoningOff` (`none` donde listado, floor donde K1
+ * midió burn, `null` sin control); on sin esfuerzo → `null` (omit: default
+ * del proveedor); on con esfuerzo → `planGoReasoningEffort` (clamp por
+ * matriz T1; unknown passthrough). `null` = omitir con log (`thinking`
+ * jamás viaja).
+ */
+function planCouncilGoChatEffort(
+  upstreamModel: string,
+  reasoningEnabled: boolean,
+  reasoningEffort: string | null,
+): string | null {
+  if (!reasoningEnabled) return goReasoningOff(upstreamModel);
+  if (reasoningEffort == null) return null;
+  return planGoReasoningEffort(upstreamModel, reasoningEffort);
+}
 
 /**
  * Maps the chat-completions `messages` array to a Responses `POST /responses`
@@ -242,6 +317,8 @@ function buildCouncilGoResponsesBody(opts: {
   includeTools: boolean;
   temperature: number;
   maxTokens: number;
+  reasoningEnabled: boolean;
+  reasoningEffort: string | null;
 }): Record<string, unknown> {
   const instructionTexts: string[] = [];
   const input: unknown[] = [];
@@ -282,7 +359,7 @@ function buildCouncilGoResponsesBody(opts: {
     model: opts.upstreamModel,
     input,
     temperature: opts.temperature,
-    reasoning: { effort: 'low' },
+    reasoning: { effort: planCouncilGoResponsesEffort(opts.upstreamModel, opts.reasoningEnabled, opts.reasoningEffort) },
     max_output_tokens: opts.maxTokens,
     stream: true,
   };
@@ -794,6 +871,11 @@ export class CouncilExecutor {
     const resolvedTools = options.tools || [];
     const openRouterTools = toOpenRouterTools(resolvedTools);
 
+    // T3: el toggle+esfuerzo del council viaja al builder responses (miembro +
+    // síntesis vía builders; cada vuelta del tool-loop re-deriva con los
+    // mismos params).
+    const councilReasoning = this.resolveCouncilReasoning(options.conversationId, options.userId);
+
     const requestBody: Record<string, unknown> = isGoMessages
       ? buildCouncilGoMessagesBody({
           upstreamModel: ep.upstreamModel,
@@ -802,6 +884,12 @@ export class CouncilExecutor {
           includeTools: true,
           temperature: 0.7,
           maxTokens: 4096,
+          reasoningEnabled: councilReasoning.enabled,
+          reasoningEffort: councilReasoning.effort,
+          // `resolveCouncilReasoning` no lleva max_tokens por restricción
+          // global: el council presupuesta el default (8192) cuando el
+          // toggle está on.
+          reasoningMaxTokens: null,
         })
       : isGoResponses
         ? buildCouncilGoResponsesBody({
@@ -811,6 +899,8 @@ export class CouncilExecutor {
             includeTools: true,
             temperature: 0.7,
             maxTokens: 4096,
+            reasoningEnabled: councilReasoning.enabled,
+            reasoningEffort: councilReasoning.effort,
           })
         : {
             model: ep.upstreamModel,
@@ -836,15 +926,31 @@ export class CouncilExecutor {
       requestBody.reasoning = buildArnictReasoning(reasoning.enabled, reasoning.effort);
     }
     if (ep.provider.id === 'opencode-go') {
-      // T5: both phase-2 transports send (`messages` via the T4 Anthropic
-      // sender, `responses` via the Responses sender); 'unknown' ids fail
-      // open below (GC §3). No reasoning arm: the toggle is ignored, never
-      // sent (GC §4/§5, D4).
+      // T4 K1-GO: el chat-transport (`unknown` incluido, fail-open) lleva el
+      // mismo arm que chat (`reasoning_effort` top-level planificado por
+      // matriz T1 vía `resolveCouncilReasoning`; off → `goReasoningOff`,
+      // `[]`/toggle-only → omit con log; `thinking` jamás viaja).
+      // `messages`/`responses` llevan su propio wire (builders); la
+      // comparación sigue sin reasoning (M7). El campo top-level sobrevive
+      // al tool-loop (el loop solo re-escribe messages/tools en este
+      // transporte).
       // Usage frame for static cost accounting (GC §6). T4: `messages` carries
       // its usage inside `message_delta` (+ final `ping` cost); T5:
       // `responses` inside `response.completed` (+ final `ping` cost) — no
       // `stream_options` on either wire shape.
-      if (!isGoMessages && !isGoResponses) requestBody.stream_options = { include_usage: true };
+      if (!isGoMessages && !isGoResponses) {
+        requestBody.stream_options = { include_usage: true };
+        const plannedGoEffort = planCouncilGoChatEffort(ep.upstreamModel, councilReasoning.enabled, councilReasoning.effort);
+        if (councilReasoning.enabled && councilReasoning.effort != null && plannedGoEffort !== councilReasoning.effort) {
+          console.log(`[council] Reasoning effort clamped (go): requested=${councilReasoning.effort} applied=${plannedGoEffort ?? 'omitted'} model=${ep.upstreamModel}`);
+        }
+        if (plannedGoEffort) {
+          requestBody.reasoning_effort = plannedGoEffort;
+          console.log(`[council] opencode-go reasoning_effort: model=${ep.upstreamModel} effort=${plannedGoEffort}`);
+        } else {
+          console.log(`[council] opencode-go reasoning omitted (no control): model=${ep.upstreamModel} effort=${councilReasoning.effort ?? 'none'}`);
+        }
+      }
     }
     // §10 (+ Increment 2d): council members share the chat sampling resolver —
     // the fixed temp 0.7 above is superseded for llamacpp arms by resolution
@@ -902,6 +1008,8 @@ export class CouncilExecutor {
       if (isGoMessages) {
         // T4: re-map the OpenAI-shaped turn (tool_calls/tool rows appended
         // below) to the Anthropic wire shape every lap around the tool loop.
+        // T5: mismo toggle+esfuerzo cada vuelta (el wire thinking/output_config
+        // se conserva lap a lap; budget default por restricción global).
         const rebuilt = buildCouncilGoMessagesBody({
           upstreamModel: ep.upstreamModel,
           messages,
@@ -909,14 +1017,22 @@ export class CouncilExecutor {
           includeTools: true,
           temperature: 0.7,
           maxTokens: 4096,
+          reasoningEnabled: councilReasoning.enabled,
+          reasoningEffort: councilReasoning.effort,
+          reasoningMaxTokens: null,
         });
         requestBody.messages = rebuilt.messages;
+        if (rebuilt.thinking !== undefined) requestBody.thinking = rebuilt.thinking;
+        else delete requestBody.thinking;
+        if (rebuilt.output_config !== undefined) requestBody.output_config = rebuilt.output_config;
+        else delete requestBody.output_config;
         if (rebuilt.system !== undefined) requestBody.system = rebuilt.system;
         else delete requestBody.system;
         if (rebuilt.tools !== undefined) requestBody.tools = rebuilt.tools;
         else delete requestBody.tools;
       } else if (isGoResponses) {
         // T5: re-map the OpenAI-shaped turn to Responses `input` every lap.
+        // T3: re-deriva el mismo effort cada vuelta (sin drift entre vueltas).
         const rebuilt = buildCouncilGoResponsesBody({
           upstreamModel: ep.upstreamModel,
           messages,
@@ -924,8 +1040,11 @@ export class CouncilExecutor {
           includeTools: true,
           temperature: 0.7,
           maxTokens: 4096,
+          reasoningEnabled: councilReasoning.enabled,
+          reasoningEffort: councilReasoning.effort,
         });
         requestBody.input = rebuilt.input;
+        requestBody.reasoning = rebuilt.reasoning;
         if (rebuilt.instructions !== undefined) requestBody.instructions = rebuilt.instructions;
         else delete requestBody.instructions;
         if (rebuilt.tools !== undefined) requestBody.tools = rebuilt.tools;
@@ -1029,6 +1148,7 @@ export class CouncilExecutor {
                 // content; input_json_delta accumulates tool args;
                 // message_delta carries stop_reason + usage (no
                 // cache_creation in stream); final ping carries cost.
+                // T5: thinking_delta appends reasoningContent.
                 const evtType = typeof parsed.type === 'string' ? parsed.type : '';
                 if (evtType === 'content_block_start') {
                   const idx = typeof parsed.index === 'number' ? parsed.index : 0;
@@ -1039,6 +1159,10 @@ export class CouncilExecutor {
                       name: typeof block.name === 'string' ? block.name : undefined,
                       inputJson: '',
                     };
+                  } else if (block?.type === 'thinking' || block?.type === 'redacted_thinking') {
+                    // T5: thinking del modelo (texto en `thinking_delta`;
+                    // `redacted_thinking` solo signature, ignorada: el replay
+                    // K2 no exige bloques). Nunca placeholder de tool.
                   } else if (!councilToolBlocks[idx]) {
                     councilToolBlocks[idx] = { inputJson: '' };
                   }
@@ -1046,8 +1170,13 @@ export class CouncilExecutor {
                 }
                 if (evtType === 'content_block_delta') {
                   const idx = typeof parsed.index === 'number' ? parsed.index : 0;
-                  const d = parsed.delta as { text?: unknown; partial_json?: unknown } | undefined;
-                  if (d && typeof d.text === 'string' && d.text) {
+                  // T5: `thinking_delta` captura el trace hacia
+                  // `reasoningContent` del miembro (misma columna
+                  // `reasoning_content` en persistencia de chat).
+                  const d = parsed.delta as { text?: unknown; partial_json?: unknown; thinking?: unknown } | undefined;
+                  if (d && typeof d.thinking === 'string' && d.thinking) {
+                    fullReasoning += d.thinking;
+                  } else if (d && typeof d.text === 'string' && d.text) {
                     fullContent += d.text;
                   } else if (d && typeof d.partial_json === 'string' && d.partial_json) {
                     if (!councilToolBlocks[idx]) councilToolBlocks[idx] = { inputJson: '' };
@@ -1481,6 +1610,8 @@ export class CouncilExecutor {
       { role: 'system', content: 'You are a synthesis expert. Your task is to analyze multiple AI model responses and create a unified, comprehensive answer.' },
       { role: 'user', content: synthesisPrompt },
     ];
+    // T3: la síntesis thread-ea el mismo toggle+esfuerzo que los miembros.
+    const synthesisReasoning = this.resolveCouncilReasoning(options.conversationId, options.userId);
     const requestBody: Record<string, unknown> = isGoMessages
       ? buildCouncilGoMessagesBody({
           upstreamModel: ep.upstreamModel,
@@ -1489,6 +1620,9 @@ export class CouncilExecutor {
           includeTools: false,
           temperature: 0.7,
           maxTokens: 4096,
+          reasoningEnabled: synthesisReasoning.enabled,
+          reasoningEffort: synthesisReasoning.effort,
+          reasoningMaxTokens: null,
         })
       : isGoResponses
         ? buildCouncilGoResponsesBody({
@@ -1498,6 +1632,8 @@ export class CouncilExecutor {
             includeTools: false,
             temperature: 0.7,
             maxTokens: 4096,
+            reasoningEnabled: synthesisReasoning.enabled,
+            reasoningEffort: synthesisReasoning.effort,
           })
         : {
             model: ep.upstreamModel,
@@ -1540,13 +1676,29 @@ export class CouncilExecutor {
       requestBody.reasoning = buildArnictReasoning(reasoning.enabled, reasoning.effort);
     }
     if (ep.provider.id === 'opencode-go') {
-      // Same relay contract as member bodies: both phase-2 transports send
-      // (`messages` via the T4 sender, `responses` via the T5 sender).
-      // No reasoning arm: the toggle is ignored, never sent (GC §4/§5, D4).
+      // Same relay contract as member bodies (T4 K1-GO): el chat-transport
+      // (`unknown` incluido, fail-open) lleva `reasoning_effort` top-level
+      // planificado por matriz T1 vía `resolveCouncilReasoning`; off →
+      // `goReasoningOff`, `[]`/toggle-only → omit con log. `messages` via
+      // the T4 sender, `responses` via the T5 sender.
+      // T3: `responses` lleva el effort planificado desde su builder (nunca
+      // omitido).
       // Usage frame for static cost (GC §6); `messages` carries its usage in
       // `message_delta` (+ final `ping` cost), `responses` in
       // `response.completed` (+ final `ping` cost) — no `stream_options`.
-      if (!isGoMessages && !isGoResponses) requestBody.stream_options = { include_usage: true };
+      if (!isGoMessages && !isGoResponses) {
+        requestBody.stream_options = { include_usage: true };
+        const plannedGoEffort = planCouncilGoChatEffort(ep.upstreamModel, synthesisReasoning.enabled, synthesisReasoning.effort);
+        if (synthesisReasoning.enabled && synthesisReasoning.effort != null && plannedGoEffort !== synthesisReasoning.effort) {
+          console.log(`[council] Reasoning effort clamped (go): requested=${synthesisReasoning.effort} applied=${plannedGoEffort ?? 'omitted'} model=${ep.upstreamModel}`);
+        }
+        if (plannedGoEffort) {
+          requestBody.reasoning_effort = plannedGoEffort;
+          console.log(`[council] opencode-go reasoning_effort: model=${ep.upstreamModel} effort=${plannedGoEffort}`);
+        } else {
+          console.log(`[council] opencode-go reasoning omitted (no control): model=${ep.upstreamModel} effort=${synthesisReasoning.effort ?? 'none'}`);
+        }
+      }
     }
 
     // Notify synthesis start
@@ -1651,10 +1803,15 @@ export class CouncilExecutor {
               if (isGoMessages) {
                 // T4 Anthropic SSE (T3 P3 literals): text_delta appends
                 // content; message_delta carries usage (no cache_creation in
-                // stream); final ping carries cost.
+                // stream); final ping carries cost. T5: thinking_delta appends
+                // reasoningContent (misma columna que el resto de reasoning).
                 const evtType = typeof parsed.type === 'string' ? parsed.type : '';
                 if (evtType === 'content_block_delta') {
-                  const d = parsed.delta as { text?: unknown } | undefined;
+                  const d = parsed.delta as { text?: unknown; thinking?: unknown } | undefined;
+                  if (d && typeof d.thinking === 'string' && d.thinking) {
+                    fullReasoning += d.thinking;
+                    continue;
+                  }
                   if (d && typeof d.text === 'string' && d.text) {
                     fullContent += d.text;
                     options.onSynthesisChunk(d.text);

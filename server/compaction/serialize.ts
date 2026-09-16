@@ -28,8 +28,6 @@ export interface CompactRow {
 
 /** G5: tool-output cut threshold (chars). */
 export const TOOL_OUTPUT_MAX_CHARS = 2000;
-/** Assistant tool-call `arguments` truncation threshold (chars). */
-export const TOOL_ARGS_MAX_CHARS = 500;
 
 /** G3: canonical template headings in order (also the `missing` report vocabulary). */
 const TEMPLATE_HEADINGS = [
@@ -146,11 +144,12 @@ function parseToolCalls(raw: string | null | undefined): ParsedToolCall[] {
     for (const tc of parsed) {
       const fn = (tc as { function?: { name?: unknown; arguments?: unknown } } | null)?.function;
       if (!fn || typeof fn.name !== 'string' || !fn.name) continue;
-      const args = typeof fn.arguments === 'string' ? fn.arguments : '';
-      out.push({
-        name: fn.name,
-        args: args.length > TOOL_ARGS_MAX_CHARS ? `${args.slice(0, TOOL_ARGS_MAX_CHARS)}...` : args,
-      });
+      // Arguments travel WHOLE, like OpenCode's serializer
+      // (`core/src/session/compaction.ts`: the tool input is stringified with
+      // no cut). For write/edit-style tools the arguments ARE the content that
+      // was written — the one thing the summary most needs to preserve. Only
+      // tool OUTPUT is cut (2000 chars, same threshold as OpenCode).
+      out.push({ name: fn.name, args: typeof fn.arguments === 'string' ? fn.arguments : '' });
     }
     return out;
   } catch {

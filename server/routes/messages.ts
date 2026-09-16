@@ -5,6 +5,7 @@ import { parseProviderRoutingConfig } from '../providerRouting.js';
 import { buildThreadIds } from '../messageTree.js';
 import { estimateTokens } from '../compaction/serialize.js';
 import { resolveWindow, SUGGEST_PCT } from '../compaction/policy.js';
+import { retentionBudgetFor, selectRetainedUserMessages } from '../compaction/retain.js';
 import { getSettingValue } from './settings.js';
 import {
   resolveToolsForAgent,
@@ -105,6 +106,8 @@ export interface ContextEstimateInput {
   systemPrompt: string;
   /** Stored compaction content verbatim (prefix + template), or null when no checkpoint. */
   summaryContent: string | null;
+  /** Codex-style retained user messages replayed before the summary (G10). */
+  retainedMessages?: readonly string[];
   /** Tail rows of the CURRENT model view (after the last checkpoint, or the full thread). */
   tailRows: ContextEstimateTailRow[];
   /** `JSON.stringify` of the resolved tool definitions for this conversation. */
@@ -131,6 +134,7 @@ export interface ContextEstimate {
 export function buildContextEstimate(input: ContextEstimateInput): ContextEstimate {
   let tokens = estimateTokens(input.systemPrompt ?? '');
   if (input.summaryContent) tokens += estimateTokens(input.summaryContent);
+  for (const retained of input.retainedMessages ?? []) tokens += estimateTokens(retained);
   for (const row of input.tailRows) {
     let contentText: string;
     if (typeof row.content === 'string') {
@@ -250,6 +254,20 @@ router.get('/:id/messages', async (req: AuthRequest, res: Response) => {
       }
       const summaryContent =
         lastCompIdx >= 0 ? String((threadRows[lastCompIdx] as Record<string, unknown>).content ?? '') : null;
+      // What the model actually receives also includes the Codex-style retained
+      // user messages (same selector as the chat builder), so the advisory must
+      // count them or it under-reports right after a compaction.
+      const retainCandidates =
+        lastCompIdx >= 0
+          ? threadRows.slice(0, lastCompIdx).map((r) => ({ role: String(r.role), content: r.content }))
+          : [];
+      const retainedMessages =
+        lastCompIdx >= 0
+          ? selectRetainedUserMessages(
+              retainCandidates,
+              retentionBudgetFor(retainCandidates, summaryContent ?? ''),
+            ).map((m) => m.content)
+          : [];
       const tailRows = (lastCompIdx >= 0 ? threadRows.slice(lastCompIdx + 1) : threadRows).map((r) => ({
         content: r.content as unknown,
         tool_calls: (r.tool_calls as string | null) ?? null,
@@ -307,6 +325,7 @@ router.get('/:id/messages', async (req: AuthRequest, res: Response) => {
       contextEstimate = buildContextEstimate({
         systemPrompt,
         summaryContent,
+        retainedMessages,
         tailRows,
         toolsJson,
         effectiveModel: effectiveModel ?? '',
