@@ -355,7 +355,7 @@ export function resolveLlamacppSamplingForModel(
 // Capability gate (§2 — fires in EVERY entry point)
 // ---------------------------------------------------------------------------
 
-function hasLlamacppCapability(userId: string): boolean {
+export function hasLlamacppCapability(userId: string): boolean {
   return getAgentCapabilities(userId)?.includes(LLAMACPP_CAPABILITY) ?? false;
 }
 

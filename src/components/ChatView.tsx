@@ -20,10 +20,11 @@ import { ProviderRoutingSelector } from './ProviderRoutingSelector';
 import { ConversationToolsSelector } from './ConversationToolsSelector';
 import { ConversationSkillsSelector } from './ConversationSkillsSelector';
 import { conversationsApi, skillsApi, agentPairingApi, agentUploadsApi, settingsApi } from '../api/client';
-import { useOpenRouterModels } from '../hooks/useOpenRouterModels';
-import { clampReasoningEffort, filterSupportedEfforts, lookupSupportedEfforts } from '../../shared/reasoningEfforts';
+import { useCatalogModel } from '../hooks/useModelCatalog';
+import { ReasoningControl } from './reasoning/ReasoningControl';
+import { triggerLabel } from './reasoning/reasoningCopy';
 import { formatModelId } from '../utils/modelUtils';
-import { isLlamaCppModel, stripLlamaCppPrefix } from '../utils/providers';
+import { PROVIDER_UI, isOfProvider, providerOfModelId, upstreamIdOf } from '../utils/providers';
 import { effectiveReasoningBudgetV2, LLAMACPP_PRESET_META, overridesForKey, parseLlamaCppActivePreset, parseLlamaCppPresetsRow } from '../utils/llamacppKnobs';
 import { PremiumMentionInput } from './ui/PremiumMentionInput';
 import { Sheet } from './ui/Sheet';
@@ -81,15 +82,6 @@ const PDF_ENGINE_OPTIONS: { value: '' | PDFEngine; label: string; title: string 
   { value: 'pdf-text', label: 'Text', title: 'Best for text PDFs (free)' },
   { value: 'mistral-ocr', label: 'OCR', title: 'Scanned docs (may have cost)' },
   { value: 'native', label: 'Native', title: 'Model-native when supported' },
-];
-
-const EFFORT_OPTIONS: { value: ReasoningEffort; label: string; short: string }[] = [
-  { value: 'minimal', label: 'Minimal', short: 'Min' },
-  { value: 'low', label: 'Low', short: 'Low' },
-  { value: 'medium', label: 'Medium', short: 'Med' },
-  { value: 'high', label: 'High', short: 'High' },
-  { value: 'xhigh', label: 'Maximum', short: 'Max' },
-  { value: 'max', label: 'Ultra', short: 'Ultra' },
 ];
 
 const BUILTIN_TOOL_NAMES = new Set(['web_search', 'get_current_time', 'web_fetch', 'run_command', 'read_file', 'write_file', 'edit_file', 'delete_file', 'list_directory']);
@@ -538,7 +530,6 @@ export function ChatView() {
   }, [reasoningOverride, agent, isGeneralChat, generalChatSettings]);
 
   const reasoningActive = effectiveReasoning.enabled;
-  const currentEffort = effectiveReasoning.effort || 'medium';
 
   // D5 honesty (Increment 2): when the chat runs on a llama.cpp model, the
   // persisted launch config at resolution v2 (defaults ⊕ active preset ⊕ model
@@ -547,29 +538,35 @@ export function ChatView() {
   // the toggle; -1 (unlimited) renders no hint at all.
   const chatModelId = effectiveConversationModel ?? defaultModelForChat;
   const chatModelShort = formatModelId(chatModelId);
-  // Per-model effort filter (T3, UI-only): cached catalog, no new requests, no payload change.
-  const { models: openRouterModels, loading: openRouterModelsLoading, error: openRouterModelsError } = useOpenRouterModels();
-  const supportedChatEfforts = useMemo(() => {
-    if (openRouterModelsLoading || openRouterModelsError) return null;
-    return filterSupportedEfforts(lookupSupportedEfforts(openRouterModels, chatModelId));
-  }, [openRouterModels, openRouterModelsLoading, openRouterModelsError, chatModelId]);
-  // Hint when the current effort does not apply; fallback mirrors the server clamp.
-  const chatEffortHint = useMemo(() => {
-    if (currentEffort === 'none') return null;
-    if (supportedChatEfforts === null) return null;
-    if (supportedChatEfforts.includes(currentEffort)) return null;
-    const fallback = clampReasoningEffort(currentEffort, supportedChatEfforts);
-    const currentLabel = EFFORT_OPTIONS.find((o) => o.value === currentEffort)?.label ?? currentEffort;
-    const fallbackLabel = fallback == null
-      ? null
-      : EFFORT_OPTIONS.find((o) => o.value === fallback)?.label ?? null;
-    if (fallback === null || fallbackLabel === null) {
-      return `"${currentLabel}" isn't supported by ${chatModelShort} — sending without effort.`;
-    }
-    return `"${currentLabel}" isn't supported by ${chatModelShort} — sending ${fallbackLabel}.`;
-  }, [supportedChatEfforts, currentEffort, chatModelShort]);
-  const chatModelIsLlamaCpp = isLlamaCppModel(chatModelId);
-  const chatModelKey = chatModelIsLlamaCpp ? stripLlamaCppPrefix(chatModelId) : null;
+  // What this model actually offers. Unlisted ids resolve to an unknown
+  // capability, which keeps every level on offer rather than hiding them.
+  const { model: chatCatalogModel, reasoning: chatCapability } = useCatalogModel(chatModelId);
+  const chatModelName = chatCatalogModel?.name ?? chatModelShort;
+  const chatProviderLabel = PROVIDER_UI[providerOfModelId(chatModelId)].label;
+  const reasoningValue = useMemo(
+    () => ({
+      enabled: !!effectiveReasoning.enabled,
+      level: effectiveReasoning.effort ?? null,
+      budget: effectiveReasoning.max_tokens ?? null,
+    }),
+    [effectiveReasoning],
+  );
+  const setReasoningValue = useCallback(
+    (next: { enabled: boolean; level: string | null; budget: number | null }) => {
+      setReasoningOverride({
+        enabled: next.enabled,
+        effort: (next.level ?? undefined) as ReasoningEffort | undefined,
+        max_tokens: next.budget ?? undefined,
+      });
+    },
+    [setReasoningOverride],
+  );
+  const reasoningTrigger = useMemo(
+    () => triggerLabel(chatCapability, { enabled: reasoningValue.enabled, level: reasoningValue.level }),
+    [chatCapability, reasoningValue],
+  );
+  const chatModelIsLlamaCpp = isOfProvider(chatModelId, 'llamacpp');
+  const chatModelKey = chatModelIsLlamaCpp ? upstreamIdOf(chatModelId) : null;
   const [llamacppBudgetHint, setLlamacppBudgetHint] = useState<{ budget: number; source: string } | null>(null);
   useEffect(() => {
     if (!chatModelIsLlamaCpp) {
@@ -654,23 +651,6 @@ export function ChatView() {
     document.addEventListener('mousedown', handleClick);
     return () => document.removeEventListener('mousedown', handleClick);
   }, [showReasoningPopover]);
-
-  const toggleReasoning = useCallback(() => {
-    if (reasoningActive) {
-      setReasoningOverride({ enabled: false });
-    } else {
-      const defaultEffort = agent?.reasoning_effort ?? generalChatSettings?.reasoning_effort ?? 'medium';
-      setReasoningOverride({ enabled: true, effort: defaultEffort });
-    }
-  }, [reasoningActive, agent, generalChatSettings?.reasoning_effort, setReasoningOverride]);
-
-  const setEffort = useCallback((effort: ReasoningEffort) => {
-    setReasoningOverride({
-      ...effectiveReasoning,
-      enabled: true,
-      effort,
-    });
-  }, [effectiveReasoning, setReasoningOverride]);
 
   // Reset reasoning override when switching conversations
   useEffect(() => {
@@ -1777,10 +1757,10 @@ export function ChatView() {
                   <button
                     ref={reasoningBtnRef}
                     type="button"
-                    aria-label={reasoningActive ? `Thinking: ${currentEffort}` : 'Enable thinking'}
+                    aria-label={`Thinking: ${reasoningTrigger}`}
                     aria-expanded={showReasoningPopover}
                     onClick={() => setShowReasoningPopover(!showReasoningPopover)}
-                    title={reasoningActive ? `Thinking: ${currentEffort}` : 'Enable thinking'}
+                    title={`Thinking: ${reasoningTrigger}`}
                     style={{
                       height: '32px',
                       padding: '0 10px',
@@ -1817,7 +1797,7 @@ export function ChatView() {
                     }}
                   >
                     <Brain size={14} />
-                    <span className="toolbar-button-text">Think</span>
+                    <span className="toolbar-button-text">{reasoningTrigger}</span>
                     {/* Active glow dot */}
                     {reasoningActive && (
                       <div style={{
@@ -1846,7 +1826,8 @@ export function ChatView() {
                           position: 'absolute',
                           bottom: 'calc(100% + 8px)',
                           left: '0',
-                          width: '260px',
+                          // Fits a six-rung depth ladder without clipping labels.
+                          width: '296px',
                           maxWidth: 'calc(100vw - 24px)',
                           background: 'var(--bg-elevated)',
                           border: '1px solid var(--border-light)',
@@ -1856,178 +1837,37 @@ export function ChatView() {
                           zIndex: 100,
                         }}
                       >
-                        {/* Header with toggle */}
-                        <div style={{
-                          padding: '12px 14px',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'space-between',
-                          borderBottom: '1px solid var(--border)',
-                        }}>
-                          <div style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '8px',
-                          }}>
-                            <Brain size={14} style={{ color: reasoningActive ? 'var(--accent)' : 'var(--text-muted)' }} />
-                            <span style={{
-                              fontSize: '0.8125rem',
-                              fontWeight: 600,
-                              color: 'var(--text-primary)',
-                              letterSpacing: '0.01em',
-                            }}>
-                              Thinking
-                            </span>
-                          </div>
-                          {/* Mini toggle */}
-                          <div
-                            onClick={(e) => { e.stopPropagation(); toggleReasoning(); }}
-                            style={{
-                              width: '34px',
-                              height: '18px',
-                              borderRadius: '9px',
-                              background: reasoningActive ? 'var(--accent)' : 'var(--bg-base)',
-                              border: `1px solid ${reasoningActive ? 'var(--accent)' : 'var(--border)'}`,
-                              position: 'relative',
-                              cursor: 'pointer',
-                              transition: 'all 0.2s ease',
-                              flexShrink: 0,
-                            }}
-                          >
-                            <div style={{
-                              width: '14px',
-                              height: '14px',
-                              borderRadius: '50%',
-                              background: reasoningActive ? '#ffffff' : 'var(--text-muted)',
-                              position: 'absolute',
-                              top: '1px',
-                              left: reasoningActive ? '17px' : '1px',
-                              transition: 'all 0.2s ease',
-                            }} />
-                          </div>
+                        <div style={{ padding: '12px 14px' }}>
+                          <ReasoningControl
+                            capability={chatCapability}
+                            value={reasoningValue}
+                            onChange={setReasoningValue}
+                            modelName={chatModelName}
+                            providerLabel={chatProviderLabel}
+                            variant="compact"
+                          />
+
+                          {/* Where the current value comes from when nothing
+                              was set for this message. */}
+                          {!reasoningOverride && (agent?.reasoning_enabled ? (
+                            <p className="reasoning-control__note">Using agent defaults.</p>
+                          ) : isGeneralChat && generalChatSettings?.reasoning_enabled ? (
+                            <p className="reasoning-control__note">Using general chat defaults.</p>
+                          ) : null)}
+
+                          {/* The local launch config can cap or disable thinking
+                              regardless of what the model offers. */}
+                          {chatModelIsLlamaCpp && llamacppBudgetHint?.budget === 0 && (
+                            <p className="reasoning-control__note reasoning-control__note--warn">
+                              Thinking is fully disabled by the launch config (reasoning_budget = 0).
+                            </p>
+                          )}
+                          {chatModelIsLlamaCpp && llamacppBudgetHint != null && llamacppBudgetHint.budget > 0 && reasoningActive && (
+                            <p className="reasoning-control__note">
+                              Thinking capped at {llamacppBudgetHint.budget} tokens ({llamacppBudgetHint.source}).
+                            </p>
+                          )}
                         </div>
-
-                        {/* Effort levels */}
-                        {reasoningActive && (
-                          <div style={{ padding: '10px 14px 12px' }}>
-                            <div style={{
-                              fontSize: '0.625rem',
-                              fontWeight: 600,
-                              color: 'var(--text-muted)',
-                              textTransform: 'uppercase',
-                              letterSpacing: '0.08em',
-                              marginBottom: '8px',
-                            }}>
-                              Effort
-                            </div>
-                            <div style={{
-                              display: 'flex',
-                              gap: '0',
-                              background: 'var(--bg-base)',
-                              borderRadius: 'var(--radius-sm)',
-                              border: '1px solid var(--border)',
-                              padding: '2px',
-                            }}>
-                              {EFFORT_OPTIONS.map((opt) => {
-                                const isActive = currentEffort === opt.value;
-                                const isSupported = supportedChatEfforts === null
-                                  || supportedChatEfforts.includes(opt.value);
-                                return (
-                                  <button
-                                    key={opt.value}
-                                    onClick={() => setEffort(opt.value)}
-                                    disabled={!isSupported}
-                                    title={isSupported ? undefined : `${opt.label} no soportado por ${chatModelShort}`}
-                                    aria-label={isSupported ? undefined : `${opt.short}. No soportado por ${chatModelShort}`}
-                                    style={{
-                                      flex: 1,
-                                      padding: '5px 2px',
-                                      fontSize: '0.6875rem',
-                                      fontWeight: isActive ? 600 : 400,
-                                      fontFamily: 'var(--font-body)',
-                                      border: 'none',
-                                      borderRadius: 'calc(var(--radius-sm) - 2px)',
-                                      cursor: isSupported ? 'pointer' : 'not-allowed',
-                                      transition: 'all 0.12s ease',
-                                      background: isActive ? 'var(--accent-soft)' : 'transparent',
-                                      color: isActive ? 'var(--accent)' : 'var(--text-muted)',
-                                    }}
-                                  >
-                                    {opt.short}
-                                  </button>
-                                );
-                              })}
-                            </div>
-
-                            {chatEffortHint && (
-                              <div
-                                aria-live="polite"
-                                style={{
-                                  marginTop: '8px',
-                                  padding: '6px 8px',
-                                  background: 'var(--bg-base)',
-                                  border: '1px solid var(--border)',
-                                  borderRadius: 'var(--radius-sm)',
-                                  fontSize: '0.625rem',
-                                  color: 'var(--text-muted)',
-                                  lineHeight: 1.4,
-                                }}
-                              >
-                                {chatEffortHint}
-                              </div>
-                            )}
-
-                            {/* Info line */}
-                            <div style={{
-                              marginTop: '8px',
-                              fontSize: '0.625rem',
-                              color: 'var(--text-muted)',
-                              lineHeight: 1.4,
-                            }}>
-                              Model will show its reasoning process before responding.
-                              {!reasoningOverride && (agent?.reasoning_enabled ? (
-                                <span style={{ color: 'var(--text-secondary)' }}> Using agent defaults.</span>
-                              ) : isGeneralChat && generalChatSettings?.reasoning_enabled ? (
-                                <span style={{ color: 'var(--text-secondary)' }}> Using general chat defaults.</span>
-                              ) : null)}
-                            </div>
-
-                            {/* D5 (Increment 2): launch config caps thinking for this provider.
-                                budget === 0 ⇒ fully disabled warning; budget > 0 + reasoning on ⇒
-                                neutral cap line; budget < 0 (unlimited) ⇒ render nothing. */}
-                            {chatModelIsLlamaCpp && llamacppBudgetHint?.budget === 0 && (
-                              <div style={{
-                                marginTop: '8px',
-                                padding: '6px 8px',
-                                background: 'rgba(245, 158, 11, 0.08)',
-                                border: '1px solid rgba(245, 158, 11, 0.2)',
-                                borderRadius: 'var(--radius-sm)',
-                                fontSize: '0.625rem',
-                                color: 'var(--state-warning)',
-                                lineHeight: 1.4,
-                              }}>
-                                Thinking is fully disabled by the launch config (reasoning_budget = 0).
-                              </div>
-                            )}
-                            {chatModelIsLlamaCpp &&
-                              llamacppBudgetHint != null &&
-                              llamacppBudgetHint.budget > 0 &&
-                              reasoningActive && (
-                              <div style={{
-                                marginTop: '8px',
-                                padding: '6px 8px',
-                                background: 'var(--bg-base)',
-                                border: '1px solid var(--border)',
-                                borderRadius: 'var(--radius-sm)',
-                                fontSize: '0.625rem',
-                                color: 'var(--text-muted)',
-                                lineHeight: 1.4,
-                              }}>
-                                Thinking capped at {llamacppBudgetHint.budget} tokens ({llamacppBudgetHint.source}).
-                              </div>
-                            )}
-                          </div>
-                        )}
                       </motion.div>
                     )}
                   </AnimatePresence>
@@ -2466,7 +2306,7 @@ export function ChatView() {
                   {isMobile ? 'Enter to send' : 'Enter to send · Shift+Enter for new line'}
                   {reasoningActive && (
                     <span style={{ color: 'var(--accent)', marginLeft: '8px' }}>
-                      · Thinking: {currentEffort}
+                      · Thinking: {reasoningTrigger}
                     </span>
                   )}
                   {pendingAttachments.length > 0 && (
@@ -2510,58 +2350,14 @@ export function ChatView() {
         <Sheet isOpen={optionsOpen} onClose={() => setOptionsOpen(false)} title="Message options">
           <div className="composer-options">
             <section className="composer-options-section">
-              <div className="composer-options-row">
-                <span className="composer-options-label"><Brain size={15} /> Thinking</span>
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={reasoningActive}
-                  onClick={toggleReasoning}
-                  className={`composer-switch ${reasoningActive ? 'is-on' : ''}`}
-                  aria-label="Toggle thinking"
-                >
-                  <span className="composer-switch-knob" />
-                </button>
-              </div>
-              {reasoningActive && (
-                <div className="composer-effort">
-                  {EFFORT_OPTIONS.map((opt) => {
-                    const isSupported = supportedChatEfforts === null
-                      || supportedChatEfforts.includes(opt.value);
-                    return (
-                      <button
-                        key={opt.value}
-                        type="button"
-                        className={currentEffort === opt.value ? 'is-active' : ''}
-                        onClick={() => setEffort(opt.value)}
-                        disabled={!isSupported}
-                        title={isSupported ? undefined : `${opt.label} no soportado por ${chatModelShort}`}
-                        aria-label={isSupported ? undefined : `${opt.label}. No soportado por ${chatModelShort}`}
-                        style={isSupported ? undefined : { cursor: 'not-allowed' }}
-                      >
-                        {opt.label}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-              {reasoningActive && chatEffortHint && (
-                <div
-                  aria-live="polite"
-                  style={{
-                    marginTop: '8px',
-                    padding: '6px 8px',
-                    background: 'var(--bg-base)',
-                    border: '1px solid var(--border)',
-                    borderRadius: 'var(--radius-sm)',
-                    fontSize: '0.75rem',
-                    color: 'var(--text-muted)',
-                    lineHeight: 1.4,
-                  }}
-                >
-                  {chatEffortHint}
-                </div>
-              )}
+              <ReasoningControl
+                capability={chatCapability}
+                value={reasoningValue}
+                onChange={setReasoningValue}
+                modelName={chatModelName}
+                providerLabel={chatProviderLabel}
+                variant="full"
+              />
             </section>
 
             <section className="composer-options-section">

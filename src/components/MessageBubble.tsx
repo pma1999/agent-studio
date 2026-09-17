@@ -7,7 +7,7 @@ import { MessageTokenPills } from './TokenCounter';
 import { ToolCallTimeline } from './ToolCallTimeline';
 import { CouncilMessageView } from './CouncilMessageView';
 import { Button } from './ui/Button';
-import { formatModelId, getModelAuthor, getAuthorColor, formatAuthor } from '../utils/modelUtils';
+import { formatModelId, modelGroupKey, getAuthorColor, formatAuthor } from '../utils/modelUtils';
 import { useIsMobile } from '../utils/breakpoints';
 import { getCouncilRun } from '../api/councilClient';
 import { formatVariantTime } from '../utils/variantUtils';
@@ -17,7 +17,7 @@ import type { Message, Annotation, ToolExecution, StreamingActivityEvent, Counci
 
 /** Compact pill showing which model generated the message; provider color and full id in tooltip. */
 function MessageModelBadge({ modelId, title }: { modelId: string; title?: string }) {
-  const author = getModelAuthor(modelId);
+  const author = modelGroupKey(modelId);
   const shortName = formatModelId(modelId);
   const displayName = shortName === 'auto' ? 'Auto' : shortName;
   const color = getAuthorColor(author);

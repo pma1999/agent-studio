@@ -1201,6 +1201,19 @@ function migrateCouncilTables() {
     CREATE INDEX IF NOT EXISTS idx_council_responses_status ON council_responses(status);
   `);
 
+  // Model catalog: last-known-good upstream catalog data per scope (global
+  // public sources, or one user's key-gated lists). `variant` is a hash of what
+  // the data was fetched with (never a secret), so a rotated key never reads
+  // another key's snapshot.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS model_catalog_snapshots (
+      scope TEXT PRIMARY KEY,
+      variant TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      fetched_at INTEGER NOT NULL
+    );
+  `);
+
   // Council responses: store tool results (JSON array of { id, content }) for display like normal chat
   const councilRespCols = db.prepare("PRAGMA table_info(council_responses)").all() as { name: string }[];
   if (!councilRespCols.some((c) => c.name === 'tool_results')) {

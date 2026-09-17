@@ -4,10 +4,11 @@ import { createPortal } from 'react-dom';
 import { Check, ChevronDown, Loader2, Server, Shuffle, X } from 'lucide-react';
 import type { OpenRouterEndpoint, ProviderRoutingConfig } from '../types';
 import { useOpenRouterEndpoints } from '../hooks/useOpenRouterEndpoints';
-import { formatContext, formatPrice, formatUptime } from '../utils/modelUtils';
+import { formatContext, formatRate, formatUptime } from '../utils/modelUtils';
 import { cheapestEndpoint } from '../utils/providerRanking';
 import { useIsMobile } from '../utils/breakpoints';
-import { isDeepSeekDirectModel, isAbliterationModel, isArnictModel, isOpencodeGoModel } from '../utils/providers';
+import { PROVIDER_UI, providerOfModelId, supportsProviderRouting } from '../utils/providers';
+import { perMillionFromPerToken } from '../../shared/models/pricing';
 
 interface ProviderRoutingSelectorProps {
   modelId: string | null | undefined;
@@ -45,18 +46,17 @@ export function ProviderRoutingSelector({
   const [isOpen, setIsOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const isMobile = useIsMobile();
-  const isDeepSeek = isDeepSeekDirectModel(modelId);
-  const isAbliteration = isAbliterationModel(modelId);
-  const isArnict = isArnictModel(modelId);
-  const isOpencodeGo = isOpencodeGoModel(modelId);
+  // Endpoint preferences exist only on OpenRouter; every direct provider
+  // serves its own models.
+  const routable = supportsProviderRouting(modelId);
   const isAutoModel = !modelId || modelId === 'openrouter/auto';
   const selectedSlug = value?.mode === 'provider' ? value.provider_slug : null;
-  const { endpoints, loading, error } = useOpenRouterEndpoints(modelId, (isOpen || !!selectedSlug) && !isDeepSeek && !isAbliteration && !isArnict && !isOpencodeGo);
+  const { endpoints, loading, error } = useOpenRouterEndpoints(modelId, (isOpen || !!selectedSlug) && routable);
 
-  // Provider routing is OpenRouter-only; clear any stale config when a DeepSeek, Abliteration, Arnict, or OpenCode Go model is selected.
+  // Clear any stale routing config when a direct-provider model is selected.
   useEffect(() => {
-    if ((isDeepSeek || isAbliteration || isArnict || isOpencodeGo) && value !== null) onChange(null);
-  }, [isDeepSeek, isAbliteration, isArnict, isOpencodeGo, value, onChange]);
+    if (!routable && value !== null) onChange(null);
+  }, [routable, value, onChange]);
 
   const selectedEndpoint = useMemo(
     () => endpoints.find((endpoint) => endpoint.tag === selectedSlug) || null,
@@ -64,7 +64,7 @@ export function ProviderRoutingSelector({
   );
 
   const cheapest = useMemo(() => cheapestEndpoint(endpoints), [endpoints]);
-  const showCheapestCta = !isDeepSeek && !isAbliteration && !isArnict && !isOpencodeGo && !isAutoModel && !loading && !error && endpoints.length > 0 && !!cheapest;
+  const showCheapestCta = routable && !isAutoModel && !loading && !error && endpoints.length > 0 && !!cheapest;
 
   const handleCheapest = () => {
     if (!cheapest) return;
@@ -165,7 +165,7 @@ export function ProviderRoutingSelector({
           : { top: 'calc(100% + 6px)' }),
       };
 
-  if (isDeepSeek || isAbliteration || isArnict || isOpencodeGo) {
+  if (!routable) {
     return (
       <div style={{ position: 'relative' }}>
         {label && (
@@ -197,7 +197,7 @@ export function ProviderRoutingSelector({
           }}
         >
           <Server size={14} style={{ opacity: 0.6, flexShrink: 0 }} />
-          <span>{isOpencodeGo ? 'Proveedor no disponible para OpenCode Go' : isArnict ? 'Proveedor no disponible para Arnict' : isAbliteration ? 'Proveedor no disponible para Abliteration' : 'Proveedor no disponible para DeepSeek directo'}</span>
+          <span>{`Proveedor no disponible para ${PROVIDER_UI[providerOfModelId(modelId)].label}`}</span>
         </div>
       </div>
     );
@@ -437,9 +437,10 @@ export function ProviderRoutingSelector({
                 const selected = value?.mode === 'provider' && value.provider_slug === endpoint.tag;
                 const isCheapestWinner = cheapest?.tag === endpoint.tag;
                 const isDegraded = endpoint.status !== null && endpoint.status !== 0;
-                const promptPrice = formatPrice(endpoint.pricing.prompt);
-                const completionPrice = formatPrice(endpoint.pricing.completion);
-                const cacheNote = endpoint.pricing.input_cache_read ? ` · caché ${formatPrice(endpoint.pricing.input_cache_read)}` : '';
+                const endpointRate = (value: string | null | undefined) => formatRate(perMillionFromPerToken(value));
+                const promptPrice = endpointRate(endpoint.pricing.prompt);
+                const completionPrice = endpointRate(endpoint.pricing.completion);
+                const cacheNote = endpoint.pricing.input_cache_read ? ` · caché ${endpointRate(endpoint.pricing.input_cache_read)}` : '';
                 const uptime5m = formatUptime(endpoint.uptime_last_5m);
                 const uptime30m = formatUptime(endpoint.uptime_last_30m);
                 const rowStyle: React.CSSProperties = {

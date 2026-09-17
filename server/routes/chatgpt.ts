@@ -1,6 +1,6 @@
 /**
  * ChatGPT provider routes: connection status, device-code login ceremony,
- * logout, and the Codex model catalog.
+ * and logout. The Codex model catalog is served by `GET /api/models/catalog`.
  *
  * The heavy lifting lives in server/codex/instanceManager.ts (per-user
  * app-server processes). These routes are the thin HTTP surface the frontend
@@ -15,10 +15,10 @@ import {
   cancelChatgptLogin,
   logoutChatgpt,
   getChatgptStatus,
-  listChatgptModels,
   CodexForbiddenError,
   CodexUnavailableError,
 } from '../codex/instanceManager.js';
+import { modelCatalog } from '../catalog/index.js';
 
 const router = Router();
 
@@ -75,19 +75,8 @@ router.post('/logout', async (req: AuthRequest, res: Response) => {
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
     if (!isUserAllowed(userId)) throw new CodexForbiddenError();
     await logoutChatgpt(userId);
+    modelCatalog().invalidate(userId, 'codex');
     res.json({ ok: true });
-  } catch (err) {
-    res.status(codexErrorStatus(err)).json({ error: codexErrorMessage(err) });
-  }
-});
-
-// GET /api/chatgpt/models - models available to the connected ChatGPT account (namespaced codex:)
-router.get('/models', async (req: AuthRequest, res: Response) => {
-  try {
-    const userId = req.userId;
-    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
-    const models = await listChatgptModels(userId);
-    res.json({ data: models });
   } catch (err) {
     res.status(codexErrorStatus(err)).json({ error: codexErrorMessage(err) });
   }

@@ -1,69 +1,38 @@
-import type { OpenRouterModel } from '../types';
+/**
+ * Display helpers for catalog models: grouping, labels, prices, badges.
+ *
+ * Everything here reads a `CatalogModel` (or its id). Nothing knows what a
+ * given provider offers — that comes from the server catalog — so a new
+ * provider or model needs no change in this file.
+ */
+import type { CatalogModel } from '../../shared/models/catalog';
+import { isFreePricing, type PricingSpec } from '../../shared/models/pricing';
 import {
-  DEEPSEEK_PREFIX,
-  DEEPSEEK_DIRECT_GROUP,
-  DEEPSEEK_ACCENT,
-  isDeepSeekDirectModel,
-  CODEX_PREFIX,
-  CODEX_DIRECT_GROUP,
-  CODEX_ACCENT,
-  isCodexModel,
-  ABLITERATION_PREFIX,
-  ABLITERATION_GROUP,
-  ABLITERATION_ACCENT,
-  isAbliterationModel,
-  ARNICT_PREFIX,
-  ARNICT_GROUP,
-  ARNICT_ACCENT,
-  isArnictModel,
-  OPENCODE_GO_PREFIX,
-  OPENCODE_GO_GROUP,
-  OPENCODE_GO_ACCENT,
-  OPENCODE_GO_BADGE_META,
-  isOpencodeGoModel,
-  type OpencodeGoBadgeKind,
-  LLAMACPP_PREFIX,
-  LLAMACPP_GROUP,
-  LLAMACPP_ACCENT,
-  isLlamaCppModel,
+  DIRECT_PROVIDERS,
+  PROVIDER_UI,
+  modelGroupKey,
+  providerOfGroupKey,
+  providerOfModelId,
+  transportBadge,
+  upstreamIdOf,
+  type ProviderId,
 } from './providers';
 
 export const FAVORITES_STORAGE_KEY = 'agent-studio:favorite-models';
 export const RECENT_STORAGE_KEY = 'modelSelector.recent';
 export const MAX_RECENT = 5;
 
-/** Extract provider/author from model ID e.g. "openai/gpt-4o" -> "openai" */
-export function getModelAuthor(id: string): string {
-  // DeepSeek-direct models (`deepseek:...`) group separately from OpenRouter's `deepseek/...` slugs.
-  if (isDeepSeekDirectModel(id)) return DEEPSEEK_DIRECT_GROUP;
-  // ChatGPT (Codex) models (`codex:...`) group under their own label.
-  if (isCodexModel(id)) return CODEX_DIRECT_GROUP;
-  // Abliteration-direct models (`abliteration:...`) group under their own label.
-  if (isAbliterationModel(id)) return ABLITERATION_GROUP;
-  // Arnict-direct models (`arnict:...`) group under their own label.
-  // NOTE: strip the prefix before any `/` split — upstream ids have `author/slug` form.
-  if (isArnictModel(id)) return ARNICT_GROUP;
-  // OpenCode Go-direct models (`opencode-go:...`) group under their own label.
-  if (isOpencodeGoModel(id)) return OPENCODE_GO_GROUP;
-  // llama.cpp local models (`llamacpp:...`) group under their own label.
-  if (isLlamaCppModel(id)) return LLAMACPP_GROUP;
-  const slash = id.indexOf('/');
-  return slash > 0 ? id.substring(0, slash) : 'other';
-}
+export { modelGroupKey };
 
-/** Short display name from model ID e.g. "openai/gpt-4o" -> "gpt-4o", "deepseek:deepseek-v4-pro" -> "deepseek-v4-pro" */
+/** Short display name: `openai/gpt-4o` → `gpt-4o`, `deepseek:deepseek-v4-pro` → `deepseek-v4-pro`. */
 export function formatModelId(modelId: string): string {
-  if (modelId.startsWith(DEEPSEEK_PREFIX)) return modelId.slice(DEEPSEEK_PREFIX.length);
-  if (modelId.startsWith(CODEX_PREFIX)) return modelId.slice(CODEX_PREFIX.length);
-  if (modelId.startsWith(ABLITERATION_PREFIX)) return modelId.slice(ABLITERATION_PREFIX.length);
-  if (modelId.startsWith(ARNICT_PREFIX)) return modelId.slice(ARNICT_PREFIX.length);
-  if (modelId.startsWith(OPENCODE_GO_PREFIX)) return modelId.slice(OPENCODE_GO_PREFIX.length);
-  if (modelId.startsWith(LLAMACPP_PREFIX)) return modelId.slice(LLAMACPP_PREFIX.length);
-  const parts = modelId.split('/');
-  if (parts.length > 1) return parts[parts.length - 1];
-  return modelId;
+  const upstream = upstreamIdOf(modelId);
+  if (providerOfModelId(modelId) !== 'openrouter') return upstream;
+  const parts = upstream.split('/');
+  return parts[parts.length - 1] || upstream;
 }
 
+/** OpenRouter author keys that have a proper display name. */
 const AUTHOR_DISPLAY_NAMES: Record<string, string> = {
   openai: 'OpenAI',
   anthropic: 'Anthropic',
@@ -71,23 +40,16 @@ const AUTHOR_DISPLAY_NAMES: Record<string, string> = {
   'meta-llama': 'Meta',
   mistralai: 'Mistral',
   deepseek: 'DeepSeek',
-  [DEEPSEEK_DIRECT_GROUP]: 'DeepSeek · Direct',
-  [CODEX_DIRECT_GROUP]: 'ChatGPT · Codex',
-  [ABLITERATION_GROUP]: 'Abliteration · Direct',
-  [ARNICT_GROUP]: 'Arnict · Direct',
-  [OPENCODE_GO_GROUP]: 'OpenCode Go · Direct',
-  [LLAMACPP_GROUP]: 'llama.cpp · Local',
   microsoft: 'Microsoft',
   amazon: 'Amazon',
   cohere: 'Cohere',
   '01-ai': '01.AI',
   nvidia: 'NVIDIA',
   'x-ai': 'xAI',
+  moonshotai: 'Moonshot AI',
+  qwen: 'Qwen',
+  'z-ai': 'Z.AI',
 };
-
-export function formatAuthor(author: string): string {
-  return AUTHOR_DISPLAY_NAMES[author] || author.charAt(0).toUpperCase() + author.slice(1);
-}
 
 const AUTHOR_COLORS: Record<string, string> = {
   openai: '#10a37f',
@@ -96,19 +58,22 @@ const AUTHOR_COLORS: Record<string, string> = {
   'meta-llama': '#0081fb',
   mistralai: '#f97316',
   deepseek: '#4f46e5',
-  [DEEPSEEK_DIRECT_GROUP]: DEEPSEEK_ACCENT,
-  [CODEX_DIRECT_GROUP]: CODEX_ACCENT,
-  [ABLITERATION_GROUP]: ABLITERATION_ACCENT,
-  [ARNICT_GROUP]: ARNICT_ACCENT,
-  [OPENCODE_GO_GROUP]: OPENCODE_GO_ACCENT,
-  [LLAMACPP_GROUP]: LLAMACPP_ACCENT,
   microsoft: '#00a4ef',
   amazon: '#ff9900',
   cohere: '#ff6b6b',
 };
 
-export function getAuthorColor(author: string): string {
-  return AUTHOR_COLORS[author] || 'var(--text-muted)';
+/** Heading for a group key: the provider's label, or the OpenRouter author. */
+export function formatAuthor(group: string): string {
+  const provider = providerOfGroupKey(group);
+  if (provider) return PROVIDER_UI[provider].label;
+  return AUTHOR_DISPLAY_NAMES[group] || group.charAt(0).toUpperCase() + group.slice(1);
+}
+
+export function getAuthorColor(group: string): string {
+  const provider = providerOfGroupKey(group);
+  if (provider) return PROVIDER_UI[provider].accent;
+  return AUTHOR_COLORS[group] || 'var(--text-muted)';
 }
 
 export type ProviderTier = 'premium' | 'standard' | 'economy';
@@ -120,69 +85,43 @@ export interface ProviderMeta {
   tier: ProviderTier;
 }
 
-const PROVIDER_META: Record<string, ProviderMeta> = {
-  anthropic: { name: 'Anthropic', color: '#d4a574', iconName: 'brain', tier: 'premium' },
-  openai: { name: 'OpenAI', color: '#7ab88f', iconName: 'sparkles', tier: 'premium' },
-  google: { name: 'Google', color: '#8ba4d4', iconName: 'zap', tier: 'premium' },
-  [DEEPSEEK_DIRECT_GROUP]: { name: 'DeepSeek · Direct', color: DEEPSEEK_ACCENT, iconName: 'brain', tier: 'premium' },
-  [ABLITERATION_GROUP]: { name: 'Abliteration · Direct', color: ABLITERATION_ACCENT, iconName: 'brain', tier: 'premium' },
-  [ARNICT_GROUP]: { name: 'Arnict · Direct', color: ARNICT_ACCENT, iconName: 'brain', tier: 'premium' },
-  [OPENCODE_GO_GROUP]: { name: 'OpenCode Go · Direct', color: OPENCODE_GO_ACCENT, iconName: 'brain', tier: 'premium' },
-  // Local models are free and their context can be unknown (0) — grouped as Economy.
-  [LLAMACPP_GROUP]: { name: 'llama.cpp · Local', color: LLAMACPP_ACCENT, iconName: 'zap', tier: 'economy' },
-  'meta-llama': { name: 'Meta', color: '#a78bfa', iconName: 'eye', tier: 'standard' },
-  mistralai: { name: 'Mistral', color: '#f59e0b', iconName: 'zap', tier: 'standard' },
-  cohere: { name: 'Cohere', color: '#ec4899', iconName: 'brain', tier: 'standard' },
-  deepseek: { name: 'DeepSeek', color: '#4f46e5', iconName: 'zap', tier: 'economy' },
-  microsoft: { name: 'Microsoft', color: '#00a4ef', iconName: 'zap', tier: 'economy' },
-  amazon: { name: 'Amazon', color: '#ff9900', iconName: 'zap', tier: 'economy' },
-  '01-ai': { name: '01.AI', color: 'var(--text-muted)', iconName: 'sparkles', tier: 'economy' },
-  nvidia: { name: 'NVIDIA', color: 'var(--text-muted)', iconName: 'zap', tier: 'economy' },
-  'x-ai': { name: 'xAI', color: 'var(--text-muted)', iconName: 'sparkles', tier: 'economy' },
+const AUTHOR_META: Record<string, Pick<ProviderMeta, 'iconName' | 'tier'>> = {
+  anthropic: { iconName: 'brain', tier: 'premium' },
+  openai: { iconName: 'sparkles', tier: 'premium' },
+  google: { iconName: 'zap', tier: 'premium' },
+  'meta-llama': { iconName: 'eye', tier: 'standard' },
+  mistralai: { iconName: 'zap', tier: 'standard' },
+  cohere: { iconName: 'brain', tier: 'standard' },
 };
 
-/** Provider metadata for display; author is from getModelAuthor(id) */
-export function getProviderMeta(provider: string): ProviderMeta {
-  const meta = PROVIDER_META[provider];
-  if (meta) return meta;
+/** Local models are free and their window can be unknown, so they sit in Economy. */
+const PROVIDER_ICON: Record<ProviderId, Pick<ProviderMeta, 'iconName' | 'tier'>> = {
+  openrouter: { iconName: 'sparkles', tier: 'standard' },
+  deepseek: { iconName: 'brain', tier: 'premium' },
+  codex: { iconName: 'sparkles', tier: 'premium' },
+  abliteration: { iconName: 'brain', tier: 'premium' },
+  arnict: { iconName: 'brain', tier: 'premium' },
+  'opencode-go': { iconName: 'brain', tier: 'premium' },
+  llamacpp: { iconName: 'zap', tier: 'economy' },
+  lmstudio: { iconName: 'zap', tier: 'economy' },
+};
+
+/** Display metadata for a group key (from `modelGroupKey(id)`). */
+export function getProviderMeta(group: string): ProviderMeta {
+  const provider = providerOfGroupKey(group);
+  if (provider) {
+    return { name: PROVIDER_UI[provider].label, color: PROVIDER_UI[provider].accent, ...PROVIDER_ICON[provider] };
+  }
   return {
-    name: formatAuthor(provider),
-    color: getAuthorColor(provider),
-    iconName: 'sparkles',
-    tier: 'economy',
+    name: formatAuthor(group),
+    color: getAuthorColor(group),
+    ...(AUTHOR_META[group] ?? { iconName: 'sparkles' as const, tier: 'economy' as const }),
   };
 }
 
-export function formatPrice(priceStr: string): string {
-  const price = parseFloat(priceStr);
-  if (isNaN(price) || price === 0) return 'Gratis';
-  const perMillion = price * 1000000;
-  if (perMillion >= 1) return `$${perMillion.toFixed(2)}/M`;
-  if (perMillion >= 0.1) return `$${perMillion.toFixed(3)}/M`;
-  if (perMillion >= 0.01) return `$${perMillion.toFixed(4)}/M`;
-  const fixed6 = perMillion.toFixed(6);
-  const trimmed = fixed6.replace(/\.?0+$/, '');
-  return `$${trimmed}/M`;
-}
-
-export function formatUptime(pct: number | null): string {
-  if (pct === null || pct === undefined || !Number.isFinite(pct)) return '—';
-  return `${pct.toFixed(2)}%`;
-}
-
-export function formatContext(length: number): string {
-  if (length >= 1000000) return `${(length / 1000000).toFixed(1)}M`;
-  if (length >= 1000) return `${(length / 1000).toFixed(0)}K`;
-  return String(length);
-}
-
-export const PROVIDER_PRIORITY = [
-  DEEPSEEK_DIRECT_GROUP,
-  CODEX_DIRECT_GROUP,
-  ABLITERATION_GROUP,
-  ARNICT_GROUP,
-  OPENCODE_GO_GROUP,
-  LLAMACPP_GROUP,
+/** Direct providers first (in settings order), then the OpenRouter authors. */
+export const PROVIDER_PRIORITY: readonly string[] = [
+  ...DIRECT_PROVIDERS.map((provider) => PROVIDER_UI[provider].group),
   'openai',
   'anthropic',
   'google',
@@ -193,105 +132,95 @@ export const PROVIDER_PRIORITY = [
   'amazon',
   'cohere',
   'x-ai',
-] as const;
+];
 
-// ----- OpenCode Go picker (T7): badges, pending suffix, limits, ordering -----
-// Single source for every Go display decision below is the served catalog
-// entry (`transport` / `sendable` / `monthlyLimitUsd`, T1): the frontend never
-// duplicates the enablement decision in its own constants.
+// ---------------------------------------------------------------------------
+// Prices, windows, limits
+// ---------------------------------------------------------------------------
 
-/** Transport served per Go entry (mirrors the server `OpenCodeGoTransport`). */
-export type OpencodeGoTransport = 'chat' | 'messages' | 'responses';
-
-/** Served-entry fields the picker reads (all optional: tolerate old payloads). */
-export interface OpencodeGoListFields {
-  transport?: OpencodeGoTransport | string;
-  sendable?: boolean;
-  monthlyLimitUsd?: number;
-  priceNote?: string;
+/** A USD-per-1M rate, at the precision it needs to stay meaningful. */
+export function formatRate(perMillion: number | null | undefined): string {
+  if (perMillion === null || perMillion === undefined || !Number.isFinite(perMillion)) return '—';
+  if (perMillion === 0) return 'Free';
+  if (perMillion >= 1) return `$${perMillion.toFixed(2)}/M`;
+  if (perMillion >= 0.1) return `$${perMillion.toFixed(3)}/M`;
+  if (perMillion >= 0.01) return `$${perMillion.toFixed(4)}/M`;
+  return `$${perMillion.toFixed(6).replace(/\.?0+$/, '')}/M`;
 }
 
-export type OpencodeGoListModel = OpenRouterModel & OpencodeGoListFields;
-
-/** Suffix for phase-2 rows whose entry is not send-enabled yet. */
-export const OPENCODE_GO_PENDING_SUFFIX = '· pendiente de verificación';
-
-/** Transport label for accessible row names (`<Nombre>, <transporte>, <precio>`). */
-export const OPENCODE_GO_TRANSPORT_LABELS: Record<OpencodeGoTransport, string> = {
-  chat: 'Chat',
-  messages: 'Anthropic',
-  responses: 'Responses',
-};
-
-/** Transport of a Go row from its served entry, or null (non-Go / unknown). */
-export function getOpencodeGoTransport(model: OpenRouterModel): OpencodeGoTransport | null {
-  if (!isOpencodeGoModel(model.id)) return null;
-  const t = (model as OpencodeGoListFields).transport;
-  return t === 'chat' || t === 'messages' || t === 'responses' ? t : null;
+/** Input rate of a model, the number shown in dense rows. */
+export function formatModelPrice(pricing: PricingSpec | null | undefined): string {
+  if (!pricing) return '—';
+  if (isFreePricing(pricing)) return 'Free';
+  return formatRate(pricing.rates.input);
 }
 
-/** Badge kind for a Go row: phase-2 only (`messages` → anthropic, `responses` → responses). */
-export function getOpencodeGoBadgeKind(model: OpenRouterModel): OpencodeGoBadgeKind | null {
-  const t = getOpencodeGoTransport(model);
-  if (t === 'messages') return 'anthropic';
-  if (t === 'responses') return 'responses';
-  return null;
+/** `in $0.15/M · out $0.60/M`, for the detail line. */
+export function formatPriceRange(pricing: PricingSpec | null | undefined): string | null {
+  if (!pricing) return null;
+  if (isFreePricing(pricing)) return 'Free';
+  return `in ${formatRate(pricing.rates.input)} · out ${formatRate(pricing.rates.output)}`;
 }
 
-/** Badge label for a Go row (`Anthropic` / `Responses`), or null for chat rows. */
-export function getOpencodeGoBadgeLabel(model: OpenRouterModel): string | null {
-  const kind = getOpencodeGoBadgeKind(model);
-  return kind ? OPENCODE_GO_BADGE_META[kind].label : null;
+export function formatUptime(pct: number | null): string {
+  if (pct === null || pct === undefined || !Number.isFinite(pct)) return '—';
+  return `${pct.toFixed(2)}%`;
 }
 
-/**
- * Whether the row wears the pending-verification suffix. Governed ONLY by the
- * served `sendable` field (`=== false`); absent/old payloads never suffix.
- */
-export function isOpencodeGoPendingVerification(model: OpenRouterModel): boolean {
-  return isOpencodeGoModel(model.id) && (model as OpencodeGoListFields).sendable === false;
+/** Context window in the compact form the rows use (`1.0M`, `256K`). */
+export function formatContext(length: number | null | undefined): string {
+  if (length === null || length === undefined || !Number.isFinite(length) || length <= 0) return '—';
+  if (length >= 1000000) return `${(length / 1000000).toFixed(1)}M`;
+  if (length >= 1000) return `${(length / 1000).toFixed(0)}K`;
+  return String(length);
 }
 
-/** Monthly-limit label for settings Go rows (`$60/mes`, or `límite n/d`). */
-export function formatOpencodeGoMonthlyLimit(model: OpenRouterModel): string {
-  const v = (model as OpencodeGoListFields).monthlyLimitUsd;
-  return typeof v === 'number' && Number.isFinite(v) ? `$${v}/mes` : 'límite n/d';
+/** Monthly spend cap, where the host publishes one. */
+export function formatMonthlyLimit(model: Pick<CatalogModel, 'monthlyLimitUsd'>): string | null {
+  const limit = model.monthlyLimitUsd;
+  if (limit === null || limit === undefined) return null;
+  return Number.isFinite(limit) ? `$${limit}/month` : null;
 }
 
-/**
- * Settings intra-Go order: base price ascending (prompt/in, then
- * completion/out). Stable: ties keep catalog order. Global provider order
- * (`PROVIDER_PRIORITY`, Go 5th) is untouched — this only sorts inside Go.
- */
-export function compareOpencodeGoByPriceAsc(a: OpenRouterModel, b: OpenRouterModel): number {
-  const inDiff = parseFloat(a.pricing.prompt) - parseFloat(b.pricing.prompt);
-  if (inDiff !== 0) return inDiff;
-  return parseFloat(a.pricing.completion) - parseFloat(b.pricing.completion);
+// ---------------------------------------------------------------------------
+// Row decoration
+// ---------------------------------------------------------------------------
+
+/** Badge for a model served over a non-chat wire (`Anthropic`, `Responses`). */
+export function modelTransportBadge(model: Pick<CatalogModel, 'transport'>) {
+  return transportBadge(model.transport);
 }
 
-/**
- * Transport search criterion (T7): a Go row matches when the query (≥2 chars,
- * case-insensitive) is a substring of its badge label (`anthropic`,
- * `responses`) or its transport key (`messages`, `responses`, `chat`).
- */
-export function opencodeGoMatchesTransportQuery(model: OpenRouterModel, query: string): boolean {
-  if (!isOpencodeGoModel(model.id)) return false;
+/** Note for a model that is no longer listed or is on its way out. */
+export function lifecycleNote(model: Pick<CatalogModel, 'lifecycle'>): string | null {
+  switch (model.lifecycle) {
+    case 'legacy':
+      return 'No longer listed';
+    case 'deprecated':
+      return 'Deprecated';
+    default:
+      return null;
+  }
+}
+
+/** `"<name>, Anthropic, in $0.30/M"` — what assistive tech reads for a row. */
+export function modelAccessibleName(model: CatalogModel): string {
+  const badge = modelTransportBadge(model);
+  const parts = [model.name, badge?.label, formatModelPrice(model.pricing), lifecycleNote(model)];
+  return parts.filter(Boolean).join(', ');
+}
+
+/** Matches a row against a search query, including its transport wire. */
+export function modelMatchesQuery(model: CatalogModel, query: string): boolean {
   const q = query.trim().toLowerCase();
-  if (q.length < 2) return false;
-  const t = getOpencodeGoTransport(model);
-  const badge = getOpencodeGoBadgeLabel(model);
-  return [t, badge].some((s) => typeof s === 'string' && s.toLowerCase().includes(q));
+  if (q.length === 0) return true;
+  const badge = modelTransportBadge(model)?.label ?? '';
+  return [model.id, model.name, model.description, model.transport, badge]
+    .some((field) => typeof field === 'string' && field.toLowerCase().includes(q));
 }
 
-/**
- * Accessible row name for a Go row: `"<Nombre>, <transporte>, <precio>"` plus
- * `, pendiente de verificación` when the suffix is shown (the visual badge is
- * `aria-hidden` and `aria-label` replaces content announcement, so neither
- * signal may be lost for AT).
- */
-export function getOpencodeGoAccessibleName(model: OpenRouterModel): string {
-  const t = getOpencodeGoTransport(model);
-  const transport = t ? OPENCODE_GO_TRANSPORT_LABELS[t] : 'OpenCode Go';
-  const base = `${model.name}, ${transport}, ${formatPrice(model.pricing.prompt)}`;
-  return isOpencodeGoPendingVerification(model) ? `${base}, pendiente de verificación` : base;
+/** Cheapest first (input, then output). Stable: ties keep catalog order. */
+export function compareByPriceAsc(a: CatalogModel, b: CatalogModel): number {
+  const rate = (model: CatalogModel, key: 'input' | 'output') => model.pricing?.rates[key] ?? Number.POSITIVE_INFINITY;
+  return (rate(a, 'input') - rate(b, 'input')) || (rate(a, 'output') - rate(b, 'output'));
 }

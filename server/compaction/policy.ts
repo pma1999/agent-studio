@@ -1,9 +1,8 @@
 /**
- * Compaction policy: budgets, model windows, estimator, suggest/thrash rules (pure).
+ * Compaction policy: budgets, estimator, suggest/thrash rules (pure).
  *
- * Window numbers mirror the `context_length` values in
- * server/providers/index.ts (DEEPSEEK_CATALOG, ABLITERATION_CATALOG,
- * ARNICT_CATALOG) — read from source, not from memory.
+ * Model context windows come from the model catalog (`CatalogModel.contextLength`);
+ * callers resolve them and pass the number in.
  */
 
 // NOTE: the OpenCode keep-budget constants (default 8000, clamp 2000–15000)
@@ -26,33 +25,11 @@ export const SUGGEST_PCT = 0.6;
 export const AUTO_FIRE_PCT = 0.9;
 
 // G12 v1 scope: estimator + advisory + counters ship, but auto-fire is
-// explicitly deferred and MUST stay disabled. Reasons: `openrouter/*` ids (the
-// majority of real conversations) have no reliable window; firing on a guessed
-// window either burns calls or truncates silently; the recipe's own rule
+// explicitly deferred and MUST stay disabled: firing on a stale or guessed
+// window either burns calls or truncates silently, and the recipe's own rule
 // forbids auto-fire without a known limit. Unknown limit → limit:null,
 // advisory off, manual /compact always allowed.
 export const AUTO_COMPACT_ENABLED = false;
-
-/**
- * Known model context windows. Everything else — including `openrouter/*`,
- * `codex:*`, and `llamacpp:*` ids — resolves to null (unknown: never auto-fire,
- * manual /compact still allowed).
- */
-export const MODEL_WINDOWS: Record<string, number | null> = {
-  'deepseek:deepseek-v4-flash': 1_000_000,
-  'deepseek:deepseek-v4-pro': 1_000_000,
-  'abliteration:abliterated-model': 262144,
-  'abliteration:abliterated-model-large': 1_000_000,
-  'abliteration:abliterated-model-large-v2': 1_000_000,
-  'arnict:zai/glm-5.3-flash-uncensored': 1048576,
-  'arnict:qwen/qwen3.8-27b': 262144,
-};
-
-/** Known window for a namespaced model id, or null when unknown. */
-export function resolveWindow(modelId: string): number | null {
-  if (typeof modelId !== 'string') return null;
-  return MODEL_WINDOWS[modelId] ?? null;
-}
 
 // NOTE: token math mirrors the frozen `estimateTokens(text) = ceil(chars/4)`
 // contract from sibling wave-1 module server/compaction/serialize.ts (G5: no

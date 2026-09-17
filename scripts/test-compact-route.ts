@@ -11,6 +11,9 @@ const express = (await import('express')).default;
 const { default: db, migrate } = await import('../server/db.js');
 const compactRouter = (await import('../server/routes/compact.js')).default;
 const { setSummarizeFetchImplForTests } = await import('../server/compaction/summarize.js');
+const { setModelCatalogForTests } = await import('../server/catalog/index.js');
+const { stubModelCatalog } = await import('./helpers/catalogStub.js');
+setModelCatalogForTests(stubModelCatalog());
 const { SUMMARY_PREFIX } = await import('../server/compaction/prompt.js');
 
 migrate();

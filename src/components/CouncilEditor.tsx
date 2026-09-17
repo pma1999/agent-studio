@@ -9,7 +9,7 @@ import { TextArea } from './ui/TextArea';
 import { Modal } from './ui/Modal';
 import { ModelSelectorCore } from './ModelSelectorCore';
 import { ProviderRoutingSelector } from './ProviderRoutingSelector';
-import { useOpenRouterModels } from '../hooks/useOpenRouterModels';
+import { useModelCatalog } from '../hooks/useModelCatalog';
 import type { CouncilMember, ProviderRoutingConfig } from '../types';
 
 const DEFAULT_SYNTHESIS_TEMPLATE = `You are a synthesis expert. Your task is to analyze multiple AI model responses to the same query and create a unified, comprehensive answer.
@@ -91,7 +91,8 @@ export function CouncilEditor() {
   const [availableMcpServers, setAvailableMcpServers] = useState<{ id: string; name: string }[]>([]);
   const [showAdvanced, setShowAdvanced] = useState(false);
 
-  const { models: availableModels, loading: loadingModels } = useOpenRouterModels({ enabled: councilEditorOpen });
+  // The catalog is shared across the app, so opening the editor costs no request.
+  const { byId: availableModelMap, loading: loadingModels } = useModelCatalog();
 
   // Load available data
   useEffect(() => {
@@ -147,10 +148,6 @@ export function CouncilEditor() {
     setErrors({});
     setShowAdvanced(false);
   }, [editingCouncil, councilEditorOpen]);
-
-  const availableModelMap = useMemo(() => {
-    return new Map(availableModels.map((model) => [model.id, model]));
-  }, [availableModels]);
 
   const validate = (): boolean => {
     const newErrors: Partial<Record<keyof CouncilFormData, string>> = {};

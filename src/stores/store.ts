@@ -24,6 +24,13 @@ import type {
 } from '../types';
 import type { AuthUser } from '../api/client';
 import { agentsApi, conversationsApi, messagesApi, settingsApi, creditsApi, usageApi, authApi, type MessagesListResponse } from '../api/client';
+import { isReasoningEffort } from '../../shared/reasoningEfforts';
+
+/** A stored reasoning budget, or undefined when there is none to apply. */
+function positiveBudget(raw: string | undefined): number | undefined {
+  const parsed = raw ? Number.parseInt(raw, 10) : NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
 
 interface AppState {
   // Auth / session
@@ -913,10 +920,11 @@ export const useStore = create<AppState>((set, get) => ({
         tool_choice,
         parallel_tool_calls,
         reasoning_enabled: settings['general_chat_reasoning_enabled'] === 'true',
-        reasoning_effort: (settings['general_chat_reasoning_effort'] as ReasoningEffort) || 'medium',
-        reasoning_max_tokens: settings['general_chat_reasoning_max_tokens']
-          ? parseInt(settings['general_chat_reasoning_max_tokens'], 10)
-          : undefined,
+        reasoning_effort: isReasoningEffort(settings['general_chat_reasoning_effort'])
+          ? settings['general_chat_reasoning_effort']
+          : 'medium',
+        // Only a real positive budget round-trips; '', '0' and garbage mean none.
+        reasoning_max_tokens: positiveBudget(settings['general_chat_reasoning_max_tokens']),
       };
       set({ generalChatSettings: generalSettings, generalChatSettingsLoading: false });
     } catch (err) {
@@ -938,7 +946,7 @@ export const useStore = create<AppState>((set, get) => ({
         settingsApi.set('general_chat_parallel_tool_calls', String(settings.parallel_tool_calls ?? 1)),
         settingsApi.set('general_chat_reasoning_enabled', String(settings.reasoning_enabled)),
         settingsApi.set('general_chat_reasoning_effort', settings.reasoning_effort || 'medium'),
-        settingsApi.set('general_chat_reasoning_max_tokens', String(settings.reasoning_max_tokens || '')),
+        settingsApi.set('general_chat_reasoning_max_tokens', settings.reasoning_max_tokens ? String(settings.reasoning_max_tokens) : ''),
       ]);
       set({ generalChatSettings: settings });
     } catch (err) {

@@ -7,11 +7,16 @@
 import {
   getProviderForModel,
   toUpstreamModelId,
-  buildDeepSeekThinking,
-  buildAbliterationReasoning,
   isCodexModel,
   isLlamacppModel,
+  OPENCODE_GO_ANTHROPIC_VERSION,
+  OPENCODE_GO_MESSAGES_URL,
+  OPENCODE_GO_RESPONSES_URL,
 } from '../providers/index.js';
+import { chatReasoningFields } from '../providers/wire/reasoning.js';
+import { buildMessagesBody, buildResponsesBody } from '../providers/wire/transports.js';
+import { modelCatalog } from '../catalog/index.js';
+import { planReasoning } from '../../shared/models/reasoning.js';
 import { isLegacyLmStudioModel } from '../providers/llamacpp.js';
 import { llamacppFetch } from '../providers/llamacppTransport.js';
 import { runCodexTurn } from '../codex/chat.js';
@@ -83,28 +88,37 @@ function extractMessageText(content: unknown): string {
   return '';
 }
 
+/** Text of a non-streamed chat-completions, Anthropic-shape or Responses reply. */
+function replyText(data: unknown): string {
+  const d = data as {
+    choices?: Array<{ message?: { content?: unknown } }>;
+    content?: Array<{ type?: string; text?: unknown }>;
+    output_text?: unknown;
+    output?: Array<{ type?: string; content?: Array<{ type?: string; text?: unknown }> }>;
+  } | null;
+  if (d?.choices) return extractMessageText(d.choices[0]?.message?.content);
+  if (Array.isArray(d?.content)) return extractMessageText(d.content.filter((b) => b?.type === 'text'));
+  if (typeof d?.output_text === 'string') return d.output_text;
+  if (Array.isArray(d?.output)) {
+    return extractMessageText(
+      d.output.filter((item) => item?.type === 'message').flatMap((item) => (item.content ?? []).filter((c) => c?.type === 'output_text')),
+    );
+  }
+  return '';
+}
+
 async function singleShotFetch(args: {
   url: string;
-  apiKey: string;
+  headers: Record<string, string>;
   body: Record<string, unknown>;
   signal?: AbortSignal;
   fetchImpl: typeof fetch;
 }): Promise<string> {
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Authorization: `Bearer ${args.apiKey}`,
-    'HTTP-Referer': 'http://localhost:5173',
-    'X-Title': 'Agent Studio',
-  };
-  // DeepSeek-direct / Abliteration / Arnict use Bearer only (their builders
-  // already shape the body); header shape above matches conversationTitles.ts
-  // for OpenRouter and is accepted by the OpenAI-compatible direct endpoints.
-  // For non-OpenRouter providers the extra Referer/Title headers are harmless.
   let response: Response;
   try {
     response = await args.fetchImpl(args.url, {
       method: 'POST',
-      headers,
+      headers: args.headers,
       body: JSON.stringify(args.body),
       signal: args.signal,
     });
@@ -122,10 +136,11 @@ async function singleShotFetch(args: {
     } catch {
       if (errorText) message = errorText.slice(0, 500);
     }
-    throw summarizeError('provider_error', message, { status: response.status, errorText: `${message}\n${errorText}`.slice(0, 2000) });
+    throw summarizeError('provider_error', message, { status: response.status, errorText: `${message}
+${errorText}`.slice(0, 2000) });
   }
-  const data = (await response.json()) as { choices?: Array<{ message?: { content?: unknown } }> };
-  return extractMessageText(data?.choices?.[0]?.message?.content);
+  // Some gateways send JSON as text/plain: parse by content.
+  return replyText(JSON.parse(await response.text()));
 }
 
 export async function runCompactionSummary(args: CompactionSummaryArgs): Promise<CompactionSummaryResult> {
@@ -140,6 +155,11 @@ export async function runCompactionSummary(args: CompactionSummaryArgs): Promise
   if (isLegacyLmStudioModel(effectiveModel) || provider.id === 'lmstudio') {
     throw summarizeError('unsupported_model', 'This conversation uses the removed LM Studio provider.');
   }
+
+  // A summary is a mechanical rewrite: run it with the least thinking the
+  // model allows (off where it can be switched off).
+  const summaryModel = await modelCatalog().resolveModel(userId, effectiveModel);
+  const summaryPlan = planReasoning(summaryModel.reasoning, { enabled: false });
 
   // Codex models bridge to the app-server; the used thread id is DISCARDED by
   // the atomic codex_thread_id=NULL in the persist transaction. That orphans
@@ -163,7 +183,7 @@ export async function runCompactionSummary(args: CompactionSummaryArgs): Promise
   if (isLlamacppModel(effectiveModel)) {
     // Mirror of server/routes/chat.ts llamacpp loopback POST (llamacppFetch
     // over direct/relay transport), single-shot variant: stream:false,
-    // temperature 0.2, no tools/reasoning extras.
+    // temperature 0.2, no tools, thinking at the least the model allows.
     const doFetch = args.llamacppFetchImpl ?? testLlamacppImpl ?? llamacppFetch;
     const body: Record<string, unknown> = {
       model: upstream,
@@ -174,6 +194,7 @@ export async function runCompactionSummary(args: CompactionSummaryArgs): Promise
       temperature: 0.2,
       max_tokens: 4096,
       stream: false,
+      ...chatReasoningFields(summaryModel, summaryPlan),
     };
     let response: Response;
     try {
@@ -202,31 +223,39 @@ export async function runCompactionSummary(args: CompactionSummaryArgs): Promise
     return { text: extractMessageText(data?.choices?.[0]?.message?.content) };
   }
 
-  // openrouter / deepseek / abliteration / arnict — POST chatCompletionsUrl.
+  // Hosted providers: the catalog decides the wire (chat-completions, or
+  // Anthropic-shape / Responses for OpenCode Go models served there).
   const fetchImpl = args.fetchImpl ?? testFetchImpl ?? fetch;
   const apiKey = getSettingValue(userId, provider.apiKeySetting);
   if (!apiKey?.trim()) {
     throw summarizeError('no_api_key', `${provider.label} API key not configured.`);
   }
+  const headers = provider.buildHeaders(apiKey);
+  if (provider.id === 'opencode-go') headers['x-opencode-session'] = args.conversationId ?? `compact-${userId}`;
+  const conversation = [
+    { role: 'system', content: args.systemPrompt },
+    { role: 'user', content: args.prompt },
+  ];
+  const transportInput = { model: summaryModel, plan: summaryPlan, messages: conversation, tools: [], includeTools: false, temperature: 0.2, maxTokens: 4096 };
+  if (provider.id === 'opencode-go' && summaryModel.transport === 'messages') {
+    headers['anthropic-version'] = OPENCODE_GO_ANTHROPIC_VERSION;
+    headers['x-api-key'] = apiKey.trim();
+    const text = await singleShotFetch({ url: OPENCODE_GO_MESSAGES_URL, headers, body: { ...buildMessagesBody(transportInput), stream: false }, signal, fetchImpl });
+    return { text };
+  }
+  if (provider.id === 'opencode-go' && summaryModel.transport === 'responses') {
+    const text = await singleShotFetch({ url: OPENCODE_GO_RESPONSES_URL, headers, body: { ...buildResponsesBody(transportInput), stream: false }, signal, fetchImpl });
+    return { text };
+  }
+  // Tools, provider routing and plugins never travel on a summary.
   const body: Record<string, unknown> = {
     model: upstream,
-    messages: [
-      { role: 'system', content: args.systemPrompt },
-      { role: 'user', content: args.prompt },
-    ],
+    messages: conversation,
     temperature: 0.2,
     max_tokens: 4096,
     stream: false,
+    ...chatReasoningFields(summaryModel, summaryPlan),
   };
-  // Per-provider reasoning-off extras ONLY; NEVER provider/plugins/tools.
-  if (provider.id === 'deepseek') {
-    Object.assign(body, buildDeepSeekThinking(false, null));
-  } else if (provider.id === 'abliteration') {
-    Object.assign(body, buildAbliterationReasoning(false, null));
-  } else if (provider.id === 'arnict') {
-    body.reasoning = { enabled: false };
-  }
-  // openrouter: NO reasoning key.
-  const text = await singleShotFetch({ url: provider.chatCompletionsUrl, apiKey, body, signal, fetchImpl });
+  const text = await singleShotFetch({ url: provider.chatCompletionsUrl, headers, body, signal, fetchImpl });
   return { text };
 }

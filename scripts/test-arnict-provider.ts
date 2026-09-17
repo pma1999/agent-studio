@@ -1,35 +1,37 @@
 /**
- * Offline acceptance harness for the arnict.com provider (6th provider).
+ * Offline acceptance harness for the arnict.com provider.
  *
- * Pure registry/cost/builder dynamic smoke: imports ONLY the pure
- * `server/providers/index.ts` module (zero db/network imports) and asserts the
- * GC-frozen literals (§§1-6, keyed full-parity):
- *
- *   routing/strip/persist, flags (`supportsJsonSchema:true`), catalog
- *   ids/contexts/prices, cost spots (§6), `buildArnictReasoning` matrix (§3),
- *   guard-message absence (§4: tools are sent, the wave-1 gate is gone),
- *   `isArnictLargeModel`/`ultracode`/`total_credits` absent (§4/§5/§11).
+ * Routing, flags, endpoint and headers come from the pure provider registry;
+ * the catalog (ids, names, contexts, prices, modalities, reasoning) comes from
+ * the keyed live `GET /v1/models` payload (schema 2.4) captured 2026-09-16
+ * through the catalog normalizer; costs through the shared engine; request
+ * fields through the shared reasoning wire (object `reasoning:{enabled,effort}`,
+ * keyed verification 2026-09-13).
  *
  * Usage:
  *   npx tsx scripts/test-arnict-provider.ts
  *
- * Reads no source text, performs no network or DB I/O — offline-safe.
+ * Offline: no network, no DB.
  */
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import {
-  ARNICT_CATALOG,
   ARNICT_PREFIX,
-  arnictCachedTokens,
-  assistantReasoningField,
-  buildArnictReasoning,
-  computeArnictCost,
   getProviderConfig,
   isArnictModel,
   persistedModelId,
   resolveProviderId,
   toUpstreamModelId,
 } from '../server/providers/index.js';
-import * as providersNs from '../server/providers/index.js';
+import { arnictCatalogModel, ARNICT_GATEWAY_EFFORTS, type ArnictModelEntry } from '../server/catalog/normalize/arnict.js';
+import { chatReasoningFields } from '../server/providers/wire/reasoning.js';
+import { cachedTokensFromChat, computeCost, pricedUsageFromChat } from '../shared/models/pricing.js';
+import { planReasoning, type ReasoningRequest } from '../shared/models/reasoning.js';
+
+const live = (JSON.parse(readFileSync(resolve(import.meta.dirname, 'fixtures/models/arnict-models.json'), 'utf8')) as { data: ArnictModelEntry[] }).data;
+const catalog = live.map((entry) => arnictCatalogModel(entry)!);
+const byId = (upstreamId: string) => catalog.find((m) => m.upstreamId === upstreamId)!;
 
 let checks = 0;
 function ok(name: string, fn: () => void): void {
@@ -39,16 +41,15 @@ function ok(name: string, fn: () => void): void {
 }
 
 // ---------------------------------------------------------------------------
-// Routing / strip / persist (GC §1 + §6 persistedModelId)
+// Routing / strip / persist
 // ---------------------------------------------------------------------------
 
-ok('resolveProviderId routes both namespaced ids to arnict', () => {
+ok('resolveProviderId routes namespaced ids to arnict', () => {
   assert.equal(resolveProviderId('arnict:zai/glm-5.3-flash-uncensored'), 'arnict');
   assert.equal(resolveProviderId('arnict:qwen/qwen3.8-27b'), 'arnict');
 });
 
 ok('resolveProviderId leaves bare/upstream ids off arnict (prefix is load-bearing)', () => {
-  // Bare `author/slug` ids are OpenRouter-shaped without the prefix.
   assert.equal(resolveProviderId('zai/glm-5.3-flash-uncensored'), 'openrouter');
   assert.equal(resolveProviderId('qwen/qwen3.8-27b'), 'openrouter');
   assert.equal(resolveProviderId('openai/gpt-4o'), 'openrouter');
@@ -60,27 +61,18 @@ ok('resolveProviderId leaves bare/upstream ids off arnict (prefix is load-bearin
 
 ok('isArnictModel classifies both ways', () => {
   assert.equal(isArnictModel('arnict:zai/glm-5.3-flash-uncensored'), true);
-  assert.equal(isArnictModel('arnict:qwen/qwen3.8-27b'), true);
   assert.equal(isArnictModel('zai/glm-5.3-flash-uncensored'), false);
-  assert.equal(isArnictModel('openai/gpt-4o'), false);
   assert.equal(isArnictModel(null), false);
 });
 
-ok('toUpstreamModelId strips the arnict prefix', () => {
+ok('toUpstreamModelId strips the arnict prefix (keeps the author/slug form)', () => {
   assert.equal(toUpstreamModelId('arnict:zai/glm-5.3-flash-uncensored'), 'zai/glm-5.3-flash-uncensored');
-  assert.equal(toUpstreamModelId('arnict:qwen/qwen3.8-27b'), 'qwen/qwen3.8-27b');
+  assert.equal(toUpstreamModelId('arnict:zai/glm-5.3-flash-uncensored/flex'), 'zai/glm-5.3-flash-uncensored/flex');
 });
 
 ok('persistedModelId keeps the namespaced id for arnict', () => {
-  assert.equal(
-    persistedModelId('arnict', 'arnict:zai/glm-5.3-flash-uncensored', 'zai/glm-5.3-flash-uncensored'),
-    'arnict:zai/glm-5.3-flash-uncensored',
-  );
-  assert.equal(
-    persistedModelId('arnict', 'arnict:qwen/qwen3.8-27b', null),
-    'arnict:qwen/qwen3.8-27b',
-  );
-  // Contrast: openrouter records the echoed upstream variant.
+  assert.equal(persistedModelId('arnict', 'arnict:zai/glm-5.3-flash-uncensored', 'zai/glm-5.3-flash-uncensored'), 'arnict:zai/glm-5.3-flash-uncensored');
+  assert.equal(persistedModelId('arnict', 'arnict:qwen/qwen3.8-27b', null), 'arnict:qwen/qwen3.8-27b');
   assert.equal(persistedModelId('openrouter', 'org/model', 'variant'), 'variant');
 });
 
@@ -89,14 +81,13 @@ ok('ARNICT_PREFIX is the frozen namespaced prefix', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Provider flags + endpoint + headers (GC §1 + §2)
+// Provider flags + endpoint + headers
 // ---------------------------------------------------------------------------
 
-ok('arnict capability flags are F,F,F,T (json_schema on, keyed full-parity)', () => {
+ok('arnict capability flags: no routing, no plugins, json_schema on', () => {
   const cfg = getProviderConfig('arnict');
   assert.equal(cfg.supportsProviderRouting, false);
   assert.equal(cfg.supportsPlugins, false);
-  assert.equal(cfg.supportsReasoningParam, false);
   assert.equal(cfg.supportsJsonSchema, true);
 });
 
@@ -117,207 +108,126 @@ ok('arnict headers are Bearer-only (no x-api-key/Referer/Title)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Catalog (GC §3 frozen static table)
+// Catalog from the live API
 // ---------------------------------------------------------------------------
 
-ok('catalog carries exactly the two frozen ids in order', () => {
-  assert.deepEqual(
-    ARNICT_CATALOG.map((m) => m.id),
-    [
-      'arnict:zai/glm-5.3-flash-uncensored',
-      'arnict:qwen/qwen3.8-27b',
-    ],
-  );
+ok('catalog lists every live id (including the flex tier the static list missed)', () => {
+  assert.deepEqual(catalog.map((m) => m.id), [
+    'arnict:zai/glm-5.3-flash-uncensored',
+    'arnict:qwen/qwen3.8-27b',
+    'arnict:zai/glm-5.3-flash-uncensored/flex',
+  ]);
+  assert.deepEqual(catalog.map((m) => m.name), ['GLM 5.3 Flash Uncensored', 'Qwen: Qwen 3.8 27B', 'GLM 5.3 Flash Uncensored (Flex)']);
 });
 
-ok('catalog names are frozen', () => {
-  assert.deepEqual(
-    ARNICT_CATALOG.map((m) => m.name),
-    ['GLM 5.3 Flash Uncensored', 'Qwen 3.8 27B'],
-  );
+ok('contexts and output limits come from the modality records', () => {
+  assert.deepEqual(catalog.map((m) => m.contextLength), [1048576, 262144, 1048576]);
+  assert.deepEqual(catalog.map((m) => m.maxOutputTokens), [131072, 131072, 131072]);
 });
 
-ok('catalog contexts are frozen (1M / 256K)', () => {
-  assert.deepEqual(
-    ARNICT_CATALOG.map((m) => m.context_length),
-    [1048576, 262144],
-  );
+ok('prices come from the modality pricing rows (flex at half price, Qwen free)', () => {
+  assert.deepEqual(catalog.map((m) => m.pricing?.rates), [
+    { input: 0.125, output: 0.5, cacheRead: 0.05 },
+    { input: 0, output: 0, cacheRead: 0 },
+    { input: 0.0625, output: 0.25, cacheRead: 0.025 },
+  ]);
 });
 
-ok('catalog pricing is frozen ($0.125/$0.50 GLM, free Qwen)', () => {
-  assert.deepEqual(
-    ARNICT_CATALOG.map((m) => m.pricing),
-    [
-      { prompt: '0.000000125', completion: '0.0000005' },
-      { prompt: '0', completion: '0' },
-    ],
-  );
-});
-
-ok('catalog descriptions promise no tools/structured-output/reasoning controls', () => {
-  for (const m of ARNICT_CATALOG) {
-    assert.doesNotMatch(m.description, /tool call|structured output|json_schema|reasoning_effort|include_reasoning|thinking/i);
-  }
+ok('every model accepts text and images', () => {
+  for (const model of catalog) assert.deepEqual(model.inputModalities, ['text', 'image']);
 });
 
 // ---------------------------------------------------------------------------
-// Cost (GC §6 frozen table + hit rule)
+// Cost through the shared engine
 // ---------------------------------------------------------------------------
+
+const costOf = (upstreamId: string, usage: Parameters<typeof pricedUsageFromChat>[0]) =>
+  computeCost(byId(upstreamId).pricing, pricedUsageFromChat(usage));
 
 ok('cost spot: GLM 1M prompt + 1M completion = $0.625', () => {
-  const cost = computeArnictCost(
-    { prompt_tokens: 1_000_000, completion_tokens: 1_000_000 } as never,
-    'zai/glm-5.3-flash-uncensored',
-  );
-  assert.equal(cost, 0.625);
+  assert.equal(costOf('zai/glm-5.3-flash-uncensored', { prompt_tokens: 1_000_000, completion_tokens: 1_000_000 }), 0.625);
 });
 
 ok('cost spot: GLM 1M prompt (250k cached) + 1M completion = $0.60625', () => {
-  const cost = computeArnictCost(
-    {
-      prompt_tokens: 1_000_000,
-      prompt_tokens_details: { cached_tokens: 250_000 },
-      completion_tokens: 1_000_000,
-    } as never,
-    'zai/glm-5.3-flash-uncensored',
-  );
-  assert.equal(cost, 0.60625);
-});
-
-ok('cost spot: Qwen is $0 regardless of tokens (launch-week free)', () => {
-  const cost = computeArnictCost(
-    { prompt_tokens: 1_000_000, completion_tokens: 1_000_000 } as never,
-    'qwen/qwen3.8-27b',
-  );
-  assert.equal(cost, 0);
-});
-
-ok('cost hit rule reads details.cached_tokens with fallback cached=0', () => {
-  assert.equal(arnictCachedTokens({ prompt_tokens_details: { cached_tokens: 7 } } as never), 7);
-  assert.equal(arnictCachedTokens({} as never), 0);
-  assert.equal(arnictCachedTokens(null), 0);
-  assert.equal(arnictCachedTokens(undefined), 0);
-  // Miss clamps at zero when hit exceeds prompt_tokens.
-  const clamped = computeArnictCost(
-    { prompt_tokens: 10, prompt_tokens_details: { cached_tokens: 50 }, completion_tokens: 0 } as never,
-    'zai/glm-5.3-flash-uncensored',
-  );
-  assert.equal(clamped, (50 * 0.05) / 1_000_000);
-});
-
-ok('cost is 0 for unknown models and missing usage', () => {
   assert.equal(
-    computeArnictCost({ prompt_tokens: 100, completion_tokens: 100 } as never, 'nope'),
-    0,
+    costOf('zai/glm-5.3-flash-uncensored', { prompt_tokens: 1_000_000, prompt_tokens_details: { cached_tokens: 250_000 }, completion_tokens: 1_000_000 }),
+    0.60625,
   );
-  assert.equal(computeArnictCost(null, 'zai/glm-5.3-flash-uncensored'), 0);
-  assert.equal(computeArnictCost(undefined, 'zai/glm-5.3-flash-uncensored'), 0);
+});
+
+ok('cost spot: Qwen is $0 regardless of tokens', () => {
+  assert.equal(costOf('qwen/qwen3.8-27b', { prompt_tokens: 1_000_000, completion_tokens: 1_000_000 }), 0);
+});
+
+ok('cached tokens read details.cached_tokens; miss never negative', () => {
+  assert.equal(cachedTokensFromChat({ prompt_tokens_details: { cached_tokens: 7 } }), 7);
+  assert.equal(cachedTokensFromChat({}), 0);
+  assert.equal(cachedTokensFromChat(undefined), 0);
+  assert.equal(costOf('zai/glm-5.3-flash-uncensored', { prompt_tokens: 10, prompt_tokens_details: { cached_tokens: 50 }, completion_tokens: 0 }), (50 * 0.05) / 1_000_000);
 });
 
 // ---------------------------------------------------------------------------
-// Reasoning builder matrix + tools-gate absence (GC §3 + §4 keyed full-parity)
+// Reasoning: live `reasoning` flag + gateway vocabulary, object wire
 // ---------------------------------------------------------------------------
 
-ok("assistantReasoningField(arnict) is the default reasoning field (serves GLM)", () => {
-  assert.equal(assistantReasoningField('arnict'), 'reasoning');
+const send = (request: ReasoningRequest, opts?: { structuredOutput?: boolean }) => {
+  const model = byId('zai/glm-5.3-flash-uncensored');
+  return chatReasoningFields(model, planReasoning(model.reasoning, request), opts);
+};
+
+ok('capability: gateway vocabulary (host-level), switchable, no budget field', () => {
+  const cap = byId('zai/glm-5.3-flash-uncensored').reasoning;
+  assert.equal(cap.levelsSource, 'host');
+  assert.equal(cap.canDisable, true);
+  assert.deepEqual(cap.levels, ['minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+  assert.equal(cap.budget, null);
+  assert.deepEqual([...ARNICT_GATEWAY_EFFORTS], ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 });
 
-ok('tools-unsupported guard message is gone (tools are sent, gate retired)', () => {
-  const ns = providersNs as unknown as Record<string, unknown>;
-  assert.equal(ns['ARNICT_TOOLS_UNSUPPORTED_MESSAGE'], undefined);
+ok('history replays the trace as `reasoning`', () => {
+  assert.equal(byId('zai/glm-5.3-flash-uncensored').historyReasoningField, 'reasoning');
 });
 
-ok('buildArnictReasoning is exported; no Arnict large-model guard exists', () => {
-  const ns = providersNs as unknown as Record<string, unknown>;
-  assert.equal(typeof ns['buildArnictReasoning'], 'function');
-  assert.equal(ns['isArnictLargeModel'], undefined);
-});
-
-ok('builder: toggle off always yields {enabled:false} (never exclude/boolean)', () => {
-  assert.deepEqual(buildArnictReasoning(false, 'high'), { enabled: false });
-  assert.deepEqual(buildArnictReasoning(false, null), { enabled: false });
-  assert.deepEqual(buildArnictReasoning(false, undefined), { enabled: false });
-  assert.deepEqual(buildArnictReasoning(false, 'high', true), { enabled: false });
-});
-
-ok("builder: 'none' yields {enabled:false} even with the toggle on", () => {
-  assert.deepEqual(buildArnictReasoning(true, 'none'), { enabled: false });
-  assert.deepEqual(buildArnictReasoning(true, 'none', true), { enabled: false });
+ok('off and none both send {enabled:false}', () => {
+  assert.deepEqual(send({ enabled: false, level: 'high' }), { reasoning: { enabled: false } });
+  assert.deepEqual(send({ enabled: true, level: 'none' }), { reasoning: { enabled: false } });
 });
 
 for (const effort of ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const) {
-  ok(`builder: effort '${effort}' yields {enabled:true, effort}`, () => {
-    assert.deepEqual(buildArnictReasoning(true, effort), { enabled: true, effort });
+  ok(`effort '${effort}' travels inside the reasoning object`, () => {
+    assert.deepEqual(send({ enabled: true, level: effort }), { reasoning: { enabled: true, effort } });
   });
 }
 
-ok('builder: exclude:true rides only on a valid effort', () => {
-  assert.deepEqual(buildArnictReasoning(true, 'high', true), {
-    enabled: true,
-    effort: 'high',
-    exclude: true,
-  });
-  // exclude falsy/omitted never attaches the key.
-  assert.deepEqual(buildArnictReasoning(true, 'high'), { enabled: true, effort: 'high' });
-  assert.deepEqual(buildArnictReasoning(true, 'high', false), { enabled: true, effort: 'high' });
+ok('on without a level (or with garbage) is bare {enabled:true} or a clamped level, never garbage', () => {
+  assert.deepEqual(send({ enabled: true }), { reasoning: { enabled: true } });
+  assert.deepEqual(send({ enabled: true, level: 'bogus' }), { reasoning: { enabled: true, effort: 'medium' } });
 });
 
-ok('builder: unknown/null effort with toggle on is fail-safe bare {enabled:true}', () => {
-  assert.deepEqual(buildArnictReasoning(true, 'bogus'), { enabled: true });
-  assert.deepEqual(buildArnictReasoning(true, null), { enabled: true });
-  assert.deepEqual(buildArnictReasoning(true, undefined), { enabled: true });
-  assert.deepEqual(buildArnictReasoning(true, ''), { enabled: true });
-  // Fail-safe never smuggles exclude either.
-  assert.deepEqual(buildArnictReasoning(true, 'bogus', true), { enabled: true });
+ok('structured output forces reasoning off (trace would eat max_tokens)', () => {
+  assert.deepEqual(send({ enabled: true, level: 'high' }, { structuredOutput: true }), { reasoning: { enabled: false } });
 });
 
-ok('builder: fail-safe — no case emits a forbidden key or a boolean', () => {
-  const cases: Array<Record<string, unknown>> = [
-    buildArnictReasoning(false, 'high'),
-    buildArnictReasoning(true, 'none'),
-    ...(['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const).map((effort) =>
-      buildArnictReasoning(true, effort),
-    ),
-    buildArnictReasoning(true, 'high', true),
-    buildArnictReasoning(true, 'bogus'),
-    buildArnictReasoning(true, null),
-    buildArnictReasoning(true, undefined),
+ok('only the reasoning object is ever emitted (no top-level effort, thinking or max_tokens)', () => {
+  const cases = [
+    send({ enabled: false }),
+    send({ enabled: true }),
+    ...(['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const).map((effort) => send({ enabled: true, level: effort })),
+    send({ enabled: true, level: 'high', budget: 4096 }),
   ];
-  for (const out of cases) {
-    assert.ok(typeof out === 'object' && out !== null && !Array.isArray(out));
-    for (const key of Object.keys(out)) {
-      assert.ok(
-        key === 'enabled' || key === 'effort' || key === 'exclude',
-        `forbidden reasoning key: ${key}`,
-      );
-    }
-    assert.equal('reasoning_effort' in out, false);
-    assert.equal('thinking' in out, false);
-    assert.equal('max_tokens' in out, false);
-    // The object form is the only honest wire shape: never a bare boolean,
-    // never a top-level `effort` outside the object.
-  }
-  // effort values that do travel are exactly the gateway-accepted set.
-  const withEffort = cases.filter((out) => 'effort' in out);
-  assert.ok(withEffort.length > 0);
-  for (const out of withEffort) {
-    assert.ok(
-      ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(out['effort'] as string),
-      `unexpected effort value: ${String(out['effort'])}`,
-    );
+  for (const fields of cases) {
+    assert.deepEqual(Object.keys(fields), ['reasoning']);
+    for (const key of Object.keys(fields.reasoning as object)) assert.ok(key === 'enabled' || key === 'effort', key);
   }
 });
 
-// ---------------------------------------------------------------------------
-// Forbidden (§4/§5/§11: no large-model guard, no ultracode)
-// ---------------------------------------------------------------------------
+ok('a model without the reasoning parameter sends nothing', () => {
+  const plain = arnictCatalogModel({ ...live[0], id: 'x/plain', output_modalities: [{ type: 'text', supported_parameters: {} }] })!;
+  assert.deepEqual(chatReasoningFields(plain, planReasoning(plain.reasoning, { enabled: true, level: 'high' })), {});
+});
 
 ok('ultracode and total_credits never appear in the catalog', () => {
-  assert.doesNotMatch(JSON.stringify(ARNICT_CATALOG), /ultracode/);
-  assert.doesNotMatch(JSON.stringify(ARNICT_CATALOG), /total_credits/);
-  for (const m of ARNICT_CATALOG) {
-    assert.doesNotMatch(m.id, /ultracode/);
-  }
+  assert.doesNotMatch(JSON.stringify(catalog), /ultracode|total_credits/);
 });
 
 console.log(`arnict provider tests passed (${checks} checks)`);

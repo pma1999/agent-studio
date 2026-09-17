@@ -1,106 +1,109 @@
 /**
- * Frontend mirror of the backend provider scheme (server/providers/index.ts).
+ * Frontend view of the provider scheme.
  *
- * DeepSeek-direct models are namespaced with a `deepseek:` prefix, ChatGPT
- * (Codex) models with a `codex:` prefix, and local llama.cpp models with an
- * `llamacpp:` prefix, so a single `model` string carries its provider. This
- * module is the one place the UI needs to recognise those schemes — for
- * grouping, display, and disabling OpenRouter-only affordances (provider
- * routing).
+ * The scheme itself (ids, prefixes, which provider serves a model id) lives in
+ * `shared/models/providers.ts` and is re-exported here; this module adds only
+ * what the UI needs on top: a display label, a group key for the model
+ * selector, a brand accent, and the transport badge. One row per provider —
+ * adding a provider means adding a row, and TypeScript demands it.
  */
+import type { ModelTransport } from '../../shared/models/catalog';
+import {
+  PROVIDER_PREFIXES,
+  providerOfModelId,
+  upstreamIdOf,
+  type ProviderId,
+} from '../../shared/models/providers';
 
-export const DEEPSEEK_PREFIX = 'deepseek:';
-export const CODEX_PREFIX = 'codex:';
-export const ABLITERATION_PREFIX = 'abliteration:';
-export const ARNICT_PREFIX = 'arnict:';
-export const OPENCODE_GO_PREFIX = 'opencode-go:';
-export const LLAMACPP_PREFIX = 'llamacpp:';
+export { PROVIDER_PREFIXES, providerOfModelId, upstreamIdOf };
+export type { ProviderId };
 
-/** Synthetic author/group key used by the model selector for DeepSeek-direct models. */
-export const DEEPSEEK_DIRECT_GROUP = 'deepseek-direct';
-
-/** Synthetic author/group key used by the model selector for ChatGPT (Codex) models. */
-export const CODEX_DIRECT_GROUP = 'codex-chatgpt';
-
-/** Synthetic author/group key used by the model selector for Abliteration-direct models. */
-export const ABLITERATION_GROUP = 'abliteration-direct';
-
-/** Synthetic author/group key used by the model selector for Arnict-direct models. */
-export const ARNICT_GROUP = 'arnict-direct';
-
-/** Synthetic author/group key used by the model selector for OpenCode Go-direct models. */
-export const OPENCODE_GO_GROUP = 'opencode-go-direct';
-
-/** Synthetic author/group key used by the model selector for llama.cpp (local) models. */
-export const LLAMACPP_GROUP = 'llamacpp-local';
-
-/** Brand accent for the DeepSeek-direct provider. */
-export const DEEPSEEK_ACCENT = '#4D6BFE';
-
-/** Brand accent for the ChatGPT (Codex) provider. */
-export const CODEX_ACCENT = '#10a37f';
-
-/** Brand accent for the Abliteration-direct provider. */
-export const ABLITERATION_ACCENT = '#e5489e';
-
-/** Brand accent for the Arnict-direct provider. */
-export const ARNICT_ACCENT = '#14b8a6';
-
-/** Brand accent for the OpenCode Go-direct provider. */
-export const OPENCODE_GO_ACCENT = '#a855f7';
+export interface ProviderUi {
+  /** Group heading and settings-card title. */
+  label: string;
+  /** Synthetic author/group key used by the model selector. */
+  group: string;
+  accent: string;
+}
 
 /**
- * Transport badge shown on phase-2 OpenCode Go rows (T7). `messages` rows
- * wear the `Anthropic` badge (amber), `responses` rows the `Responses` badge
- * (blue). Chat-transport rows wear no badge. Pairs are WCAG AA on both light
- * and dark surfaces (amber 6.37:1, blue 7.15:1, measured).
+ * OpenRouter models group by their author (`openai/…`, `anthropic/…`), so it
+ * has no group key of its own; every direct provider is one group.
  */
-export type OpencodeGoBadgeKind = 'anthropic' | 'responses';
+export const PROVIDER_UI: Readonly<Record<ProviderId, ProviderUi>> = {
+  openrouter: { label: 'OpenRouter', group: 'openrouter', accent: '#6467f2' },
+  deepseek: { label: 'DeepSeek · Direct', group: 'deepseek-direct', accent: '#4D6BFE' },
+  codex: { label: 'ChatGPT · Codex', group: 'codex-chatgpt', accent: '#10a37f' },
+  abliteration: { label: 'Abliteration · Direct', group: 'abliteration-direct', accent: '#e5489e' },
+  arnict: { label: 'Arnict · Direct', group: 'arnict-direct', accent: '#14b8a6' },
+  'opencode-go': { label: 'OpenCode Go · Direct', group: 'opencode-go-direct', accent: '#a855f7' },
+  llamacpp: { label: 'llama.cpp · Local', group: 'llamacpp-local', accent: '#ca8a04' },
+  lmstudio: { label: 'LM Studio', group: 'lmstudio-removed', accent: 'var(--text-muted)' },
+};
 
-export interface OpencodeGoBadgeMeta {
+/** Providers the UI offers, in the order the model selector groups them. */
+export const DIRECT_PROVIDERS: readonly ProviderId[] = [
+  'deepseek',
+  'codex',
+  'abliteration',
+  'arnict',
+  'opencode-go',
+  'llamacpp',
+];
+
+/** Group key of a model id: the direct provider's group, or the OpenRouter author. */
+export function modelGroupKey(modelId: string): string {
+  const provider = providerOfModelId(modelId);
+  if (provider !== 'openrouter') return PROVIDER_UI[provider].group;
+  const slash = modelId.indexOf('/');
+  return slash > 0 ? modelId.slice(0, slash) : 'other';
+}
+
+/** Provider whose group key this is, or null for an OpenRouter author group. */
+export function providerOfGroupKey(group: string): ProviderId | null {
+  const entry = (Object.entries(PROVIDER_UI) as Array<[ProviderId, ProviderUi]>)
+    .find(([, ui]) => ui.group === group);
+  return entry && entry[0] !== 'openrouter' ? entry[0] : null;
+}
+
+/** Provider routing (endpoint preferences) is an OpenRouter-only affordance. */
+export function supportsProviderRouting(modelId: string | null | undefined): boolean {
+  return providerOfModelId(modelId) === 'openrouter';
+}
+
+export interface TransportBadge {
   label: string;
   background: string;
   color: string;
 }
 
-export const OPENCODE_GO_BADGE_META: Record<OpencodeGoBadgeKind, OpencodeGoBadgeMeta> = {
-  anthropic: { label: 'Anthropic', background: '#fef3c7', color: '#92400e' },
+/**
+ * Badge for models served over a non-default wire, so a row's API shape is
+ * visible where it matters. Chat and local models wear none. Colour pairs are
+ * WCAG AA on both light and dark surfaces (amber 6.37:1, blue 7.15:1).
+ */
+export const TRANSPORT_BADGES: Readonly<Partial<Record<ModelTransport, TransportBadge>>> = {
+  messages: { label: 'Anthropic', background: '#fef3c7', color: '#92400e' },
   responses: { label: 'Responses', background: '#dbeafe', color: '#1e40af' },
 };
 
-/** Brand accent for the llama.cpp (local) provider. */
-export const LLAMACPP_ACCENT = '#ca8a04';
+export function transportBadge(transport: ModelTransport | null | undefined): TransportBadge | null {
+  return transport ? TRANSPORT_BADGES[transport] ?? null : null;
+}
 
 /**
- * Browser event fired by the Settings panel after a llama.cpp config save,
- * status test, start, or stop so live consumers (catalog hook) can refresh.
- * Shared from here (not the hook) so SettingsPanel/LlamaCppSection and
- * useLlamaCppModels import one source.
+ * Browser event fired after anything that can change which models a user can
+ * see or send to: an API key saved or cleared, a ChatGPT account connected or
+ * signed out, a local llama.cpp server started or stopped. The catalog hook
+ * listens and reloads.
  */
+export const MODEL_CATALOG_CHANGED_EVENT = 'models:catalog-changed';
+
+/** Fired by the llama.cpp panel on config save, status test, start and stop. */
 export const LLAMACPP_STATUS_CHANGED_EVENT = 'llamacpp:status-changed';
 
-export function isDeepSeekDirectModel(modelId: string | null | undefined): boolean {
-  return typeof modelId === 'string' && modelId.startsWith(DEEPSEEK_PREFIX);
-}
-
-export function isCodexModel(modelId: string | null | undefined): boolean {
-  return typeof modelId === 'string' && modelId.startsWith(CODEX_PREFIX);
-}
-
-export function isAbliterationModel(modelId: string | null | undefined): boolean {
-  return typeof modelId === 'string' && modelId.startsWith(ABLITERATION_PREFIX);
-}
-
-export function isArnictModel(modelId: string | null | undefined): boolean {
-  return typeof modelId === 'string' && modelId.startsWith(ARNICT_PREFIX);
-}
-
-export function isOpencodeGoModel(modelId: string | null | undefined): boolean {
-  return typeof modelId === 'string' && modelId.startsWith(OPENCODE_GO_PREFIX);
-}
-
-export function isLlamaCppModel(modelId: string | null | undefined): boolean {
-  return typeof modelId === 'string' && modelId.startsWith(LLAMACPP_PREFIX);
+export function notifyModelCatalogChanged(): void {
+  if (typeof window !== 'undefined') window.dispatchEvent(new Event(MODEL_CATALOG_CHANGED_EVENT));
 }
 
 /**
@@ -117,32 +120,14 @@ export function isRemovedLocalProviderId(modelId: string | null | undefined): bo
   return typeof modelId === 'string' && modelId.startsWith(REMOVED_LOCAL_PROVIDER_PREFIX);
 }
 
-/** Strips the `deepseek:` scheme for display (e.g. `deepseek:deepseek-v4-flash` → `deepseek-v4-flash`). */
-export function stripDeepSeekPrefix(modelId: string): string {
-  return modelId.startsWith(DEEPSEEK_PREFIX) ? modelId.slice(DEEPSEEK_PREFIX.length) : modelId;
+/** True for a model served by this provider (`isOfProvider(id, 'codex')`). */
+export function isOfProvider(modelId: string | null | undefined, provider: ProviderId): boolean {
+  return typeof modelId === 'string' && providerOfModelId(modelId) === provider;
 }
 
-/** Strips the `codex:` scheme for display (e.g. `codex:gpt-5.1-codex` → `gpt-5.1-codex`). */
-export function stripCodexPrefix(modelId: string): string {
-  return modelId.startsWith(CODEX_PREFIX) ? modelId.slice(CODEX_PREFIX.length) : modelId;
+/** Display form of a model id: the upstream id, without the scheme prefix. */
+export function stripProviderPrefix(modelId: string): string {
+  return upstreamIdOf(modelId);
 }
 
-/** Strips the `abliteration:` scheme for display (e.g. `abliteration:abliterated-model-large-v2` → `abliterated-model-large-v2`). */
-export function stripAbliterationPrefix(modelId: string): string {
-  return modelId.startsWith(ABLITERATION_PREFIX) ? modelId.slice(ABLITERATION_PREFIX.length) : modelId;
-}
-
-/** Strips the `arnict:` scheme for display (e.g. `arnict:zai/glm-5.3-flash-uncensored` → `zai/glm-5.3-flash-uncensored`). */
-export function stripArnictPrefix(modelId: string): string {
-  return modelId.startsWith(ARNICT_PREFIX) ? modelId.slice(ARNICT_PREFIX.length) : modelId;
-}
-
-/** Strips the `opencode-go:` scheme for display (e.g. `opencode-go:kimi-k3` → `kimi-k3`). */
-export function stripOpencodeGoPrefix(modelId: string): string {
-  return modelId.startsWith(OPENCODE_GO_PREFIX) ? modelId.slice(OPENCODE_GO_PREFIX.length) : modelId;
-}
-
-/** Strips the `llamacpp:` scheme (e.g. `llamacpp:Qwen3.6-35B` → `Qwen3.6-35B`). */
-export function stripLlamaCppPrefix(modelId: string): string {
-  return modelId.startsWith(LLAMACPP_PREFIX) ? modelId.slice(LLAMACPP_PREFIX.length) : modelId;
-}
+export const LLAMACPP_ACCENT = PROVIDER_UI.llamacpp.accent;

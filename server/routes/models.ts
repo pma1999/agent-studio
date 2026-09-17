@@ -4,7 +4,7 @@ import { AuthRequest } from '../middleware/auth.js';
 import db from '../db.js';
 import { getSettingValue } from './settings.js';
 import { normalizeOpenRouterEndpoints } from '../providerRouting.js';
-import { ABLITERATION_BASE_URL, ABLITERATION_CATALOG, ARNICT_BASE_URL, ARNICT_CATALOG, DEEPSEEK_BASE_URL, DEEPSEEK_CATALOG, LLAMACPP_PREFIX, OPENCODE_GO_BASE_URL, OPENCODE_GO_CATALOG, OPENCODE_GO_CATALOG_VERSION, OPENCODE_GO_CHAT_COMPLETIONS_URL, OPENCODE_GO_PREFIX, OPENCODE_GO_USER_AGENT, OPENCODE_GO_VALIDATE_MODEL } from '../providers/index.js';
+import { ABLITERATION_BASE_URL, ARNICT_BASE_URL, DEEPSEEK_BASE_URL, OPENCODE_GO_CHAT_COMPLETIONS_URL, OPENCODE_GO_USER_AGENT, OPENCODE_GO_VALIDATE_MODEL } from '../providers/index.js';
 import {
   LLAMACPP_ACTIVE_PRESET_SCHEMA,
   LLAMACPP_CANONICAL_PRESETS,
@@ -28,167 +28,41 @@ import {
 } from '../providers/llamacppTransport.js';
 import { getAgentCapabilities, sendLlamacppRequest } from '../agentRelay/registry.js';
 import type { BackendToAgentMessage } from '../agentRelay/protocol.js';
-import { listChatgptModels, CodexForbiddenError } from '../codex/instanceManager.js';
-import { lookupSupportedEfforts } from '../../shared/reasoningEfforts.js';
+import { modelCatalog } from '../catalog/index.js';
+import type { ProviderId } from '../../shared/models/providers.js';
 
 const router = Router();
 
-// In-memory cache for OpenRouter models
-let modelsCache: { data: any[]; timestamp: number } | null = null;
-const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 const ENDPOINTS_CACHE_TTL = 60 * 1000; // 1 minute
 const endpointsCache = new Map<string, { data: unknown[]; timestamp: number }>();
 
-// OpenCode Go drift monitor (T6): compares the live keyless `GET /v1/models`
-// id set against the frozen `OPENCODE_GO_CATALOG` and logs new/missing ids.
-// Info-only: never mutates `data`, never sends a key or query params, single
-// page, throttled to one check per hour, fail-open (degraded warn, never 500).
-const OPENCODE_GO_DRIFT_TTL_MS = 60 * 60 * 1000; // 1 hour (soft throttle)
-const OPENCODE_GO_DRIFT_TIMEOUT_MS = 5_000;
-let opencodeGoDriftLastCheck = 0;
+const CATALOG_PROVIDERS: ReadonlySet<string> = new Set<ProviderId>(['openrouter', 'deepseek', 'codex', 'llamacpp', 'abliteration', 'arnict', 'opencode-go']);
 
-async function maybeLogOpencodeGoDrift(): Promise<void> {
-  const now = Date.now();
-  if (now - opencodeGoDriftLastCheck < OPENCODE_GO_DRIFT_TTL_MS) return;
-  opencodeGoDriftLastCheck = now;
-  const version = OPENCODE_GO_CATALOG_VERSION;
+// GET /api/models/catalog - Every provider's models for this user, one shape
+// (`CatalogResponse`). Never fails as a whole: each provider reports its own state.
+// `?refresh=1` bypasses caches (a user-initiated retry).
+router.get('/catalog', async (req: AuthRequest, res: Response) => {
+  const userId = req.userId;
+  if (!userId) return res.status(401).json({ error: 'Unauthorized' });
   try {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), OPENCODE_GO_DRIFT_TIMEOUT_MS);
-    try {
-      const res = await fetch(`${OPENCODE_GO_BASE_URL}/models`, { signal: ctrl.signal });
-      if (!res.ok) {
-        console.warn(`[opencode-go] drift check degraded (version ${version}): live list HTTP ${res.status}`);
-        return;
-      }
-      // Upstream lies about Content-Type (text/plain on JSON bodies): read as
-      // text first, then parse by content, not by header.
-      const raw = await res.text();
-      let json: { data?: unknown };
-      try {
-        json = JSON.parse(raw) as { data?: unknown };
-      } catch {
-        console.warn(`[opencode-go] drift check degraded (version ${version}): live body is not JSON`);
-        return;
-      }
-      const liveIds = Array.isArray(json.data)
-        ? json.data
-            .map((entry) =>
-              entry !== null && typeof entry === 'object' && 'id' in entry
-                ? (entry as { id?: unknown }).id
-                : undefined,
-            )
-            .filter((id): id is string => typeof id === 'string')
-        : [];
-      const catalogBare = new Set(
-        OPENCODE_GO_CATALOG.map((entry) =>
-          entry.id.startsWith(OPENCODE_GO_PREFIX)
-            ? entry.id.slice(OPENCODE_GO_PREFIX.length)
-            : entry.id,
-        ),
-      );
-      const liveSet = new Set(liveIds);
-      const added = liveIds.filter((id) => !catalogBare.has(id));
-      const missing = [...catalogBare].filter((id) => !liveSet.has(id));
-      if (added.length === 0 && missing.length === 0) {
-        console.info(`[opencode-go] drift check ok (version ${version}): live matches catalog (${liveIds.length} ids)`);
-      } else {
-        console.info(
-          `[opencode-go] drift detected (version ${version}): new [${added.join(', ')}] missing [${missing.join(', ')}]`,
-        );
-      }
-    } finally {
-      clearTimeout(timer);
-    }
+    res.json(await modelCatalog().getCatalog(userId, { force: req.query.refresh === '1' }));
   } catch (err) {
-    console.warn(`[opencode-go] drift check degraded (version ${version}): ${err instanceof Error ? err.message : String(err)}`);
+    console.error('Error building model catalog:', err);
+    res.status(500).json({ error: 'Failed to load models' });
   }
-}
+});
 
-/**
- * Pure mapper for one upstream catalog entry. Verbatim passthrough of
- * `reasoning.{supported_efforts, mandatory, default_effort}`; `null` when the
- * upstream entry carries no `reasoning` object. Extracted pure for testability.
- */
-export function mapOpenRouterCatalogEntry(m: any): {
-  id: string;
-  name: string;
-  description: string;
-  context_length: number;
-  pricing: { prompt: string; completion: string };
-  reasoning: {
-    supported_efforts?: string[] | null;
-    mandatory?: boolean | null;
-    default_effort?: string | null;
-  } | null;
-} {
-  const reasoning = m?.reasoning;
-  return {
-    id: m.id,
-    name: m.name,
-    description: m.description || '',
-    context_length: m.context_length || 0,
-    pricing: {
-      prompt: m.pricing?.prompt || '0',
-      completion: m.pricing?.completion || '0',
-    },
-    reasoning:
-      reasoning === null || reasoning === undefined || typeof reasoning !== 'object'
-        ? null
-        : {
-            supported_efforts: Array.isArray(reasoning.supported_efforts)
-              ? [...reasoning.supported_efforts]
-              : (reasoning.supported_efforts ?? null),
-            mandatory: reasoning.mandatory ?? null,
-            default_effort: reasoning.default_effort ?? null,
-          },
-  };
-}
-
-/**
- * Read a model's supported efforts from the in-memory proxy cache. Never
- * fetches: `null` when the cache is cold, the model is absent, or it carries
- * no list (all fail-open cases for the T2 clamp).
- */
-export function getCachedOpenRouterSupportedEfforts(modelId: string): string[] | null {
-  if (!modelsCache) return null;
-  return lookupSupportedEfforts(modelsCache.data, modelId);
-}
-
-// GET /api/models/openrouter - Fetch available OpenRouter models (cached)
-router.get('/openrouter', async (_req: AuthRequest, res: Response) => {
+// GET /api/models/catalog/:provider - One provider's catalog (`ProviderCatalog`).
+router.get('/catalog/:provider', async (req: AuthRequest, res: Response) => {
+  const userId = req.userId;
+  if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+  const provider = String(req.params.provider ?? '');
+  if (!CATALOG_PROVIDERS.has(provider)) return res.status(404).json({ error: `Unknown provider "${provider}"` });
   try {
-    // Return cached data if still fresh
-    if (modelsCache && Date.now() - modelsCache.timestamp < CACHE_TTL) {
-      return res.json({ data: modelsCache.data });
-    }
-
-    const response = await fetch('https://openrouter.ai/api/v1/models', {
-      headers: {
-        'Content-Type': 'application/json',
-      },
-    });
-
-    if (!response.ok) {
-      return res.status(response.status).json({
-        error: `Failed to fetch OpenRouter models: ${response.statusText}`,
-      });
-    }
-
-    const json = await response.json();
-    const models = (json.data || []).map(mapOpenRouterCatalogEntry);
-
-    // Update cache
-    modelsCache = { data: models, timestamp: Date.now() };
-
-    res.json({ data: models });
+    res.json(await modelCatalog().getProviderCatalog(userId, provider as ProviderId, { force: req.query.refresh === '1' }));
   } catch (err) {
-    console.error('Error fetching OpenRouter models:', err);
-    // Return stale cache if available
-    if (modelsCache) {
-      return res.json({ data: modelsCache.data });
-    }
-    res.status(500).json({ error: 'Failed to fetch OpenRouter models' });
+    console.error(`Error building ${provider} catalog:`, err);
+    res.status(500).json({ error: 'Failed to load models' });
   }
 });
 
@@ -251,60 +125,6 @@ router.get('/openrouter/endpoints', async (req: AuthRequest, res: Response) => {
   }
 });
 
-// GET /api/models/deepseek - Curated DeepSeek-direct catalog (static; no key needed)
-router.get('/deepseek', (_req: AuthRequest, res: Response) => {
-  res.json({ data: DEEPSEEK_CATALOG });
-});
-
-// GET /api/models/abliteration - Curated Abliteration-direct catalog (static; no key needed)
-router.get('/abliteration', (_req: AuthRequest, res: Response) => {
-  res.json({ data: ABLITERATION_CATALOG });
-});
-
-// GET /api/models/arnict - Curated Arnict-direct catalog (static; no key needed)
-router.get('/arnict', (_req: AuthRequest, res: Response) => {
-  res.json({ data: ARNICT_CATALOG });
-});
-
-// GET /api/models/opencodego - Curated OpenCode Go catalog (static; no key needed)
-// `meta` is additive (version/count/fetchedAt); old clients reading only `data` keep working.
-router.get('/opencodego', (_req: AuthRequest, res: Response) => {
-  void maybeLogOpencodeGoDrift();
-  res.json({
-    data: OPENCODE_GO_CATALOG,
-    meta: {
-      version: OPENCODE_GO_CATALOG_VERSION,
-      count: OPENCODE_GO_CATALOG.length,
-      fetchedAt: new Date().toISOString(),
-    },
-  });
-});
-
-// GET /api/models/codex - Models available to the user's connected ChatGPT account
-const codexModelsCache = new Map<string, { data: unknown[]; timestamp: number }>();
-const CODEX_MODELS_CACHE_TTL = 60_000; // 1 minute
-
-router.get('/codex', async (req: AuthRequest, res: Response) => {
-  try {
-    const userId = req.userId;
-    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
-
-    const cached = codexModelsCache.get(userId);
-    if (cached && Date.now() - cached.timestamp < CODEX_MODELS_CACHE_TTL) {
-      return res.json({ data: cached.data });
-    }
-
-    const models = await listChatgptModels(userId);
-    codexModelsCache.set(userId, { data: models, timestamp: Date.now() });
-    res.json({ data: models });
-  } catch (err) {
-    if (err instanceof CodexForbiddenError) {
-      return res.status(403).json({ error: err.message });
-    }
-    console.error('Error fetching Codex models:', err);
-    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to fetch Codex models' });
-  }
-});
 // GET /api/models/deepseek/validate - Verify the saved DeepSeek key and report balance
 router.get('/deepseek/validate', async (req: AuthRequest, res: Response) => {
   try {
@@ -603,47 +423,6 @@ function upsertSetting(userId: string, key: string, value: string): void {
   `).run(userId, key, value);
 }
 
-// GET /api/models/llamacpp — scanned .gguf catalog (cached ~30 s per user,
-// invalidated by start/stop; a fresh scan re-populates it).
-const llamacppCatalogCache = new Map<string, { data: unknown[]; timestamp: number }>();
-const LLAMACPP_CATALOG_TTL_MS = 30_000;
-
-router.get('/llamacpp', async (req: AuthRequest, res: Response) => {
-  const userId = llamacppGate(req, res);
-  if (!userId) return;
-  try {
-    const cached = llamacppCatalogCache.get(userId);
-    if (cached && Date.now() - cached.timestamp < LLAMACPP_CATALOG_TTL_MS) {
-      return res.json({ data: cached.data });
-    }
-
-    // Capability-missing / no-agent / scan failure all land here as throws ⇒
-    // fail-soft 503 {error} per §5.
-    const entries = await listLlamacppModels(userId);
-    const status = await getLlamacppStatus(userId);
-    const data = entries.map((entry) => ({
-      id: `${LLAMACPP_PREFIX}${entry.key}`,
-      name: entry.key,
-      description: '',
-      context_length: 0, // unknown locally; frontend tolerates zero metadata
-      pricing: { prompt: '0', completion: '0' }, // local: 'local' price column
-      path: entry.path,
-      ...(entry.sizeBytes !== undefined ? { size_bytes: entry.sizeBytes } : {}),
-      shards: entry.shards,
-      mtp_capable: entry.mtpCapable,
-      loaded: status.running && status.modelKey === entry.key,
-    }));
-
-    llamacppCatalogCache.set(userId, { data, timestamp: Date.now() });
-    return res.json({ data });
-  } catch (err) {
-    console.error('Error scanning llama.cpp models:', err);
-    return res.status(503).json({
-      error: err instanceof Error ? err.message : 'Failed to scan the llama.cpp models directory.',
-    });
-  }
-});
-
 // GET /api/models/llamacpp/status - never-throw §5 payload; capability state is
 // REPORTED (capabilitySupported) rather than gated so old agents get a usable answer.
 router.get('/llamacpp/status', async (req: AuthRequest, res: Response) => {
@@ -724,7 +503,7 @@ router.post('/llamacpp/start', async (req: AuthRequest, res: Response) => {
       && typeof result.port === 'number'
       && Array.isArray(result.argv)
     ) {
-      llamacppCatalogCache.delete(userId); // §5 cache invalidation (loaded flags)
+      modelCatalog().invalidate(userId, 'llamacpp'); // loaded flags + /props capability
       return res.json({ ok: true, pid: result.pid, port: result.port, argv: result.argv, waitedMs });
     }
     return res.status(502).json({ error: result.error ?? 'Failed to start llama-server.' });
@@ -744,7 +523,7 @@ router.post('/llamacpp/stop', async (req: AuthRequest, res: Response) => {
   try {
     const result = await stopLlamacpp(userId);
     if (result.ok) {
-      llamacppCatalogCache.delete(userId); // §5 cache invalidation (loaded flags)
+      modelCatalog().invalidate(userId, 'llamacpp'); // loaded flags + /props capability
       return res.json({ ok: true, status: result.status });
     }
     return res.status(502).json({ error: result.error ?? 'Failed to stop llama-server.' });
@@ -918,6 +697,7 @@ router.post('/llamacpp/config', async (req: AuthRequest, res: Response) => {
     if (activePresetRow !== null) upsertSetting(userId, 'llamacpp_active_preset', activePresetRow);
     if (samplingRow !== null) upsertSetting(userId, 'llamacpp_sampling', samplingRow);
     if (modelSamplingRow !== null) upsertSetting(userId, 'llamacpp_model_sampling', modelSamplingRow);
+    modelCatalog().invalidate(userId, 'llamacpp');
     return res.json({ ok: true });
   } catch (err) {
     console.error('Error saving llama.cpp config:', err);

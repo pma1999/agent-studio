@@ -5,14 +5,13 @@ import {
   settingsApi,
   modelsApi,
   llamacppApi,
-  type LlamaCppModel,
   type LlamaCppPresetId,
   type LlamaCppPresetsRow,
   type LlamaCppSampling,
   type LlamaCppStatus,
 } from '../api/client';
 import { LLAMACPP_ACCENT, LLAMACPP_STATUS_CHANGED_EVENT } from '../utils/providers';
-import { useLlamaCppModels } from '../hooks/useLlamaCppModels';
+import { useProviderCatalog } from '../hooks/useModelCatalog';
 import {
   LLAMACPP_ACTIVE_PRESET_DEFAULT,
   LLAMACPP_CACHE_TYPES,
@@ -179,7 +178,8 @@ export function LlamaCppSection() {
   const mountedRef = useRef(true);
   useEffect(() => () => { mountedRef.current = false; }, []);
 
-  const { models: catalog } = useLlamaCppModels();
+  // Local models come from the shared catalog, with their file details.
+  const catalog = useProviderCatalog('llamacpp')?.models ?? [];
 
   const fireStatusChanged = useCallback(
     () => window.dispatchEvent(new Event(LLAMACPP_STATUS_CHANGED_EVENT)),
@@ -618,7 +618,7 @@ export function LlamaCppSection() {
   }, []);
 
   // --- Start / Stop --------------------------------------------------------
-  const effectiveStartKey = startKey || status?.modelKey || catalog[0]?.id.replace(/^[^:]*:/, '') || '';
+  const effectiveStartKey = startKey || status?.modelKey || catalog[0]?.upstreamId || '';
 
   const handleStart = async (keyArg?: string) => {
     const targetKey = keyArg ?? effectiveStartKey;
@@ -717,15 +717,14 @@ export function LlamaCppSection() {
   // --- Derived view data ----------------------------------------------------
   const phase = phaseFromStatus(status);
   const transportBadge = status?.transport === 'direct' ? 'Direct' : status?.transport === 'relay' ? 'Relay' : '—';
-  const catalogByKey = useMemo(() => {
-    const map = new Map<string, LlamaCppModel>();
-    for (const m of catalog) map.set(m.id.replace(/^[^:]*:/, ''), m);
-    return map;
-  }, [catalog]);
+  const catalogByKey = useMemo(
+    () => new Map(catalog.map((m) => [m.upstreamId, m])),
+    [catalog],
+  );
 
   // Preview target: the recorded launch (running OR last-stopped instance).
   const previewKey = status?.modelKey ?? null;
-  const previewMtpCapable = previewKey ? (catalogByKey.get(previewKey)?.mtp_capable ?? null) : null;
+  const previewMtpCapable = previewKey ? (catalogByKey.get(previewKey)?.llamacpp?.mtpCapable ?? null) : null;
   const previewRows = useMemo(
     () => deriveLaunchRows({
       defaults,
@@ -740,7 +739,7 @@ export function LlamaCppSection() {
   );
 
   const overrideKeys = useMemo(
-    () => Array.from(new Set([...Object.keys(overrides), ...catalog.map((m) => m.id.replace(/^[^:]*:/, ''))])),
+    () => Array.from(new Set([...Object.keys(overrides), ...catalog.map((m) => m.upstreamId)])),
     [overrides, catalog]
   );
   const activeOverrideRow = overrideKey ? overrides[overrideKey] ?? {} : {};
@@ -757,7 +756,7 @@ export function LlamaCppSection() {
   // §10 Increment 2d: per-model sampling keys (stored rows ∪ catalog), the
   // active row, and the inherited (= global sampling) placeholder values.
   const modelSamplingKeys = useMemo(
-    () => Array.from(new Set([...Object.keys(modelSampling), ...catalog.map((m) => m.id.replace(/^[^:]*:/, ''))])),
+    () => Array.from(new Set([...Object.keys(modelSampling), ...catalog.map((m) => m.upstreamId)])),
     [modelSampling, catalog]
   );
   const activeModelSamplingRow: LlamaCppSamplingOverride = modelSamplingKey ? modelSampling[modelSamplingKey] ?? {} : {};
@@ -1011,8 +1010,8 @@ export function LlamaCppSection() {
           >
             {catalog.length === 0 && <option value="">No scanned models</option>}
             {catalog.map((m) => (
-              <option key={m.id} value={m.id.replace(/^[^:]*:/, '')}>
-                {m.id.replace(/^[^:]*:/, '')}{m.loaded ? ' (loaded)' : ''}
+              <option key={m.id} value={m.upstreamId}>
+                {m.upstreamId}{m.llamacpp?.loaded ? ' (loaded)' : ''}
               </option>
             ))}
           </select>

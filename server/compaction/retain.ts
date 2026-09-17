@@ -130,8 +130,8 @@ function isSummaryMessage(text: string): boolean {
  * replaced (`summary + retained <= archived`).
  *
  * Why we need a cap Codex does not: Codex sizes its flat 20 000 against windows
- * it always knows, while `resolveWindow()` here returns null for every
- * `openrouter/*` id — the majority of real conversations. Without this, a thread
+ * it always knows, while a model's window here can be unknown (models no longer
+ * listed, routers). Without this, a thread
  * dominated by long pasted user messages (routine in this app) compacts to
  * `summary + every user paste`, which can exceed the pre-compaction view and
  * makes the checkpoint cost context instead of saving it.

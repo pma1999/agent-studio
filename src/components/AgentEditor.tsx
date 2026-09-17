@@ -4,11 +4,10 @@ import { useStore } from '../stores/store';
 import { agentsApi, toolsApi, mcpServersApi, skillsApi } from '../api/client';
 import { Modal } from './ui/Modal';
 import { ModelSelectorCore } from './ModelSelectorCore';
-import { useOpenRouterModels } from '../hooks/useOpenRouterModels';
-import { clampReasoningEffort, filterSupportedEfforts, lookupSupportedEfforts } from '../../shared/reasoningEfforts';
-import { goReasoningKnobFor, goReasoningNoControl, planGoReasoningEffort } from '../../shared/opencodeGoReasoning';
+import { useCatalogModel } from '../hooks/useModelCatalog';
+import { ReasoningControl } from './reasoning/ReasoningControl';
 import { formatModelId } from '../utils/modelUtils';
-import { isArnictModel, isOpencodeGoModel } from '../utils/providers';
+import { PROVIDER_UI, providerOfModelId } from '../utils/providers';
 import { ProviderRoutingSelector } from './ProviderRoutingSelector';
 import { Input } from './ui/Input';
 import { TextArea } from './ui/TextArea';
@@ -46,15 +45,6 @@ const DEFAULT_FORM: AgentFormData = {
   structured_output_schema: null,
   response_healing_enabled: false,
 };
-
-const EFFORT_LEVELS: { value: ReasoningEffort; label: string; desc: string }[] = [
-  { value: 'minimal', label: 'Minimal', desc: '~10% tokens' },
-  { value: 'low', label: 'Low', desc: '~20% tokens' },
-  { value: 'medium', label: 'Medium', desc: '~50% tokens' },
-  { value: 'high', label: 'High', desc: '~80% tokens' },
-  { value: 'xhigh', label: 'Maximum', desc: '~95% tokens' },
-  { value: 'max', label: 'Ultra', desc: 'Max effort (ChatGPT)' },
-];
 
 export function AgentEditor() {
   const {
@@ -175,86 +165,34 @@ export function AgentEditor() {
     setForm((prev) => ({ ...prev, [key]: value }));
   };
 
-  // Per-model effort filter (T3, UI-only): cached catalog, no new requests, no payload change.
-  // The server accepts any union value by design; the hint below never blocks saving.
+  // What the selected model offers, straight from the catalog. Saving is never
+  // blocked by it: a level this model lacks is still stored (models change),
+  // and the server clamps when the message is sent.
   const agentModelShort = formatModelId(form.model);
-  // T5: Arnict (Direct) models ignore response healing and reasoning_max_tokens
-  // server-side by design (§5). Inline hints only; values are preserved (warn, never disable).
-  const isArnictAgentModel = isArnictModel(form.model);
-  // T6 (Go honesty): the OpenRouter catalog never lists `opencode-go:` ids
-  // (lookup returns null past ':' by design), so Go models filter against the
-  // frozen T1 matrix instead. Unknown Go ids stay fail-open (null, as today);
-  // `[]` ids render the fixed-thinking badge (never confused with unknown).
-  const isGoAgentModel = isOpencodeGoModel(form.model);
-  const goAgentKnob = useMemo(
-    () => (isGoAgentModel ? goReasoningKnobFor(form.model) : undefined),
-    [isGoAgentModel, form.model],
+  const { model: agentCatalogModel, reasoning: agentCapability } = useCatalogModel(form.model);
+  const agentModelName = agentCatalogModel?.name ?? agentModelShort;
+  const agentProviderLabel = PROVIDER_UI[providerOfModelId(form.model)].label;
+  // Response healing is an OpenRouter plugin; every direct provider ignores it.
+  const isOpenRouterAgentModel = providerOfModelId(form.model) === 'openrouter';
+  const agentReasoningValue = useMemo(
+    () => ({
+      enabled: !!form.reasoning_enabled,
+      level: form.reasoning_effort ?? null,
+      budget: form.reasoning_max_tokens ?? null,
+    }),
+    [form.reasoning_enabled, form.reasoning_effort, form.reasoning_max_tokens],
   );
-  const goAgentNoControl = useMemo(
-    () => (isGoAgentModel ? goReasoningNoControl(form.model) : false),
-    [isGoAgentModel, form.model],
+  const setAgentReasoning = useCallback(
+    (next: { enabled: boolean; level: string | null; budget: number | null }) => {
+      setForm((prev) => ({
+        ...prev,
+        reasoning_enabled: next.enabled,
+        reasoning_effort: (next.level ?? null) as ReasoningEffort | null,
+        reasoning_max_tokens: next.budget,
+      }));
+    },
+    [setForm],
   );
-  // Verified messages budget ceiling for this Go model (K2: only budget rows
-  // declare one); null = the budget input stays hidden, the value never travels.
-  const goAgentBudgetMax = goAgentKnob?.budgetMax ?? null;
-  const { models: openRouterModels, loading: openRouterModelsLoading, error: openRouterModelsError } = useOpenRouterModels();
-  const supportedAgentEfforts = useMemo(() => {
-    if (isGoAgentModel) {
-      if (goAgentKnob == null) return null;
-      if (goAgentKnob.effortValues === null) return [];
-      return filterSupportedEfforts(goAgentKnob.effortValues);
-    }
-    if (openRouterModelsLoading || openRouterModelsError) return null;
-    return filterSupportedEfforts(lookupSupportedEfforts(openRouterModels, form.model));
-  }, [isGoAgentModel, goAgentKnob, openRouterModels, openRouterModelsLoading, openRouterModelsError, form.model]);
-  const agentEffortHint = useMemo(() => {
-    if (form.reasoning_effort === 'none') return null;
-    if (supportedAgentEfforts === null) return null;
-    if (form.reasoning_effort == null) return null;
-    if (supportedAgentEfforts.includes(form.reasoning_effort)) return null;
-    if (goAgentNoControl) return null;
-    const fallback = isGoAgentModel
-      ? planGoReasoningEffort(form.model, form.reasoning_effort)
-      : clampReasoningEffort(form.reasoning_effort, supportedAgentEfforts);
-    const currentLabel = EFFORT_LEVELS.find((l) => l.value === form.reasoning_effort)?.label
-      ?? form.reasoning_effort;
-    const fallbackLabel = fallback == null
-      ? null
-      : EFFORT_LEVELS.find((l) => l.value === fallback)?.label ?? null;
-    if (fallback === null || fallbackLabel === null) {
-      return `"${currentLabel}" isn't supported by ${agentModelShort} — sending without effort.`;
-    }
-    return `"${currentLabel}" isn't supported by ${agentModelShort} — sending ${fallbackLabel}.`;
-  }, [supportedAgentEfforts, form.reasoning_effort, agentModelShort, isGoAgentModel, goAgentNoControl, form.model]);
-  // T6 Go cap/off hint (warn, never disable; saving stays fail-open). No waiver
-  // suffix anywhere: K1/K2 closed GO on every transport and T3–T5 applied the
-  // GO branch, so every wire described here is already live.
-  const goAgentHint = useMemo(() => {
-    if (!isGoAgentModel || goAgentKnob == null || !form.reasoning_enabled) return null;
-    if (goAgentNoControl) return 'El proveedor razona siempre; el ajuste no se envía.';
-    if (goAgentKnob.effortValues === null) return 'Solo on/off, sin niveles de esfuerzo.';
-    const levels = (filterSupportedEfforts(goAgentKnob.effortValues) ?? []).filter((v) => v !== 'none');
-    const order = EFFORT_LEVELS.map((l) => l.value);
-    const cap = levels.length === 1
-      ? `Solo ${EFFORT_LEVELS.find((l) => l.value === levels[0])?.label} (${levels[0]}).`
-      : levels.length > 1 && levels.every((v, i) => order.indexOf(v) === order.indexOf(levels[0]) + i) && order.indexOf(levels[0]) === 0
-        ? `Hasta ${EFFORT_LEVELS.find((l) => l.value === levels[levels.length - 1])?.label} (${levels[levels.length - 1]}).`
-        : `Admite: ${levels.map((v) => EFFORT_LEVELS.find((l) => l.value === v)?.label ?? v).join(', ')}.`;
-    const off = (filterSupportedEfforts(goAgentKnob.effortValues) ?? []).includes('none')
-      ? 'Admite off (none).'
-      : 'Sin off. Se enviará el mínimo disponible.';
-    return `${cap} ${off}`;
-  }, [isGoAgentModel, goAgentKnob, goAgentNoControl, form.reasoning_enabled]);
-  // T6 Go off-consequence hint, visible while the toggle is off (the effort
-  // section above is collapsed then). Toggle-only off is a real off, and
-  // `none`-listed off is a real off: both need no hint.
-  const goOffHint = useMemo(() => {
-    if (!isGoAgentModel || goAgentKnob == null || form.reasoning_enabled) return null;
-    if (goAgentNoControl) return 'El proveedor razona siempre; el ajuste no se envía.';
-    if (goAgentKnob.effortValues === null) return null;
-    if ((filterSupportedEfforts(goAgentKnob.effortValues) ?? []).includes('none')) return null;
-    return 'Se enviará el mínimo disponible.';
-  }, [isGoAgentModel, goAgentKnob, goAgentNoControl, form.reasoning_enabled]);
 
   return (
     <Modal
@@ -670,294 +608,24 @@ export function AgentEditor() {
                 </div>
               )}
 
-              {/* Reasoning / Thinking Configuration */}
-              <div style={{
-                display: 'flex',
-                flexDirection: 'column',
-                gap: '0',
-                border: `1px solid ${form.reasoning_enabled ? 'var(--border-accent)' : 'var(--border)'}`,
-                borderRadius: 'var(--radius-sm)',
-                overflow: 'hidden',
-                transition: 'all 0.2s ease',
-              }}>
-                {/* Reasoning toggle header */}
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    padding: '10px 12px',
-                    background: form.reasoning_enabled ? 'var(--accent-ghost)' : 'var(--bg-base)',
-                    cursor: 'pointer',
-                    transition: 'all 0.15s ease',
-                  }}
-                  onClick={() => updateField('reasoning_enabled', !form.reasoning_enabled)}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <Brain size={14} style={{ color: form.reasoning_enabled ? 'var(--accent)' : 'var(--text-muted)' }} />
-                    <div>
-                      <div style={{
-                        fontSize: '0.8125rem',
-                        fontWeight: 500,
-                        color: form.reasoning_enabled ? 'var(--text-primary)' : 'var(--text-secondary)',
-                      }}>
-                        Reasoning / Thinking
-                      </div>
-                      <div style={{
-                        fontSize: '0.6875rem',
-                        color: 'var(--text-muted)',
-                      }}>
-                        Enable step-by-step reasoning for deeper, more accurate responses
-                      </div>
-                    </div>
-                  </div>
-                  {/* Toggle switch */}
-                  <div style={{
-                    width: '36px',
-                    height: '20px',
-                    borderRadius: '10px',
-                    background: form.reasoning_enabled ? 'var(--accent)' : 'var(--bg-elevated)',
-                    border: `1px solid ${form.reasoning_enabled ? 'var(--accent)' : 'var(--border)'}`,
-                    position: 'relative',
-                    transition: 'all 0.2s ease',
-                    flexShrink: 0,
-                  }}>
-                    <div style={{
-                      width: '16px',
-                      height: '16px',
-                      borderRadius: '50%',
-                      background: form.reasoning_enabled ? '#ffffff' : 'var(--text-muted)',
-                      position: 'absolute',
-                      top: '1px',
-                      left: form.reasoning_enabled ? '17px' : '1px',
-                      transition: 'all 0.2s ease',
-                    }} />
-                  </div>
-                </div>
-
-                {/* Expanded reasoning settings */}
-                {goOffHint && (
-                  <div
-                    aria-live="polite"
-                    style={{
-                      padding: '8px 12px',
-                      borderTop: '1px solid var(--border)',
-                      background: 'var(--bg-base)',
-                      fontSize: '0.6875rem',
-                      color: 'var(--text-muted)',
-                      lineHeight: 1.4,
-                    }}
-                  >
-                    {goOffHint}
-                  </div>
-                )}
-                {form.reasoning_enabled && (
-                  <div style={{
-                    padding: '12px',
-                    borderTop: '1px solid var(--border)',
-                    background: 'var(--bg-base)',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '12px',
-                  }}>
-                    {/* Effort Level */}
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                      <label style={{
-                        fontSize: '0.6875rem',
-                        fontWeight: 600,
-                        color: 'var(--text-muted)',
-                        textTransform: 'uppercase',
-                        letterSpacing: '0.06em',
-                      }}>
-                        Effort Level
-                        {goAgentNoControl && (
-                          <span
-                            aria-hidden="true"
-                            style={{
-                              marginLeft: '6px',
-                              fontSize: '0.6875rem',
-                              fontWeight: 600,
-                              lineHeight: 1.4,
-                              padding: '2px 6px',
-                              borderRadius: 'var(--radius-sm)',
-                              background: 'var(--bg-elevated)',
-                              color: 'var(--text-secondary)',
-                              textTransform: 'none',
-                              letterSpacing: '0',
-                              whiteSpace: 'nowrap',
-                            }}
-                          >
-                            Thinking fijo
-                          </span>
-                        )}
-                      </label>
-                      <div style={{
-                        display: 'flex',
-                        gap: '0',
-                        background: 'var(--bg-surface)',
-                        borderRadius: 'var(--radius-sm)',
-                        border: '1px solid var(--border)',
-                        padding: '2px',
-                      }}>
-                        {EFFORT_LEVELS.map((level) => {
-                          const isActive = form.reasoning_effort === level.value;
-                          const isSupported = supportedAgentEfforts === null
-                            || supportedAgentEfforts.includes(level.value);
-                          return (
-                            <button
-                              key={level.value}
-                              onClick={() => updateField('reasoning_effort', level.value)}
-                              disabled={!isSupported}
-                              title={isSupported ? level.desc : `${level.label} no soportado por ${agentModelShort}`}
-                              aria-label={isSupported ? undefined : `${level.label}. No soportado por ${agentModelShort}`}
-                              style={{
-                                flex: 1,
-                                padding: '6px 4px',
-                                fontSize: '0.6875rem',
-                                fontWeight: isActive ? 600 : 400,
-                                fontFamily: 'var(--font-body)',
-                                border: 'none',
-                                borderRadius: 'calc(var(--radius-sm) - 2px)',
-                                cursor: isSupported ? 'pointer' : 'not-allowed',
-                                transition: 'all 0.15s ease',
-                                background: isActive ? 'var(--accent-soft)' : 'transparent',
-                                color: isActive ? 'var(--accent)' : 'var(--text-muted)',
-                                letterSpacing: '0.01em',
-                              }}
-                            >
-                              {level.label}
-                            </button>
-                          );
-                        })}
-                      </div>
-                      {agentEffortHint && (
-                        <div
-                          aria-live="polite"
-                          style={{
-                            padding: '6px 8px',
-                            background: 'var(--bg-base)',
-                            border: '1px solid var(--border)',
-                            borderRadius: 'var(--radius-sm)',
-                            fontSize: '0.6875rem',
-                            color: 'var(--text-muted)',
-                            lineHeight: 1.4,
-                          }}
-                        >
-                          {agentEffortHint}
-                        </div>
-                      )}
-                      {goAgentHint && (
-                        <div
-                          aria-live="polite"
-                          style={{
-                            padding: '6px 8px',
-                            background: 'var(--bg-base)',
-                            border: '1px solid var(--border)',
-                            borderRadius: 'var(--radius-sm)',
-                            fontSize: '0.6875rem',
-                            color: 'var(--text-muted)',
-                            lineHeight: 1.4,
-                          }}
-                        >
-                          {goAgentHint}
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Max Tokens for Reasoning (optional; Go: only verified messages-budget rows) */}
-                    {(!isGoAgentModel || goAgentBudgetMax != null) && (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                      <label style={{
-                        fontSize: '0.6875rem',
-                        fontWeight: 600,
-                        color: 'var(--text-muted)',
-                        textTransform: 'uppercase',
-                        letterSpacing: '0.06em',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '4px',
-                      }}>
-                        Reasoning Budget
-                        <span style={{ fontWeight: 400, textTransform: 'none', letterSpacing: '0' }}>(optional)</span>
-                      </label>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <input
-                          type="number"
-                          value={form.reasoning_max_tokens || ''}
-                          onChange={(e) => {
-                            const v = parseInt(e.target.value);
-                            updateField('reasoning_max_tokens', isNaN(v) ? null : v);
-                          }}
-                          placeholder="Auto (from effort)"
-                          min={1024}
-                          max={isGoAgentModel && goAgentBudgetMax != null ? goAgentBudgetMax : 128000}
-                          style={{
-                            flex: 1,
-                            padding: '7px 10px',
-                            fontSize: '0.8125rem',
-                            fontFamily: 'var(--font-mono)',
-                            background: 'var(--bg-surface)',
-                            border: '1px solid var(--border)',
-                            borderRadius: 'var(--radius-sm)',
-                            color: 'var(--text-primary)',
-                            outline: 'none',
-                            transition: 'border-color var(--transition-fast)',
-                          }}
-                          onFocus={(e) => { e.currentTarget.style.borderColor = 'var(--accent)'; }}
-                          onBlur={(e) => { e.currentTarget.style.borderColor = 'var(--border)'; }}
-                        />
-                        <span style={{
-                          fontSize: '0.6875rem',
-                          color: 'var(--text-muted)',
-                          fontFamily: 'var(--font-mono)',
-                          whiteSpace: 'nowrap',
-                        }}>
-                          tokens
-                        </span>
-                      </div>
-                      <span style={{
-                        fontSize: '0.625rem',
-                        color: 'var(--text-muted)',
-                        lineHeight: 1.4,
-                      }}>
-                        Override the effort level with an exact token budget (1,024 - 128,000). Leave empty to use the effort level.
-                      </span>
-                      {isGoAgentModel && goAgentBudgetMax != null && (
-                        <div
-                          aria-live="polite"
-                          style={{
-                            padding: '6px 8px',
-                            background: 'var(--bg-base)',
-                            border: '1px solid var(--border)',
-                            borderRadius: 'var(--radius-sm)',
-                            fontSize: '0.6875rem',
-                            color: 'var(--text-muted)',
-                            lineHeight: 1.4,
-                          }}
-                        >
-                          Presupuesto verificado: hasta {goAgentBudgetMax} tokens.
-                        </div>
-                      )}
-                      {isArnictAgentModel && form.reasoning_max_tokens != null && (
-                        <div
-                          aria-live="polite"
-                          style={{
-                            padding: '6px 8px',
-                            background: 'var(--bg-base)',
-                            border: '1px solid var(--border)',
-                            borderRadius: 'var(--radius-sm)',
-                            fontSize: '0.6875rem',
-                            color: 'var(--text-muted)',
-                            lineHeight: 1.4,
-                          }}
-                        >
-                          Ignored for Arnict (Direct) models.
-                        </div>
-                      )}
-                    </div>
-                    )}
-                  </div>
-                )}
+              {/* Thinking: rendered from what this model actually offers. */}
+              <div
+                style={{
+                  border: `1px solid ${form.reasoning_enabled ? 'var(--border-accent)' : 'var(--border)'}`,
+                  borderRadius: 'var(--radius-sm)',
+                  padding: '12px',
+                  background: form.reasoning_enabled ? 'var(--accent-ghost)' : 'var(--bg-base)',
+                  transition: 'all 0.2s ease',
+                }}
+              >
+                <ReasoningControl
+                  capability={agentCapability}
+                  value={agentReasoningValue}
+                  onChange={setAgentReasoning}
+                  modelName={agentModelName}
+                  providerLabel={agentProviderLabel}
+                  variant="full"
+                />
               </div>
 
               {/* Structured Output (OpenRouter JSON Schema + Response Healing) */}
@@ -1102,7 +770,7 @@ export function AgentEditor() {
                         </a>
                       </span>
                     </label>
-                    {isArnictAgentModel && form.response_healing_enabled && (
+                    {!isOpenRouterAgentModel && form.response_healing_enabled && (
                       <div
                         aria-live="polite"
                         style={{

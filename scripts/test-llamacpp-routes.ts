@@ -1,6 +1,7 @@
 /**
  * OFFLINE acceptance harness for the llama.cpp model routes (task 3):
- *   GET  /api/models/llamacpp            (catalog, 30 s/user cache, fail-soft 503)
+ *   GET  /api/models/catalog/llamacpp    (catalog adapter: 30 s/user cache,
+ *                                         provider state instead of HTTP errors)
  *   GET  /api/models/llamacpp/status     (never-throw §5 payload + pendingRestart)
  *   POST /api/models/llamacpp/start      ({model, overrides?})
  *   POST /api/models/llamacpp/stop       (FROZEN envelope)
@@ -212,7 +213,7 @@ try {
   // Section 1: auth guards — every endpoint rejects anonymous callers (401)
   // ---------------------------------------------------------------------
   for (const [method, url] of [
-    ['GET', '/llamacpp'],
+    ['GET', '/catalog/llamacpp'],
     ['GET', '/llamacpp/status'],
     ['POST', '/llamacpp/start'],
     ['POST', '/llamacpp/stop'],
@@ -233,7 +234,6 @@ try {
   // ---------------------------------------------------------------------
   {
     const gated: Array<['GET' | 'POST', string]> = [
-      ['GET', '/llamacpp'],
       ['POST', '/llamacpp/start'],
       ['POST', '/llamacpp/stop'],
       ['GET', '/llamacpp/config'],
@@ -247,6 +247,16 @@ try {
         assert.equal(r.json?.error, LLAMACPP_CAPABILITY_ERROR);
       });
     }
+  }
+  {
+    const r = await call('GET', '/catalog/llamacpp', { user: USER_A });
+    ok('catalog without capable agent -> 200 unavailable state carrying the gate message', () => {
+      assert.equal(r.status, 200);
+      assert.equal(r.json?.provider, 'llamacpp');
+      assert.equal(r.json?.state, 'unavailable');
+      assert.equal(r.json?.message, LLAMACPP_CAPABILITY_ERROR);
+      assert.deepEqual(r.json?.models, []);
+    });
   }
   {
     const r = await call('GET', '/llamacpp/status', { user: USER_A });
@@ -282,35 +292,35 @@ try {
 
   {
     responderOpts = { scanError: 'models dir vanished' };
-    const r = await call('GET', '/llamacpp', { user: USER_A });
-    ok('catalog scan failure -> 503 {error} fail-soft envelope', () => {
-      assert.equal(r.status, 503);
-      assert.match(String(r.json?.error), /models dir vanished|scan/i);
+    const r = await call('GET', '/catalog/llamacpp', { user: USER_A });
+    ok('catalog scan failure -> error state with the scan message (never cached)', () => {
+      assert.equal(r.status, 200);
+      assert.equal(r.json?.state, 'error');
+      assert.match(String(r.json?.message), /models dir vanished|scan/i);
+      assert.deepEqual(r.json?.models, []);
     });
   }
 
   {
     responderOpts = { files: [{ path: 'C:\\models\\Qwen3-Test.gguf', name: 'Qwen3-Test.gguf', sizeBytes: 1234 }] };
-    const r = await call('GET', '/llamacpp', { user: USER_A });
-    ok('catalog happy path -> §5 envelope with namespaced id + metadata', () => {
+    const r = await call('GET', '/catalog/llamacpp', { user: USER_A });
+    ok('catalog happy path -> CatalogModel with namespaced id + local details', () => {
       assert.equal(r.status, 200);
-      assert.equal(Array.isArray(r.json?.data), true);
-      assert.equal(r.json.data.length, 1);
-      const entry = r.json.data[0];
+      assert.equal(r.json?.state, 'ok');
+      assert.equal(r.json.models.length, 1);
+      const entry = r.json.models[0];
       assert.equal(entry.id, 'llamacpp:Qwen3-Test');
+      assert.equal(entry.upstreamId, 'Qwen3-Test');
       assert.equal(entry.name, 'Qwen3-Test');
-      assert.equal(entry.description, '');
-      assert.equal(entry.context_length, 0);
-      assert.deepEqual(entry.pricing, { prompt: '0', completion: '0' });
-      assert.equal(entry.path, 'C:\\models\\Qwen3-Test.gguf');
-      assert.equal(entry.size_bytes, 1234);
-      assert.equal(entry.shards, 1);
-      assert.equal(entry.mtp_capable, false);
-      assert.equal(entry.loaded, false);
+      assert.equal(entry.transport, 'llamacpp');
+      assert.equal(entry.contextLength, null);
+      assert.deepEqual(entry.pricing, { rates: { input: 0, output: 0 }, source: 'local' });
+      assert.equal(entry.reasoning.status, 'unknown', 'not loaded: no /props to read');
+      assert.deepEqual(entry.llamacpp, { path: 'C:\\models\\Qwen3-Test.gguf', sizeBytes: 1234, shards: 1, mtpCapable: false, loaded: false });
     });
 
     const before = connection!.sent.filter((m) => m.type === 'llamacpp_scan_request').length;
-    const r2 = await call('GET', '/llamacpp', { user: USER_A });
+    const r2 = await call('GET', '/catalog/llamacpp', { user: USER_A });
     const after = connection!.sent.filter((m) => m.type === 'llamacpp_scan_request').length;
     ok('catalog caches ~30 s per user (second hit sends NO new scan)', () => {
       assert.equal(r2.status, 200);
@@ -689,10 +699,11 @@ try {
   {
     responderOpts = { files: [] };
     connect(USER_B, (request) => makeResponder(responderOpts)(request));
-    const r = await call('GET', '/llamacpp', { user: USER_B });
+    const r = await call('GET', '/catalog/llamacpp', { user: USER_B });
     ok('per-user isolation: USER_B gets its own empty catalog, not USER_A cache', () => {
       assert.equal(r.status, 200);
-      assert.deepEqual(r.json.data, []);
+      assert.equal(r.json.state, 'ok');
+      assert.deepEqual(r.json.models, []);
     });
   }
 

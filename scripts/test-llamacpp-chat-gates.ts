@@ -41,6 +41,8 @@ const councilSource = read('server/services/councilExecutor.ts');
 const chatCouncilSource = read('server/routes/chatCouncil.ts');
 const indexSource = read('server/providers/index.ts');
 const modelsSource = read('server/routes/models.ts');
+const wireSource = read('server/providers/wire/reasoning.ts');
+const providersSource = read('shared/models/providers.ts');
 const envSource = read('.env.example');
 
 let checks = 0;
@@ -69,24 +71,19 @@ function stabilityChecks(): void {
   ok('(S4) deepseek/openrouter reasoning-field normalization preserved', () => {
     assert.match(chatSource, /const reasoningChunk = delta\?\.reasoning \|\| delta\?\.reasoning_content;/);
   });
-  ok('(S5) deepseek thinking toggle assignment preserved', () => {
-    assert.match(chatSource, /Object\.assign\(requestBody, buildDeepSeekThinking\(reasoningEnabled, reasoningEffort\)\);/);
+  ok('(S5) every provider gets its thinking fields from the shared wire', () => {
+    assert.match(chatSource, /Object\.assign\(requestBody, chatReasoningFields\(catalogModel, reasoningPlan/);
+    assert.doesNotMatch(chatSource, /buildDeepSeekThinking|buildAbliterationReasoning|buildArnictReasoning/);
   });
   ok('(S6) all three persistedModelId call sites preserved in chat.ts', () => {
     const uses = chatSource.match(/persistedModelId\(provider\.id, effectiveModel, actualModelFromResponse\)/g) ?? [];
     assert.ok(uses.length >= 3, `expected >=3 persistedModelId( uses, found ${uses.length}`);
   });
-  ok('(S7) response-healing condition prefix byte-stable', () => {
-    assert.match(
-      chatSource,
-      /useResponseHealing = !!agent\.response_healing_enabled && !!responseFormat && provider\.id !== 'codex' && provider\.id !==/,
-    );
+  ok('(S7) response healing stays an OpenRouter-only plugin', () => {
+    assert.match(chatSource, /useResponseHealing = !!agent\.response_healing_enabled && !!responseFormat && provider\.supportsPlugins;/);
   });
-  ok('(S8) effort-max retry condition prefix byte-stable', () => {
-    assert.match(
-      chatSource,
-      /requestedMaxEffort = reasoningEnabled && reasoningEffort === 'max' && provider\.id !== 'codex' && provider\.id !==/,
-    );
+  ok('(S8) the max-effort retry is decided by the model, not by an id list', () => {
+    assert.match(chatSource, /requestedMaxEffort = mayRetryMaxEffort\(catalogModel, reasoningPlan\);/);
   });
   ok('(S9) OpenRouter file-parser plugin attach preserved', () => {
     assert.match(chatSource, /requestBody\.plugins = \[\{ id: 'file-parser', pdf: \{ engine: pdf_engine \} \}\];/);
@@ -97,11 +94,12 @@ function stabilityChecks(): void {
     assert.match(councilSource, /if \(resolveProviderId\(modelId\) === 'codex'\) \{/);
     assert.match(councilSource, /return this\.executeMemberStreamCodex\(modelId, options\);/);
   });
-  ok('(S11) council reasoning-field normalization preserved', () => {
-    assert.match(councilSource, /\[(\(ep\.provider\.id === 'opencode-go' \? opencodeGoHistoryReasoningField\(ep\.upstreamModel\) : assistantReasoningField\(ep\.provider\.id\)\)|assistantReasoningField\(ep\.provider\.id\))\]: fullReasoning/);
+  ok('(S11) council replays the trace under the field the catalog names', () => {
+    assert.match(councilSource, /\[[^\]]*historyReasoningField\]: fullReasoning/);
   });
-  ok('(S12) council deepseek cost fallback preserved', () => {
-    assert.match(councilSource, /else if \(ep\.provider\.id === 'deepseek'\) cost = computeDeepSeekCost\(usage, ep\.upstreamModel\);/);
+  ok('(S12) council prices usage with the shared engine when the host sends no cost', () => {
+    assert.match(councilSource, /computeCost\(/);
+    assert.doesNotMatch(councilSource, /computeDeepSeekCost|computeAbliterationCost|computeArnictCost|computeOpencodeGoCost/);
   });
   ok('(S13) council codex turn bridge import preserved', () => {
     assert.match(councilSource, /import \{ runCodexTurn \} from '\.\.\/codex\/chat\.js';/);
@@ -114,12 +112,14 @@ function stabilityChecks(): void {
   ok('(S15) OPENROUTER_CONFIG headers preserved', () => {
     assert.match(indexSource, /'HTTP-Referer': 'http:\/\/localhost:5173',/);
   });
-  ok('(S16) resolveProviderId deepseek/codex arms preserved', () => {
-    assert.match(indexSource, /modelId\.startsWith\(DEEPSEEK_PREFIX\)\) return 'deepseek';/);
-    assert.match(indexSource, /modelId\.startsWith\(CODEX_PREFIX\)\) return 'codex';/);
+  ok('(S16) routing is the shared prefix table, one entry per provider', () => {
+    assert.match(indexSource, /return providerOfModelId\(modelId\);/);
+    assert.match(providersSource, /deepseek: 'deepseek:',/);
+    assert.match(providersSource, /codex: 'codex:',/);
   });
-  ok('(S17) assistantReasoningField deepseek ternary preserved', () => {
-    assert.match(indexSource, /return id === 'deepseek' \? 'reasoning_content' : 'reasoning';/);
+  ok('(S17) the replay field left the provider registry (it is per model now)', () => {
+    assert.doesNotMatch(indexSource, /assistantReasoningField/);
+    assert.match(chatSource, /historyReasoningField/);
   });
   ok('(S18) CODEX_CONFIG keyless shape preserved', () => {
     assert.match(indexSource, /apiKeySetting: '',/);
@@ -132,10 +132,13 @@ function stabilityChecks(): void {
 function seamChecks(): void {
   // ---- providers/index.ts registry swap -------------------------------------
   ok('(P1) ProviderId union carries llamacpp AND retained lmstudio', () => {
-    assert.match(indexSource, /'openrouter' \| 'deepseek' \| 'codex' \| 'lmstudio' \| 'llamacpp'/);
+    for (const id of ['openrouter', 'deepseek', 'codex', 'lmstudio', 'llamacpp']) {
+      assert.match(providersSource, new RegExp(`\\| '${id}'`), id);
+    }
   });
   ok('(P2) LLAMACPP_PREFIX exported', () => {
     assert.match(indexSource, /export const LLAMACPP_PREFIX = 'llamacpp:';/);
+    assert.match(providersSource, /llamacpp: 'llamacpp:',/);
   });
   ok('(P3) LLAMACPP_CONFIG pinned shape present', () => {
     assert.match(indexSource, /label: 'llama\.cpp \(Local\)'/);
@@ -148,12 +151,13 @@ function seamChecks(): void {
     assert.doesNotMatch(indexSource, /label: 'LM Studio \(Local\)'/);
     assert.doesNotMatch(indexSource, /apiKeySetting: 'lmstudio_api_token'/);
   });
-  ok('(P5) resolveProviderId keeps lmstudio AND adds llamacpp arm', () => {
-    assert.match(indexSource, /modelId\.startsWith\(LMSTUDIO_PREFIX\)\) return 'lmstudio';/);
-    assert.match(indexSource, /modelId\.startsWith\(LLAMACPP_PREFIX\)\) return 'llamacpp';/);
+  ok('(P5) the prefix table keeps lmstudio beside llamacpp', () => {
+    assert.match(providersSource, /lmstudio: 'lmstudio:',/);
+    assert.match(providersSource, /llamacpp: 'llamacpp:',/);
   });
-  ok('(P6) toUpstreamModelId strips the llamacpp prefix', () => {
-    assert.match(indexSource, /modelId\.startsWith\(LLAMACPP_PREFIX\)\) return modelId\.slice\(LLAMACPP_PREFIX\.length\);/);
+  ok('(P6) toUpstreamModelId strips whatever prefix the table names', () => {
+    assert.match(indexSource, /return upstreamIdOf\(modelId\);/);
+    assert.match(providersSource, /modelId\.slice\(PROVIDER_PREFIXES\[provider\]\.length\)/);
   });
   ok('(P7) isLlamacppModel exported beside retained isLmStudioModel', () => {
     assert.match(indexSource, /export function isLlamacppModel\(/);
@@ -209,26 +213,25 @@ function seamChecks(): void {
     // Toggle polarity (bugfix): Thinking ON ⇒ enable_thinking:true (the model
     // thinks); OFF ⇒ enable_thinking:false (fully off — verified live on build
     // b10516 where the per-request flag is the only effective suppressor).
-    // The historical `!reasoningEnabled` here inverted the master switch.
-    assert.match(chatSource, /requestBody\.chat_template_kwargs = \{ enable_thinking: reasoningEnabled \};/);
-    assert.doesNotMatch(chatSource, /enable_thinking: !reasoningEnabled/);
+    // The switch lives in the shared wire now; polarity is pinned there.
+    assert.match(wireSource, /chat_template_kwargs: \{ enable_thinking: plan\.enabled \}/);
+    assert.doesNotMatch(wireSource, /enable_thinking: !plan\.enabled/);
+    // chat.ts only references it in prose now, never as a hand-built field.
+    assert.doesNotMatch(chatSource, /requestBody\.chat_template_kwargs/);
   });
   ok('(C6) tools attach without the old veto flag', () => {
     assert.doesNotMatch(chatSource, /lmstudioToolsOmitted/);
     const attaches = chatSource.match(/if \(openRouterTools\.length > 0\) \{/g) ?? [];
     assert.ok(attaches.length >= 2, `expected >=2 unconditional tool attaches, found ${attaches.length}`);
   });
-  ok('(C7) healing exclusion names llamacpp', () => {
-    assert.match(
-      chatSource,
-      /useResponseHealing = !!agent\.response_healing_enabled && !!responseFormat && provider\.id !== 'codex' && provider\.id !== 'llamacpp'( && provider\.id !== 'abliteration')?( && provider\.id !== 'arnict')?( && provider\.id !== 'opencode-go')?;/,
-    );
+  ok('(C7) healing never fires for a local model', () => {
+    assert.match(chatSource, /useResponseHealing = !!agent\.response_healing_enabled && !!responseFormat && provider\.supportsPlugins;/);
   });
-  ok('(C8) effort-max retry exclusion names llamacpp', () => {
-    assert.match(
-      chatSource,
-      /requestedMaxEffort = reasoningEnabled && reasoningEffort === 'max' && provider\.id !== 'codex' && provider\.id !== 'llamacpp'( && provider\.id !== 'abliteration')?( && provider\.id !== 'arnict')?( && provider\.id !== 'opencode-go')?;/,
-    );
+  ok('(C8) the max-effort retry never fires for a local model', () => {
+    // `mayRetryMaxEffort` is OpenRouter-only by construction; assert the rule
+    // lives there and not as a hand-maintained exclusion list in chat.ts.
+    assert.match(wireSource, /model\.provider === 'openrouter' && plan\.enabled && plan\.level === 'max'/);
+    assert.doesNotMatch(chatSource, /provider\.id !== 'llamacpp' && provider\.id !== 'abliteration'/);
   });
   ok('(C9) pre-flight calls ensureLlamacppRunning under a 15 s SSE keepalive', () => {
     assert.match(chatSource, /await ensureLlamacppRunning\(userId, upstreamModel\)/);
@@ -350,7 +353,7 @@ function seamChecks(): void {
   // ---- models.ts: six llamacpp routes replace the five lmstudio ones --------
   ok('(R1) six llamacpp routes exist', () => {
     for (const route of [
-      "router.get('/llamacpp'",
+      "router.get('/catalog/:provider'",
       "router.get('/llamacpp/status'",
       "router.post('/llamacpp/start'",
       "router.post('/llamacpp/stop'",
@@ -362,10 +365,15 @@ function seamChecks(): void {
   });
   ok('(R2) every action route passes the capability gate helper', () => {
     const gates = modelsSource.match(/llamacppGate\(req, res\)/g) ?? [];
-    assert.ok(gates.length >= 6, `expected >=6 capability-gated routes, found ${gates.length}`);
+    assert.ok(gates.length >= 5, `expected >=5 capability-gated action routes, found ${gates.length}`);
+    // Listing moved to the catalog adapter, which gates it the same way.
+    const adapter = read('server/catalog/adapters/llamacpp.ts');
+    assert.match(adapter, /providerCatalog\('llamacpp', 'unavailable', \[\], null, deps\.capabilityMessage\)/);
+    assert.match(read('server/catalog/index.ts'), /capabilityMessage: LLAMACPP_CAPABILITY_ERROR/);
   });
-  ok('(R3) catalog cache TTL pinned at 30 s', () => {
-    assert.match(modelsSource, /LLAMACPP_CATALOG_TTL_MS = 30_000;/);
+  ok('(R3) the local catalog is served by the adapter with its own 30 s TTL', () => {
+    assert.match(read('server/catalog/index.ts'), /createLlamacppAdapter\(/);
+    assert.match(read('server/catalog/adapters/llamacpp.ts'), /ttlMs: deps\.ttlMs \?\? 30 \* 1000/);
   });
   ok('(R4) lmstudio routes are gone from models.ts', () => {
     assert.doesNotMatch(modelsSource, /\/lmstudio/);

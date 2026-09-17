@@ -14,6 +14,7 @@
 import db from '../db.js';
 import { CodexRpc, CodexRpcError } from './rpc.js';
 import { isEmailAllowed, codexHomeForUser, writeCodexUserConfig } from './config.js';
+import type { CodexProtocolModel } from '../catalog/normalize/codex.js';
 
 export type CodexAccount =
   | { type: 'chatgpt'; email: string | null; planType: string | null }
@@ -350,24 +351,26 @@ export async function getChatgptStatus(userId: string): Promise<{
   };
 }
 
-/** Models available to the connected ChatGPT account, namespaced `codex:<id>`. */
-export async function listChatgptModels(userId: string): Promise<
-  Array<{ id: string; name: string; description: string; context_length: number; pricing: { prompt: string; completion: string } }>
-> {
+/**
+ * Raw `model/list` entries (protocol v2 `Model`) for the connected ChatGPT
+ * account, every page. Normalized by `server/catalog/normalize/codex.ts`.
+ */
+export async function listChatgptModels(userId: string): Promise<CodexProtocolModel[]> {
   const inst = await getConnectedInstance(userId);
-  const res = await inst.rpc.request<{
-    data?: Array<{ id?: string; displayName?: string | null; description?: string | null; contextWindow?: number | null; hidden?: boolean }>;
-  }>('model/list', {}, 30_000);
-  const models = res?.data ?? [];
-  return models
-    .filter((m) => !m.hidden && !!m.id)
-    .map((m) => ({
-      id: `codex:${m.id}`,
-      name: m.displayName || m.id || 'Codex model',
-      description: m.description || '',
-      context_length: m.contextWindow ?? 0,
-      pricing: { prompt: '0', completion: '0' },
-    }));
+  const models: CodexProtocolModel[] = [];
+  let cursor: string | null = null;
+  // Bounded: a misbehaving server can never loop forever.
+  for (let page = 0; page < 20; page++) {
+    const res: { data?: CodexProtocolModel[]; nextCursor?: string | null } | undefined = await inst.rpc.request<{ data?: CodexProtocolModel[]; nextCursor?: string | null }>(
+      'model/list',
+      cursor ? { cursor } : {},
+      30_000,
+    );
+    models.push(...(res?.data ?? []));
+    cursor = res?.nextCursor ?? null;
+    if (!cursor) break;
+  }
+  return models;
 }
 
 export async function disposeInstance(userId: string): Promise<void> {

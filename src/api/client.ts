@@ -27,6 +27,7 @@ import type {
 } from '../types';
 // Type-only import of the frozen snapshot wire contract (plan.md D6); erased at build time,
 // so vite never bundles from shared/. Nothing here exists yet anywhere else — single source.
+import type { CatalogResponse } from '../../shared/models/catalog';
 import type { ShareSnapshot, SharedMessage } from '../../shared/shareTypes';
 import type { ChatArtifact, ConversationArtifactsResponse } from '../../shared/artifactTypes';
 import { nanoid } from 'nanoid';
@@ -921,25 +922,17 @@ export async function compactConversation(
 }
 
 // Models
-/** Additive versioned envelope for `GET /models/opencodego` (T6 sync):
- *  old clients read only `data`; new clients also read `meta`. */
-export interface OpencodeGoListMeta {
-  version: string;
-  count: number;
-  fetchedAt: string;
-}
-
 export const modelsApi = {
-  openrouter: () => request<{ data: OpenRouterModel[] }>('/models/openrouter'),
+  /**
+   * Every provider's models in one shape. Never fails as a whole: each
+   * provider carries its own state (`ok | stale | needs-connection |
+   * unavailable | error`) and message.
+   */
+  catalog: (opts: { refresh?: boolean } = {}) =>
+    request<CatalogResponse>(`/models/catalog${opts.refresh ? '?refresh=1' : ''}`),
   openrouterEndpoints: (model: string) => request<{ data: OpenRouterEndpoint[] }>(
     `/models/openrouter/endpoints?model=${encodeURIComponent(model)}`
   ),
-  deepseek: () => request<{ data: OpenRouterModel[] }>('/models/deepseek'),
-  codex: () => request<{ data: OpenRouterModel[] }>('/models/codex'),
-  abliteration: () => request<{ data: OpenRouterModel[] }>('/models/abliteration'),
-  arnict: () => request<{ data: OpenRouterModel[] }>('/models/arnict'),
-  opencodego: () => request<{ data: OpenRouterModel[]; meta?: OpencodeGoListMeta }>('/models/opencodego'),
-  llamacpp: () => request<{ data: LlamaCppModel[] }>('/models/llamacpp'),
   /** NEVER-THROWS §5 status payload. */
   llamacppStatus: () => request<LlamaCppStatus>('/models/llamacpp/status'),
 };
@@ -1033,16 +1026,6 @@ export const opencodeGoApi = {
 // pinned field-for-field to plans/llamacpp-local-provider/global-constraints.md
 // §5. Do not invent fields; consumers must tolerate their absence.
 import type { LlamaCppKnobOverrides } from '../utils/llamacppKnobs';
-
-export interface LlamaCppModel extends OpenRouterModel {
-  /** Absolute path of the representative (first-shard) .gguf file. */
-  path: string;
-  size_bytes?: number;
-  /** Number of shard files collapsed into this logical model. */
-  shards: number;
-  mtp_capable: boolean;
-  loaded?: boolean;
-}
 
 /** NEVER-THROWS §5 status payload (GET /api/models/llamacpp/status). */
 export interface LlamaCppStatus {

@@ -10,6 +10,10 @@ const testDbPath = path.join(os.tmpdir(), `compact-view-${process.pid}-${Date.no
 process.env.DATABASE_PATH = testDbPath;
 
 const { default: db, migrate, ensureLocalUser } = await import('../server/db.js');
+const { setModelCatalogForTests } = await import('../server/catalog/index.js');
+const { stubModelCatalog } = await import('./helpers/catalogStub.js');
+// Context windows come from the catalog; describe the agent's model offline.
+setModelCatalogForTests(stubModelCatalog({ 'deepseek:deepseek-v4-flash': { contextLength: 1_000_000, lifecycle: 'active' } }));
 const { buildThreadIds } = await import('../server/messageTree.js');
 const { selectModelView } = await import('../server/routes/chat.js');
 const {
@@ -333,7 +337,7 @@ t('selectVisibleCompaction with legacy meta (keys absent) degrades to null witho
 
 t('buildContextEstimate: unknown window -> limit/pct null, advisory off', () => {
   const est = buildContextEstimate({
-    systemPrompt: 'sys', summaryContent: SUMMARY, tailRows: [{ content: 'tail' }], toolsJson: '[]', effectiveModel: 'openrouter/auto',
+    systemPrompt: 'sys', summaryContent: SUMMARY, tailRows: [{ content: 'tail' }], toolsJson: '[]', contextLength: null,
   }) as Record<string, unknown>;
   assert.equal(est.limit, null);
   assert.equal(est.pct, null);
@@ -345,7 +349,7 @@ t('buildContextEstimate: known window -> pct math + 60% advisory on', () => {
   const bigTail = 'x'.repeat(630_000);
   const est = buildContextEstimate({
     systemPrompt: 'sys', summaryContent: null, tailRows: [{ content: bigTail }], toolsJson: '[]',
-    effectiveModel: 'abliteration:abliterated-model',
+    contextLength: 262144,
   }) as Record<string, unknown>;
   assert.equal(est.limit, 262144);
   assert.ok(Math.abs((est.pct as number) - (est.tokens as number) / 262144) < 1e-9);
@@ -355,7 +359,7 @@ t('buildContextEstimate: known window -> pct math + 60% advisory on', () => {
 t('buildContextEstimate: small usage stays below the advisory threshold', () => {
   const est = buildContextEstimate({
     systemPrompt: 'sys', summaryContent: null, tailRows: [{ content: 'hi' }], toolsJson: '[]',
-    effectiveModel: 'deepseek:deepseek-v4-flash',
+    contextLength: 1_000_000,
   }) as Record<string, unknown>;
   assert.equal(est.limit, 1_000_000);
   assert.equal(est.suggest_compact, false);

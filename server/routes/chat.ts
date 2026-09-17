@@ -26,31 +26,36 @@ import {
 import {
   getProviderForModel,
   toUpstreamModelId,
-  assistantReasoningField,
   resolveAssistantHistoryContent,
-  abliterationCachedTokens,
-  arnictCachedTokens,
-  buildAbliterationReasoning,
-  buildArnictReasoning,
-  buildDeepSeekThinking,
-  computeAbliterationCost,
-  computeArnictCost,
-  computeDeepSeekCost,
-  computeOpencodeGoCost,
-  deepSeekCachedTokens,
-  isAbliterationLargeModel,
-  ABLITERATION_LARGE_TEXT_ONLY_MESSAGE,
   isCodexModel,
   isLlamacppModel,
-  opencodeGoCachedTokens,
   opencodeGoFormatMismatchMessage,
-  opencodeGoHistoryReasoningField,
-  opencodeGoTransportFor,
   persistedModelId,
+  textOnlyModelMessage,
   OPENCODE_GO_ANTHROPIC_VERSION,
   OPENCODE_GO_MESSAGES_URL,
   OPENCODE_GO_RESPONSES_URL,
 } from '../providers/index.js';
+import { chatReasoningFields, codexTurnEffort, mayRetryMaxEffort } from '../providers/wire/reasoning.js';
+import {
+  buildMessagesBody,
+  buildResponsesBody,
+  firstNumericCost,
+  mapMessagesUsage,
+  mapResponsesUsage,
+  refreshTransportBody,
+  MESSAGES_BODY_KEYS,
+  RESPONSES_BODY_KEYS,
+  type MessagesUsage,
+  type OpenAIToolDef,
+  type OutboundMessage,
+  type ResponsesUsage,
+  type TransportBodyInput,
+} from '../providers/wire/transports.js';
+import { modelCatalog } from '../catalog/index.js';
+import type { CatalogModel } from '../../shared/models/catalog.js';
+import { cachedTokensFromChat, computeCost, pricedUsageFromChat } from '../../shared/models/pricing.js';
+import { describeAdjustments, planReasoning, type ReasoningPlan, type ReasoningRequest } from '../../shared/models/reasoning.js';
 import {
   createThinkStreamSplitter,
   isLegacyLmStudioModel,
@@ -70,9 +75,6 @@ import {
 } from '../compaction/retain.js';
 import { runCodexTurn } from '../codex/chat.js';
 import { CodexUnavailableError } from '../codex/instanceManager.js';
-import { getCachedOpenRouterSupportedEfforts } from './models.js';
-import { clampReasoningEffort } from '../../shared/reasoningEfforts.js';
-import { goReasoningKnobFor, goReasoningNoControl, goReasoningOff, planGoMessagesBudget, planGoReasoningEffort } from '../../shared/opencodeGoReasoning.js';
 import { buildDateTimeContext, injectDateTimeIntoCurrentTurn } from '../dateTimeContext.js';
 import {
   appendSkillCatalogIfNeeded,
@@ -105,416 +107,6 @@ import {
   abortTurn,
   clearTurn,
 } from '../chatTurnRegistry.js';
-
-// ---------------------------------------------------------------------------
-// OpenCode Go `messages` transport sender (T4, Anthropic shape).
-// T3 VERIFIED-shape 2026-09-15 (`minimax-m3`): `POST {OPENCODE_GO_MESSAGES_URL}`
-// with `model` bare + `max_tokens` + `messages` + `stream`, headers
-// `anthropic-version: 2023-06-01` + `Authorization: Bearer` + `x-api-key`
-// (divergence: Bearer alone 401s `AuthError/Missing API key`) + operationals.
-// Tools map OpenAI→Anthropic natively in 5 lines: each
-// `{type:'function',function:{name,description,parameters}}` becomes
-// `{name,description,input_schema:parameters}`; no `tool_choice` (Anthropic
-// defaults to auto); no `parallel_tool_calls` (no Anthropic equivalent);
-// history `tool_calls` become `tool_use` blocks and `tool` rows become
-// `tool_result` blocks. T5 K2-GO condicionado: el toggle (+ esfuerzo/
-// presupuesto donde aplique) viaja vía `planOpencodeGoMessagesThinking`
-// (wire por familia verificado con key 2026-09-15, DERIVA-NO 2026-09-16);
-// `temperature`, tools `input_schema`, comparación y headers `x-api-key`
-// intactos.
-// ---------------------------------------------------------------------------
-
-type OpenRouterToolDef = { type: 'function'; function: { name: string; description: string; parameters: Record<string, unknown> } };
-
-interface GoMessagesOutboundMessage { role: string; content: unknown }
-
-/** Extracts plain text from an OpenAI chat content value (string or parts array). */
-function goMessagesTextContent(content: string | unknown[] | null | undefined): string {
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((p) => {
-        if (typeof p === 'string') return p;
-        if (p && typeof p === 'object') {
-          const part = p as { type?: unknown; text?: unknown };
-          if (part.type === 'text' && typeof part.text === 'string') return part.text;
-        }
-        return '';
-      })
-      .join('');
-  }
-  return '';
-}
-
-/**
- * Messages `thinking`/`output_config` planificado (T5 K2-GO condicionado,
- * VERIFIED con key 2026-09-15, DERIVA-NO api.json 2026-09-16; vivo sin key
- * unverified desde entonces).
- *
- * - `[]` (`minimax-m2.7/m2.5`, always-on del proveedor) o unknown → `{}`:
- *   nunca se envía thinking (a `m2.7` ni siquiera `disabled` está probado).
- * - Off → `thinking:{type:"disabled"}` en ambas familias (minimax disabled =
- *   default 36/1; qwen disabled = off real 26/1 texto; en qwen omitir NO
- *   apaga — default always-thinks 62/1 — así que off siempre es explícito).
- * - Toggle + budget sin gradación (`minimax-m3`, `qwen3.6-plus`,
- *   `qwen3.7-max/plus`) on → clásico por presencia
- *   `thinking:{type:"enabled",budget_tokens}` (K2 minimax enabled/1024 →
- *   thinking-path; bogus-type → enabled: solo la presencia conmuta; con
- *   `max_tokens:1` y budget 1024 → 200, sin enforcement budget<max_tokens).
- *   Budget = `planGoMessagesBudget` (default 8192, clamp `[1024, ceil]`;
- *   techos 81920 / 262144 / 32768). Para `qwen3.6/3.7` el clásico viaja por
- *   analogía de familia toggle+budget (K2 solo probeó clásico en minimax y
- *   su rechazo en `qwen3.8-flash` adaptativo): si algún 400 lo rechaza, el
- *   fallback es waiver para esa familia (omit+log+badge), nunca envío
- *   parcial roto.
- * - Adaptativo con gradación (`qwen3.8-max/flash`) on → SOLO
- *   `output_config:{effort:<clampado>}` (K2: clásico `thinking.enabled` →
- *   400 `{"model":"qwen3.8-flash"}`; `effort` top-level ignorado sin
- *   validar). Clamp = `planGoReasoningEffort` (`max`→`xhigh`, nunca crudo)
- *   validado contra la allowlist (un `want` typo cae a omit, no a 400);
- *   on sin esfuerzo → omit (default always-thinks = on). El budget
- *   (`reasoningMaxTokens`) no tiene wire confirmado en adaptativo → se
- *   ignora (honesto, sin campo inventado).
- * - `reasoning_max_tokens` viaja SOLO como budget clampado vía este planner;
- *   ningún otro campo reasoning/effort/thinking se emite aquí.
- */
-function planOpencodeGoMessagesThinking(
-  upstreamModel: string,
-  reasoningEnabled: boolean,
-  reasoningEffort: string | null,
-  reasoningMaxTokens: number | null,
-): Record<string, unknown> {
-  if (goReasoningNoControl(upstreamModel)) return {};
-  const knob = goReasoningKnobFor(upstreamModel);
-  if (knob === null) return {};
-  if (!reasoningEnabled) return { thinking: { type: 'disabled' } };
-  const levels = knob.effortValues;
-  if (levels !== null && levels.length > 0) {
-    if (reasoningEffort == null) return {};
-    const planned = planGoReasoningEffort(upstreamModel, reasoningEffort);
-    if (planned === null || !levels.includes(planned)) return {};
-    return { output_config: { effort: planned } };
-  }
-  const budget = planGoMessagesBudget(upstreamModel, { maxTokens: reasoningMaxTokens });
-  // Presencia sin budget: fail-safe imposible por matriz (todo toggle tiene
-  // ceil), pero K2 demuestra que la presencia sola ya conmuta — nunca omitir
-  // un on por falta de budget.
-  if (budget === null) return { thinking: { type: 'enabled' } };
-  return { thinking: { type: 'enabled', budget_tokens: budget } };
-}
-
-/**
- * Maps the chat-completions `messages` array (system + history + current turn,
- * OpenAI tool shapes) to an Anthropic `POST /messages` body. System rows fold
- * into top-level `system`; assistant `tool_calls` fold into `tool_use` blocks;
- * `tool` rows fold into `user` `tool_result` blocks; consecutive same-role
- * rows merge (Anthropic requires alternation). T5: the thinking wire threads
- * the app reasoning toggle via `planOpencodeGoMessagesThinking` (K2 wire por
- * familia); history `reasoning`/`reasoning_content` rows keep travelling as
- * plain `content` (K2 replay: con y sin thinking 200, sin bloques exigidos —
- * no se fabrican bloques thinking/signature).
- */
-export function buildOpencodeGoMessagesBody(opts: {
-  upstreamModel: string;
-  messages: Array<{ role: string; content?: string | unknown[] | null; tool_call_id?: string; tool_calls?: unknown[] }>;
-  openRouterTools: OpenRouterToolDef[];
-  toolChoice: string;
-  temperature: number;
-  maxTokens: number;
-  reasoningEnabled: boolean;
-  reasoningEffort: string | null;
-  reasoningMaxTokens: number | null;
-}): Record<string, unknown> {
-  const systemTexts: string[] = [];
-  const converted: GoMessagesOutboundMessage[] = [];
-  for (const m of opts.messages) {
-    if (m.role === 'system') {
-      const text = goMessagesTextContent(m.content);
-      if (text) systemTexts.push(text);
-      continue;
-    }
-    if (m.role === 'tool') {
-      converted.push({
-        role: 'user',
-        content: [{ type: 'tool_result', tool_use_id: m.tool_call_id ?? '', content: goMessagesTextContent(m.content) }],
-      });
-      continue;
-    }
-    if (m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length > 0) {
-      const blocks: unknown[] = [];
-      const text = goMessagesTextContent(m.content);
-      if (text) blocks.push({ type: 'text', text });
-      for (const raw of m.tool_calls) {
-        const tc = raw as { id?: string; function?: { name?: string; arguments?: string } };
-        let input: Record<string, unknown> = {};
-        try {
-          const parsedArgs: unknown = JSON.parse(tc.function?.arguments ?? '{}');
-          if (parsedArgs && typeof parsedArgs === 'object' && !Array.isArray(parsedArgs)) {
-            input = parsedArgs as Record<string, unknown>;
-          }
-        } catch {
-          input = {};
-        }
-        blocks.push({ type: 'tool_use', id: tc.id ?? '', name: tc.function?.name ?? '', input });
-      }
-      converted.push({ role: 'assistant', content: blocks });
-      continue;
-    }
-    converted.push({
-      role: m.role === 'assistant' ? 'assistant' : 'user',
-      content: goMessagesTextContent(m.content),
-    });
-  }
-  // Merge consecutive same-role rows so the sequence alternates.
-  const merged: GoMessagesOutboundMessage[] = [];
-  for (const m of converted) {
-    const prev = merged[merged.length - 1];
-    if (prev && prev.role === m.role) {
-      const a = Array.isArray(prev.content) ? (prev.content as unknown[]) : [{ type: 'text', text: prev.content ?? '' }];
-      const b = Array.isArray(m.content) ? (m.content as unknown[]) : [{ type: 'text', text: m.content ?? '' }];
-      prev.content = [...a, ...b];
-    } else {
-      merged.push({ role: m.role, content: m.content });
-    }
-  }
-  const body: Record<string, unknown> = {
-    model: opts.upstreamModel,
-    messages: merged,
-    max_tokens: opts.maxTokens,
-    temperature: opts.temperature,
-    stream: true,
-  };
-  // T5 K2-GO condicionado: el thinking viaja SOLO por el wire verificado con
-  // key (ver `planOpencodeGoMessagesThinking`); `effort` top-level jamás
-  // (K2: ignorado sin validar — un typo sería no-op silencioso).
-  Object.assign(body, planOpencodeGoMessagesThinking(opts.upstreamModel, opts.reasoningEnabled, opts.reasoningEffort, opts.reasoningMaxTokens));
-  if (systemTexts.length > 0) body.system = systemTexts.join('\n\n');
-  if (opts.openRouterTools.length > 0 && opts.toolChoice !== 'none') {
-    body.tools = opts.openRouterTools.map((t) => ({
-      name: t.function.name,
-      description: t.function.description,
-      input_schema: t.function.parameters,
-    }));
-  }
-  return body;
-}
-
-/** Anthropic `usage` shape (T3 P2/P3 literals) mapped onto the T2 cost engine. */
-export interface OpencodeGoMessagesUsage {
-  input_tokens?: number;
-  output_tokens?: number;
-  cache_creation_input_tokens?: number;
-  cache_read_input_tokens?: number;
-  cost?: string | number;
-}
-
-/**
- * Maps Anthropic messages usage onto `computeOpencodeGoCost`: explicit miss =
- * `input_tokens`, hit = `cache_read_input_tokens`, write =
- * `cache_creation_input_tokens` (T2 `prompt_cache_write_tokens`, priced at the
- * row `write` rate else the miss rate, never double-counted). `contextTokens`
- * is the real request context (total input incl. cached + output) so tiered
- * rows bill their `above` tier. An upstream `cost` (string `"0"` in T3, always
- * present) wins when numeric and is never overwritten.
- */
-export function mapOpencodeGoMessagesUsage(usage: OpencodeGoMessagesUsage | null | undefined): {
-  mappedUsage: { prompt_tokens: number; completion_tokens: number; prompt_cache_hit_tokens: number; prompt_cache_miss_tokens: number; prompt_cache_write_tokens: number };
-  promptTotal: number;
-  outputTokens: number;
-  cachedTokens: number;
-  upstreamCost: number | null;
-} {
-  const input = usage?.input_tokens ?? 0;
-  const output = usage?.output_tokens ?? 0;
-  const created = usage?.cache_creation_input_tokens ?? 0;
-  const read = usage?.cache_read_input_tokens ?? 0;
-  let upstreamCost: number | null = null;
-  if (usage?.cost !== undefined) {
-    const n = typeof usage.cost === 'string' ? Number(usage.cost) : usage.cost;
-    if (typeof n === 'number' && Number.isFinite(n)) upstreamCost = n;
-  }
-  return {
-    mappedUsage: {
-      prompt_tokens: input + read + created,
-      completion_tokens: output,
-      prompt_cache_hit_tokens: read,
-      prompt_cache_miss_tokens: input,
-      prompt_cache_write_tokens: created,
-    },
-    promptTotal: input + read + created,
-    outputTokens: output,
-    cachedTokens: read,
-    upstreamCost,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// OpenCode Go `responses` transport sender (T5, Responses API).
-// T3 VERIFIED 2026-09-15 (`muse-spark-1.3-contributor`, P4/P5):
-// `POST {OPENCODE_GO_RESPONSES_URL}` with `model` bare + `input` (+ `stream`),
-// headers `Authorization: Bearer` + operationals ONLY (Bearer alone 200s;
-// no `x-api-key`, no `anthropic-version` on this path). Tools ride the native
-// OpenAI function shape (`tools:[{type:'function',...}]`, same as
-// `toOpenRouterTools` output); history `tool_calls` become `function_call`
-// items and `tool` rows become `function_call_output` items; system rows fold
-// into top-level `instructions`. Cost guard: the API reasons at `high`/`medium`
-// by default (T3 K3: spark `high`, luna `medium` for `input:"ok"`), so every
-// request carries `reasoning:{effort:<planificado>}` + `max_output_tokens` —
-// omitting `reasoning` is forbidden (omit = burn). The effort threads the app
-// reasoning toggle via the T1 matrix (`planGoReasoningEffort`/`goReasoningOff`,
-// clamp por modelo, veredicto K3).
-// ---------------------------------------------------------------------------
-
-/**
- * Responses `reasoning.effort` planificado (T3): nunca se omite. Off →
- * `goReasoningOff` (luna `none`, grok floor `low`, spark floor `minimal`) con
- * fallback `low`; on sin esfuerzo → `low`; on con esfuerzo →
- * `planGoReasoningEffort` (clamp por matriz T1: spark `max`→`xhigh`, luna
- * `max`→`max`). Sin retry `max→xhigh` (el clamp lo cubre).
- */
-function planOpencodeGoResponsesEffort(
-  upstreamModel: string,
-  reasoningEnabled: boolean,
-  reasoningEffort: string | null,
-): string {
-  if (!reasoningEnabled) return goReasoningOff(upstreamModel) ?? 'low';
-  if (reasoningEffort == null) return 'low';
-  return planGoReasoningEffort(upstreamModel, reasoningEffort) ?? 'low';
-}
-
-/**
- * Maps the chat-completions `messages` array (system + history + current turn,
- * OpenAI tool shapes) to a Responses `POST /responses` body. System rows fold
- * into top-level `instructions`; assistant `tool_calls` fold into
- * `function_call` items; `tool` rows fold into `function_call_output` items.
- */
-export function buildOpencodeGoResponsesBody(opts: {
-  upstreamModel: string;
-  messages: Array<{ role: string; content?: string | unknown[] | null; tool_call_id?: string; tool_calls?: unknown[] }>;
-  openRouterTools: OpenRouterToolDef[];
-  toolChoice: string;
-  temperature: number;
-  maxTokens: number;
-  reasoningEnabled: boolean;
-  reasoningEffort: string | null;
-}): Record<string, unknown> {
-  const instructionTexts: string[] = [];
-  const input: unknown[] = [];
-  for (const m of opts.messages) {
-    if (m.role === 'system') {
-      const text = goMessagesTextContent(m.content);
-      if (text) instructionTexts.push(text);
-      continue;
-    }
-    if (m.role === 'tool') {
-      input.push({
-        type: 'function_call_output',
-        call_id: m.tool_call_id ?? '',
-        output: goMessagesTextContent(m.content),
-      });
-      continue;
-    }
-    if (m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length > 0) {
-      const text = goMessagesTextContent(m.content);
-      if (text) input.push({ role: 'assistant', content: text });
-      for (const raw of m.tool_calls) {
-        const tc = raw as { id?: string; function?: { name?: string; arguments?: string } };
-        input.push({
-          type: 'function_call',
-          call_id: tc.id ?? '',
-          name: tc.function?.name ?? '',
-          arguments: tc.function?.arguments ?? '{}',
-        });
-      }
-      continue;
-    }
-    input.push({
-      role: m.role === 'assistant' ? 'assistant' : 'user',
-      content: goMessagesTextContent(m.content),
-    });
-  }
-  const body: Record<string, unknown> = {
-    model: opts.upstreamModel,
-    input,
-    temperature: opts.temperature,
-    reasoning: { effort: planOpencodeGoResponsesEffort(opts.upstreamModel, opts.reasoningEnabled, opts.reasoningEffort) },
-    max_output_tokens: opts.maxTokens,
-    stream: true,
-  };
-  if (instructionTexts.length > 0) body.instructions = instructionTexts.join('\n\n');
-  if (opts.openRouterTools.length > 0 && opts.toolChoice !== 'none') {
-    // Responses wire form is flat ({type,name,description,parameters}), not
-    // the Chat shape ({type,function:{…}}): a nested `function` leaves
-    // `tools[0].name` missing and the gateway answers 400. `strict` stays
-    // omitted (gateway default; unverified live — see T6).
-    body.tools = opts.openRouterTools.map((t, i) => {
-      const name = t.function?.name;
-      if (typeof name !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(name)) {
-        throw new Error(
-          `OpenCode Go responses: tool at index ${i} has an invalid or missing name (expected /^[A-Za-z0-9_-]{1,128}$/)`,
-        );
-      }
-      return {
-        type: 'function',
-        name,
-        description: t.function.description,
-        parameters: t.function.parameters,
-      };
-    });
-  }
-  return body;
-}
-
-/** Responses `usage` shape (T3 P4/P5 literals) mapped onto the T2 cost engine. */
-export interface OpencodeGoResponsesUsage {
-  input_tokens?: number;
-  output_tokens?: number;
-  total_tokens?: number;
-  input_tokens_details?: { cached_tokens?: number };
-  output_tokens_details?: { reasoning_tokens?: number };
-  cost?: string | number;
-}
-
-/**
- * Maps Responses usage onto `computeOpencodeGoCost` (T3 verdict): hit =
- * `input_tokens_details.cached_tokens`, explicit miss = `input - cached`,
- * out = `output_tokens`; `reasoning_tokens` is informative only (already
- * inside `output_tokens`). `contextTokens` is the real request context
- * (input + output) so tiered rows (`gpt-5.6-luna` 272K, `grok-4.x` 200K)
- * bill their `above` tier. An upstream `cost` (string `"0"` in T3, on the
- * response or the final `ping`) wins when numeric and is never overwritten.
- */
-export function mapOpencodeGoResponsesUsage(usage: OpencodeGoResponsesUsage | null | undefined): {
-  mappedResponsesUsage: { prompt_tokens: number; completion_tokens: number; prompt_cache_hit_tokens: number; prompt_cache_miss_tokens: number };
-  promptTotal: number;
-  outputTokens: number;
-  cachedTokens: number;
-  reasoningTokens: number;
-  upstreamCost: number | null;
-} {
-  const input = usage?.input_tokens ?? 0;
-  const output = usage?.output_tokens ?? 0;
-  const cached = usage?.input_tokens_details?.cached_tokens ?? 0;
-  const reasoning = usage?.output_tokens_details?.reasoning_tokens ?? 0;
-  let upstreamCost: number | null = null;
-  if (usage?.cost !== undefined) {
-    const n = typeof usage.cost === 'string' ? Number(usage.cost) : usage.cost;
-    if (typeof n === 'number' && Number.isFinite(n)) upstreamCost = n;
-  }
-  return {
-    mappedResponsesUsage: {
-      prompt_tokens: input,
-      completion_tokens: output,
-      prompt_cache_hit_tokens: cached,
-      prompt_cache_miss_tokens: Math.max(input - cached, 0),
-    },
-    promptTotal: input,
-    outputTokens: output,
-    cachedTokens: cached,
-    reasoningTokens: reasoning,
-    upstreamCost,
-  };
-}
 
 const router = Router();
 
@@ -978,6 +570,11 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       return;
     }
 
+    // What the catalog knows about this model on its host: wire, reasoning
+    // capability, pricing, accepted inputs. Never waits on a refresh when
+    // anything is cached; unknown models resolve fail-open.
+    let catalogModel: CatalogModel = await modelCatalog().resolveModel(userId, effectiveModel);
+
     // T5: both phase-2 transports send (`messages` since T4, `responses`
     // via the sender below); 'unknown' ids fail open to chat-completions
     // below with the §7 mismatch mapping (GC §3).
@@ -1132,11 +729,9 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         };
         if (tool_calls?.length) out.tool_calls = tool_calls;
         if (annotations?.length) out.annotations = annotations;
-        // DeepSeek thinking mode requires reasoning_content on tool-call turns (else HTTP 400);
-        // OpenRouter uses `reasoning`. Field name follows the resolved provider.
-        // OpenCode Go replays per-model (D5): kimi-k3/deepseek-* need
-        // `reasoning_content`, the rest use `reasoning`.
-        if (row.reasoning_content?.trim()) out[provider.id === 'opencode-go' ? opencodeGoHistoryReasoningField(upstreamModel) : assistantReasoningField(provider.id)] = row.reasoning_content;
+        // Replay field per model (catalog): DeepSeek thinking mode requires
+        // `reasoning_content` on tool-call turns (else HTTP 400).
+        if (row.reasoning_content?.trim()) out[catalogModel.historyReasoningField] = row.reasoning_content;
         return out;
       }
       return { role: row.role as 'user' | 'assistant', content: row.content };
@@ -1189,10 +784,10 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     // system prompt — so system + history remain a stable, cacheable prefix (DeepSeek/Anthropic/OpenAI).
     injectDateTimeIntoCurrentTurn(messages, buildDateTimeContext(userTimezone));
 
-    // Abliteration large models are text-only (GC §5): reject image parts in
-    // the outgoing messages BEFORE any network call or SSE flush. Placed after
+    // Text-only models (catalog modalities): reject image parts BEFORE any
+    // network call or SSE flush. Unknown modalities never block. Placed after
     // the PDF-attachments gate above (messages are final only here).
-    if (provider.id === 'abliteration' && isAbliterationLargeModel(upstreamModel)) {
+    if (catalogModel.inputModalities && !catalogModel.inputModalities.includes('image')) {
       const hasImagePart = messages.some((m) =>
         Array.isArray(m.content) &&
         (m.content as unknown[]).some((p) =>
@@ -1201,7 +796,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         )
       );
       if (hasImagePart) {
-        res.status(400).json({ error: ABLITERATION_LARGE_TEXT_ONLY_MESSAGE });
+        res.status(400).json({ error: textOnlyModelMessage(catalogModel.name) });
         return;
       }
     }
@@ -1319,8 +914,8 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     // + SSE below). T5: `responses`-transport models ride the Responses API
     // sender (URL + input + SSE below). `unknown` stays on chat-completions
     // with the fail-open mismatch mapping.
-    const isGoMessages = provider.id === 'opencode-go' && opencodeGoTransportFor(upstreamModel) === 'messages';
-    const isGoResponses = provider.id === 'opencode-go' && opencodeGoTransportFor(upstreamModel) === 'responses';
+    const isGoMessages = provider.id === 'opencode-go' && catalogModel.transport === 'messages';
+    const isGoResponses = provider.id === 'opencode-go' && catalogModel.transport === 'responses';
 
     if (provider.id === 'opencode-go') {
       // Operative session header (GC §1/D9): one per chat POST, traceable upstream.
@@ -1342,43 +937,35 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
 
     let actualModelFromResponse: string | null = null;
 
-    // Reasoning / Thinking: per-message override takes precedence over agent defaults.
-    // T3: resuelto ANTES del primer envío para threadearlo al builder responses
-    // (precedencia mensaje > agente > general intacta).
+    // Reasoning / Thinking: per-message override takes precedence over agent
+    // defaults; the plan fits the request to the model's capability (levels,
+    // off switch, budget) before any wire is built.
     const reasoningOverride = reasoning as { enabled?: boolean; effort?: string; max_tokens?: number } | undefined;
-    let reasoningEnabled = !!agent.reasoning_enabled;
-    let reasoningEffort = agent.reasoning_effort || null;
-    let reasoningMaxTokens = agent.reasoning_max_tokens || null;
+    const reasoningRequest: ReasoningRequest = {
+      enabled: reasoningOverride?.enabled ?? !!agent.reasoning_enabled,
+      level: reasoningOverride?.effort ?? agent.reasoning_effort ?? null,
+      budget: reasoningOverride?.max_tokens ?? agent.reasoning_max_tokens ?? null,
+    };
+    let reasoningPlan: ReasoningPlan = planReasoning(catalogModel.reasoning, reasoningRequest);
+    const logReasoningPlan = () => {
+      const adjusted = describeAdjustments(reasoningPlan.adjustments);
+      console.log(`[chat] Reasoning plan: model=${effectiveModel} capability=${catalogModel.reasoning.status} enabled=${reasoningPlan.enabled} level=${reasoningPlan.level ?? '-'} budget=${reasoningPlan.budget ?? '-'}${adjusted ? ` adjusted: ${adjusted}` : ''}`);
+    };
+    logReasoningPlan();
 
-    if (reasoningOverride) {
-      if (reasoningOverride.enabled !== undefined) reasoningEnabled = reasoningOverride.enabled;
-      if (reasoningOverride.effort !== undefined) reasoningEffort = reasoningOverride.effort;
-      if (reasoningOverride.max_tokens !== undefined) reasoningMaxTokens = reasoningOverride.max_tokens;
-    }
-
+    const transportInput = (): TransportBodyInput => ({
+      model: catalogModel,
+      plan: reasoningPlan,
+      messages: messages as OutboundMessage[],
+      tools: openRouterTools as OpenAIToolDef[],
+      includeTools: agent.tool_choice !== 'none',
+      temperature: agent.temperature,
+      maxTokens: agent.max_tokens,
+    });
     const requestBody: Record<string, unknown> = isGoMessages
-      ? buildOpencodeGoMessagesBody({
-          upstreamModel,
-          messages: messages as Array<{ role: string; content?: string | unknown[] | null; tool_call_id?: string; tool_calls?: unknown[] }>,
-          openRouterTools: openRouterTools as OpenRouterToolDef[],
-          toolChoice: agent.tool_choice === 'none' ? 'none' : 'auto',
-          temperature: agent.temperature,
-          maxTokens: agent.max_tokens,
-          reasoningEnabled,
-          reasoningEffort,
-          reasoningMaxTokens,
-        })
+      ? buildMessagesBody(transportInput())
       : isGoResponses
-        ? buildOpencodeGoResponsesBody({
-            upstreamModel,
-            messages: messages as Array<{ role: string; content?: string | unknown[] | null; tool_call_id?: string; tool_calls?: unknown[] }>,
-            openRouterTools: openRouterTools as OpenRouterToolDef[],
-            toolChoice: agent.tool_choice === 'none' ? 'none' : 'auto',
-            temperature: agent.temperature,
-            maxTokens: agent.max_tokens,
-            reasoningEnabled,
-            reasoningEffort,
-          })
+        ? buildResponsesBody(transportInput())
         : {
             model: upstreamModel,
             messages,
@@ -1424,36 +1011,6 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       requestBody.plugins = [{ id: 'file-parser', pdf: { engine: pdf_engine } }];
     }
 
-    // (Resolución reasoning movida arriba, antes del primer envío, para T3.)
-
-    // T2-enforce: clamp pre-flight del effort resuelto (precedencia ya
-    // aplicada arriba) contra la lista del catálogo en caché. SOLO OpenRouter:
-    // caché fría / `openrouter/auto` / lista ausente → fail-open (enviar tal
-    // cual, el retry `max→xhigh` queda como backstop). Lista conocida y valor
-    // no soportado → clamped logueado; `[]` + valor → null (bare
-    // `{enabled:true}`); `'none'`/ausente → passthrough. Nunca 400 en el send.
-    if (provider.id === 'openrouter' && reasoningEnabled && reasoningEffort !== null && reasoningEffort !== undefined) {
-      const supported = getCachedOpenRouterSupportedEfforts(upstreamModel);
-      const clamped = clampReasoningEffort(reasoningEffort, supported);
-      if (clamped !== reasoningEffort) {
-        console.log(`[chat] Reasoning effort clamped: requested=${reasoningEffort} applied=${clamped ?? 'omitted'} model=${upstreamModel}`);
-        reasoningEffort = clamped;
-      }
-    }
-
-    // T4 K1-GO: clamp pre-vuelo del effort para el chat-transport Go (mismo
-    // formato de log que T2, marca `(go)`). Solo chat-transport (`unknown`
-    // incluido): messages/responses llevan su propio wire (builders) y la
-    // rama responses de T3 sigue intacta. `[]`/toggle-only → null (omit)
-    // con log; unknown → passthrough (fail-open, sin log).
-    if (provider.id === 'opencode-go' && !isGoMessages && !isGoResponses && reasoningEnabled && reasoningEffort !== null && reasoningEffort !== undefined) {
-      const goClamped = planGoReasoningEffort(upstreamModel, reasoningEffort);
-      if (goClamped !== reasoningEffort) {
-        console.log(`[chat] Reasoning effort clamped (go): requested=${reasoningEffort} applied=${goClamped ?? 'omitted'} model=${upstreamModel}`);
-        reasoningEffort = goClamped;
-      }
-    }
-
     // Structured outputs (OpenRouter JSON Schema, arnict json_schema strict:true)
     // Accept both: short form { name, strict, schema } or full API form { type: "json_schema", json_schema: { name, strict, schema } }
     // El flag `supportsJsonSchema:true` de arnict abre este bloque; la rama
@@ -1492,86 +1049,24 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       }
     }
 
-    if (provider.supportsReasoningParam) {
-      if (reasoningEnabled) {
-        const reasoningParam: Record<string, unknown> = {};
-        // 'max' is supported by some OpenRouter models only; it is sent
-        // as-is and degraded to 'xhigh' with a single retry when the model
-        // rejects it (see effortMaxRejected handling below).
-        if (reasoningEffort && reasoningEffort !== 'none') {
-          reasoningParam.effort = reasoningEffort;
-        } else if (reasoningEffort === 'none') {
-          reasoningParam.effort = 'none';
-        }
-        if (reasoningMaxTokens && reasoningMaxTokens > 0) {
-          reasoningParam.max_tokens = reasoningMaxTokens;
-        }
-        if (Object.keys(reasoningParam).length === 0) {
-          reasoningParam.enabled = true;
-        }
-        requestBody.reasoning = reasoningParam;
-        console.log(`[chat] Reasoning enabled:`, JSON.stringify(reasoningParam));
-      }
-    } else if (provider.id === 'deepseek') {
-      // DeepSeek toggles thinking mode via top-level `thinking` (+ optional reasoning_effort),
-      // driven by the app's Reasoning switch. Default off → non-thinking (fast/cheap).
-      Object.assign(requestBody, buildDeepSeekThinking(reasoningEnabled, reasoningEffort));
-    } else if (provider.id === 'abliteration') {
-      // Custom arm (GC §4): top-level `reasoning_effort` verbatim when the
-      // toggle is on with a known effort, otherwise nothing (fail-safe omit).
-      Object.assign(requestBody, buildAbliterationReasoning(reasoningEnabled, reasoningEffort));
-    } else if (provider.id === 'arnict') {
-      // Reasoning objeto `{enabled,effort,exclude}` vía builder T1 (GC §3):
-      // `reasoning_max_tokens` nunca viaja y nunca hay campos top-level.
-      // Con `response_format` activo el trace canibaliza `max_tokens`
-      // (Gotcha 4 keyed: `content:""` + `length`), así que el schema fuerza
-      // `reasoning:{enabled:false}`.
-      if (responseFormat) {
-        requestBody.reasoning = { enabled: false };
-        console.log('[chat] Structured output active: reasoning disabled for arnict (schema+reasoning budget conflict)');
-      } else {
-        requestBody.reasoning = buildArnictReasoning(reasoningEnabled, reasoningEffort);
-      }
-    } else if (provider.id === 'opencode-go') {
-      // T4 K1-GO (VERIFIED 2026-09-15, DERIVA-NO 2026-09-16): el toggle +
-      // esfuerzo viajan al chat-transport Go vía `reasoning_effort`
-      // top-level planificado por matriz T1. K1 midió: enum de 7 valores
-      // (`bogus`→400/422 en 5/6 familias); `none`=off también fuera de hy;
-      // `thinking` no-op jamás viaja; mimo (`[]`) acepta-no-op y longcat no
-      // valida (knob ignorado) → ambos omiten con log; `unknown` fail-open.
-      // Off → `goReasoningOff` (`none` donde listado, floor donde K1 midió
-      // burn con default-sin-knob); on → effort ya clampado pre-vuelo;
-      // null → omit (default del proveedor). Solo chat-transport
-      // (`unknown` incluido): messages/responses llevan su propio wire.
-      if (!isGoMessages && !isGoResponses) {
-        const plannedGoEffort = reasoningEnabled
-          ? reasoningEffort
-          : (goReasoningOff(upstreamModel) ?? null);
-        if (plannedGoEffort) {
-          requestBody.reasoning_effort = plannedGoEffort;
-          console.log(`[chat] opencode-go reasoning_effort: model=${upstreamModel} effort=${plannedGoEffort}`);
-        } else {
-          console.log(`[chat] opencode-go reasoning omitted (no control): model=${upstreamModel} effort=${reasoningEffort ?? 'none'}`);
-        }
-      }
+    // Reasoning fields for chat-completions wires (Anthropic-shape and
+    // Responses bodies carry theirs from the builders; Codex takes a turn effort).
+    if (!isGoMessages && !isGoResponses && provider.id !== 'codex') {
+      Object.assign(requestBody, chatReasoningFields(catalogModel, reasoningPlan, { structuredOutput: !!responseFormat }));
     }
 
     if (isLlamacppModel(effectiveModel)) {
-      // llama.cpp request-body extras (§6): a usage frame on stream close, and
-      // an explicit thinking toggle for the jinja chat template of Qwen3-class
-      // models. The per-chat toggle is the master switch: ON ⇒
-      // enable_thinking:true so the model thinks regardless of template
-      // default; OFF ⇒ enable_thinking:false = fully off (verified live on
-      // b10516: this per-request flag is the only effective suppressor —
+      // Usage frame on stream close; the thinking switch rides
+      // `chat_template_kwargs.enable_thinking` from the wire above (verified
+      // live: the per-request flag is the only effective suppressor —
       // --reasoning-budget 0 is NOT).
       requestBody.stream_options = { include_usage: true };
-      requestBody.chat_template_kwargs = { enable_thinking: reasoningEnabled };
     }
 
     if (provider.id === 'abliteration') {
       // Usage frame required for static cost accounting (GC §6/§7). The body
       // otherwise stays allowlisted: provider/plugins/reasoning-object never
-      // attach (supportsProviderRouting/supportsPlugins/supportsReasoningParam
+      // attach (supportsProviderRouting/supportsPlugins
       // are all false), tools attach normally above.
       requestBody.stream_options = { include_usage: true };
     }
@@ -1589,7 +1084,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     if (provider.id === 'opencode-go' && !isGoMessages && !isGoResponses) {
       // Usage frame required for static cost accounting (GC §6). Body stays
       // allowlisted (GC §4): provider/plugins/response_format/reasoning never
-      // attach (supportsProviderRouting/supportsPlugins/supportsReasoningParam
+      // attach (supportsProviderRouting/supportsPlugins
       // are all false), tools attach normally above. T4: `messages` carries
       // its usage inside `message_delta` (+ final `ping` cost); T5:
       // `responses` inside `response.completed` (+ final `ping` cost) — no
@@ -1602,7 +1097,9 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     // 'response-healing' field is meaningless upstream), so both are excluded.
     // Abliteration is excluded too: the healing plugin is a 422 risk there
     // (GC §2) and healing forces stream:false, which abliteration never uses.
-    const useResponseHealing = !!agent.response_healing_enabled && !!responseFormat && provider.id !== 'codex' && provider.id !== 'llamacpp' && provider.id !== 'abliteration' && provider.id !== 'arnict' && provider.id !== 'opencode-go';
+    // Response healing is an OpenRouter plugin: it rides the same capability
+    // flag as every other plugin instead of a hand-kept exclusion list.
+    const useResponseHealing = !!agent.response_healing_enabled && !!responseFormat && provider.supportsPlugins;
     if (useResponseHealing) {
       requestBody.stream = false;
       const plugins = (requestBody.plugins as { id: string; pdf?: { engine: string } }[]) || [];
@@ -1611,12 +1108,10 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       }
     }
 
-    // Ultra effort ('max') is model-dependent on OpenRouter: send it as-is and
-    // retry once with 'xhigh' when the model rejects the value. llama.cpp never
-    // receives a reasoning param, so a local model error merely mentioning
-    // "max" must never trigger this retry. Abliteration receives 'max' as-is
-    // with no retry (GC §4).
-    const requestedMaxEffort = reasoningEnabled && reasoningEffort === 'max' && provider.id !== 'codex' && provider.id !== 'llamacpp' && provider.id !== 'abliteration' && provider.id !== 'arnict' && provider.id !== 'opencode-go';
+    // OpenRouter may still reject 'max' (router targets, metadata drift): retry
+    // once with 'xhigh' on that specific error. Other hosts get levels their
+    // capability lists.
+    const requestedMaxEffort = mayRetryMaxEffort(catalogModel, reasoningPlan);
     let maxEffortFallbackDone = false;
     const effortMaxRejected = (msg: string): boolean =>
       /unsupported value: ?'?max|'max' is not supported|max is not supported/i.test(msg);
@@ -1639,6 +1134,21 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     let cost = 0;
     const annotations: unknown[] = [];
     let streamedAnnotations: unknown[] | null = null;
+
+    /**
+     * Cost for hosts whose usage frames carry no `cost` (DeepSeek, Abliteration,
+     * Arnict, OpenCode Go, llama.cpp): the catalog pricing (tiers + peak
+     * tariff) prices the cache split. An upstream `cost` always wins.
+     */
+    const priceChatUsage = (usage: Parameters<typeof pricedUsageFromChat>[0] & { cost?: unknown }): void => {
+      if (!usage || provider.id === 'openrouter') return;
+      cachedTokens = cachedTokensFromChat(usage);
+      if (usage.cost === undefined) {
+        cost = computeCost(catalogModel.pricing, pricedUsageFromChat(usage), {
+          contextTokens: (usage.prompt_tokens ?? 0) + (usage.completion_tokens ?? 0),
+        });
+      }
+    };
 
     const saveAssistantMessage = (content: string, reasoning: string, toolCallsJson: string | null, anns: unknown[]) => {
       const assistantMsgId = nanoid();
@@ -1846,7 +1356,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         systemPrompt: agent.system_prompt,
         messages,
         model: upstreamModel,
-        reasoningEffort: reasoningEnabled ? reasoningEffort : null,
+        reasoningEffort: codexTurnEffort(catalogModel, reasoningPlan),
         outputSchema: responseFormat?.json_schema?.schema ?? null,
         tools: resolvedTools,
         toolChoice: agent.tool_choice === 'none' ? 'none' : 'auto',
@@ -2026,31 +1536,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         if (details?.reasoning_tokens) reasoningTokens = details.reasoning_tokens;
         const promptDetails = u.prompt_tokens_details as { cached_tokens?: number } | undefined;
         if (promptDetails?.cached_tokens !== undefined) cachedTokens = promptDetails.cached_tokens;
-        if (provider.id === 'deepseek') {
-          cachedTokens = deepSeekCachedTokens(u);
-          if (u.cost === undefined) cost = computeDeepSeekCost(u, upstreamModel);
-        }
-        if (provider.id === 'abliteration') {
-          // Static cost: upstream usage carries no `cost` (GC §6). Never
-          // overwrite an upstream cost if one ever appears.
-          const au = u as unknown as Parameters<typeof abliterationCachedTokens>[0];
-          cachedTokens = abliterationCachedTokens(au);
-          if (u.cost === undefined) cost = computeAbliterationCost(au, upstreamModel);
-        }
-        if (provider.id === 'arnict') {
-          // Static cost: upstream usage carries no `cost` (GC §6). Never
-          // overwrite an upstream cost if one ever appears.
-          const au = u as unknown as Parameters<typeof arnictCachedTokens>[0];
-          cachedTokens = arnictCachedTokens(au);
-          if (u.cost === undefined) cost = computeArnictCost(au, upstreamModel);
-        }
-        if (provider.id === 'opencode-go') {
-          // Static cost: upstream usage carries no `cost` (GC §6). Never
-          // overwrite an upstream cost if one ever appears.
-          const au = u as unknown as Parameters<typeof opencodeGoCachedTokens>[0];
-          cachedTokens = opencodeGoCachedTokens(au);
-          if (u.cost === undefined) cost = computeOpencodeGoCost(au, upstreamModel);
-        }
+        priceChatUsage(u as Parameters<typeof pricedUsageFromChat>[0] & { cost?: unknown });
       }
       const dataWithModel = data as { model?: string };
       if (dataWithModel.model && typeof dataWithModel.model === 'string' && dataWithModel.model.trim()) {
@@ -2082,6 +1568,13 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         const ensured = await ensureLlamacppRunning(userId, upstreamModel);
         if (ensured.running) {
           console.log(`[chat] llama.cpp model ready (mode=${ensured.mode})`);
+          // Now loaded: its chat template (/props) decides the thinking capability.
+          modelCatalog().invalidate(userId, 'llamacpp');
+          catalogModel = await modelCatalog().resolveModel(userId, effectiveModel);
+          reasoningPlan = planReasoning(catalogModel.reasoning, reasoningRequest);
+          logReasoningPlan();
+          delete requestBody.reasoning_effort;
+          Object.assign(requestBody, chatReasoningFields(catalogModel, reasoningPlan));
         } else {
           console.warn(`[chat] llama.cpp pre-flight failed (${ensured.error ?? 'unknown reason'}) — continuing; the request will surface a descriptive error at the fetch seam.`);
         }
@@ -2110,50 +1603,12 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       fullContent = '';
       fullReasoning = '';
       if (isGoMessages) {
-        // T4: re-map the OpenAI-shaped turn (system + tool_calls/tool rows from
-        // the tool loop below) to the Anthropic wire shape every iteration.
-        // T5: el mismo toggle+esfuerzo+budget cada vuelta (sin drift; el wire
-        // thinking/output_config se conserva lap a lap).
-        const rebuilt = buildOpencodeGoMessagesBody({
-          upstreamModel,
-          messages: messages as Array<{ role: string; content?: string | unknown[] | null; tool_call_id?: string; tool_calls?: unknown[] }>,
-          openRouterTools: openRouterTools as OpenRouterToolDef[],
-          toolChoice: agent.tool_choice === 'none' ? 'none' : 'auto',
-          temperature: agent.temperature,
-          maxTokens: agent.max_tokens,
-          reasoningEnabled,
-          reasoningEffort,
-          reasoningMaxTokens,
-        });
-        requestBody.messages = rebuilt.messages;
-        if (rebuilt.thinking !== undefined) requestBody.thinking = rebuilt.thinking;
-        else delete requestBody.thinking;
-        if (rebuilt.output_config !== undefined) requestBody.output_config = rebuilt.output_config;
-        else delete requestBody.output_config;
-        if (rebuilt.system !== undefined) requestBody.system = rebuilt.system;
-        else delete requestBody.system;
-        if (rebuilt.tools !== undefined) requestBody.tools = rebuilt.tools;
-        else delete requestBody.tools;
+        // Re-map the OpenAI-shaped turn (tool_calls/tool rows from the loop
+        // below) to the Anthropic shape every iteration; the thinking wire is
+        // re-derived from the same plan (no drift between laps).
+        refreshTransportBody(requestBody, buildMessagesBody(transportInput()), MESSAGES_BODY_KEYS);
       } else if (isGoResponses) {
-        // T5: re-map the OpenAI-shaped turn (system + tool_calls/tool rows from
-        // the tool loop below) to Responses `input` every iteration. T3:
-        // re-deriva el mismo effort cada vuelta (sin drift entre vueltas).
-        const rebuilt = buildOpencodeGoResponsesBody({
-          upstreamModel,
-          messages: messages as Array<{ role: string; content?: string | unknown[] | null; tool_call_id?: string; tool_calls?: unknown[] }>,
-          openRouterTools: openRouterTools as OpenRouterToolDef[],
-          toolChoice: agent.tool_choice === 'none' ? 'none' : 'auto',
-          temperature: agent.temperature,
-          maxTokens: agent.max_tokens,
-          reasoningEnabled,
-          reasoningEffort,
-        });
-        requestBody.input = rebuilt.input;
-        requestBody.reasoning = rebuilt.reasoning;
-        if (rebuilt.instructions !== undefined) requestBody.instructions = rebuilt.instructions;
-        else delete requestBody.instructions;
-        if (rebuilt.tools !== undefined) requestBody.tools = rebuilt.tools;
-        else delete requestBody.tools;
+        refreshTransportBody(requestBody, buildResponsesBody(transportInput()), RESPONSES_BODY_KEYS);
       } else {
         requestBody.messages = messages;
         if (openRouterTools.length > 0) {
@@ -2243,7 +1698,12 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
           } else if (goStatus === 402 || goStatus === 429) {
             console.warn(`[chat] opencode-go billing: status=${goStatus} model=${upstreamModel}`);
             errorMsg = 'OpenCode Go usage limit reached for this model. Check usage in the OpenCode console (https://opencode.ai/docs/go/) or enable the Zen-balance fallback there.';
-          } else if (goStatus >= 400 && goStatus < 500 && /not supported for format|oa-compat/i.test(`${errorText} ${goDetail}`)) {
+          } else if (
+            (goStatus >= 400 && goStatus < 500 && /not supported for format|oa-compat/i.test(`${errorText} ${goDetail}`))
+            // A model the catalog does not describe may need another wire, and
+            // the wrong one can fail as an opaque 500 (verified: union-alpha on chat).
+            || (goStatus >= 500 && catalogModel.lifecycle === 'legacy' && catalogModel.reasoning.status === 'unknown')
+          ) {
             console.log(`[chat] opencode-go format mismatch: model=${upstreamModel} status=${goStatus}`);
             errorMsg = opencodeGoFormatMismatchMessage(upstreamModel, goPrefix || `status ${goStatus}`);
           } else {
@@ -2291,7 +1751,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       // fullContent via the shared draft/SSE path; tool_use blocks accumulate
       // per content index; usage arrives once in message_delta.
       const anthropicToolBlocks: Record<number, { id?: string; name?: string; inputJson: string }> = {};
-      let anthropicUsage: OpencodeGoMessagesUsage | null = null;
+      let anthropicUsage: MessagesUsage | null = null;
       let anthropicStopReason: string | null = null;
       let anthropicPingCost: string | number | undefined;
       // T5 Responses stream state (response.created → output_text deltas →
@@ -2299,7 +1759,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       // shared draft/SSE path; function_call items accumulate by output
       // index; usage + cost arrive once in response.completed.
       const responsesToolCalls: Record<string, { callId?: string; name?: string; args: string }> = {};
-      let responsesUsage: OpencodeGoResponsesUsage | null = null;
+      let responsesUsage: ResponsesUsage | null = null;
       let responsesInlineCost: string | number | undefined;
       let responsesPingCost: string | number | undefined;
 
@@ -2394,7 +1854,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
                 if (evtType === 'message_delta') {
                   const stopReason = parsed.delta?.stop_reason;
                   if (typeof stopReason === 'string' && stopReason) anthropicStopReason = stopReason;
-                  if (parsed.usage) anthropicUsage = parsed.usage as OpencodeGoMessagesUsage;
+                  if (parsed.usage) anthropicUsage = parsed.usage as MessagesUsage;
                   continue;
                 }
                 if (evtType === 'message_stop') continue;
@@ -2459,7 +1919,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
                   const echoModel = resp?.model;
                   if (typeof echoModel === 'string' && echoModel.trim()) actualModelFromResponse = echoModel;
                   const u = resp?.usage ?? parsed.usage;
-                  if (u && typeof u === 'object') responsesUsage = u as OpencodeGoResponsesUsage;
+                  if (u && typeof u === 'object') responsesUsage = u as ResponsesUsage;
                   if (resp?.cost !== undefined) responsesInlineCost = resp.cost as string | number;
                   // Backstop: function_call items missed mid-stream (same
                   // call_id merges, never duplicates).
@@ -2536,23 +1996,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
                 if (usage.cost !== undefined) cost = usage.cost;
                 if (usage.completion_tokens_details?.reasoning_tokens) reasoningTokens = usage.completion_tokens_details.reasoning_tokens;
                 if (usage.prompt_tokens_details?.cached_tokens !== undefined) cachedTokens = usage.prompt_tokens_details.cached_tokens;
-                if (provider.id === 'deepseek') {
-                  cachedTokens = deepSeekCachedTokens(usage);
-                  if (usage.cost === undefined) cost = computeDeepSeekCost(usage, upstreamModel);
-                }
-                if (provider.id === 'abliteration') {
-                  cachedTokens = abliterationCachedTokens(usage);
-                  if (usage.cost === undefined) cost = computeAbliterationCost(usage, upstreamModel);
-                }
-                if (provider.id === 'arnict') {
-                  cachedTokens = arnictCachedTokens(usage);
-                  if (usage.cost === undefined) cost = computeArnictCost(usage, upstreamModel);
-                }
-                if (provider.id === 'opencode-go') {
-                  // Static cost (GC §6): never overwrite an upstream cost.
-                  cachedTokens = opencodeGoCachedTokens(usage);
-                  if (usage.cost === undefined) cost = computeOpencodeGoCost(usage, upstreamModel);
-                }
+                priceChatUsage(usage);
               }
 
               // Capture file (and other) annotations from stream for PDF skip-reparse on follow-ups
@@ -2599,26 +2043,17 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         // (usage `cost` or final `ping` cost) wins when numeric — never
         // overwritten by the static computation.
         if (anthropicUsage) {
-          const { mappedUsage, promptTotal, outputTokens, cachedTokens: hitTokens, upstreamCost } =
-            mapOpencodeGoMessagesUsage(anthropicUsage);
-          promptTokens = promptTotal;
-          completionTokens = outputTokens;
-          totalTokens = promptTotal + outputTokens;
-          cachedTokens = hitTokens;
-          if (upstreamCost !== null) {
-            cost = upstreamCost;
-          } else {
-            let pingCost: number | null = null;
-            if (anthropicPingCost !== undefined) {
-              const n = typeof anthropicPingCost === 'string' ? Number(anthropicPingCost) : anthropicPingCost;
-              if (typeof n === 'number' && Number.isFinite(n)) pingCost = n;
-            }
-            if (pingCost !== null) cost = pingCost;
-            else cost = computeOpencodeGoCost(mappedUsage, upstreamModel, { contextTokens: promptTotal + outputTokens });
-          }
-        } else if (anthropicPingCost !== undefined) {
-          const n = typeof anthropicPingCost === 'string' ? Number(anthropicPingCost) : anthropicPingCost;
-          if (typeof n === 'number' && Number.isFinite(n)) cost = n;
+          const mapped = mapMessagesUsage(anthropicUsage);
+          promptTokens = mapped.promptTokens;
+          completionTokens = mapped.outputTokens;
+          totalTokens = mapped.promptTokens + mapped.outputTokens;
+          cachedTokens = mapped.cachedTokens;
+          cost = mapped.upstreamCost
+            ?? firstNumericCost(anthropicPingCost)
+            ?? computeCost(catalogModel.pricing, mapped.priced, { contextTokens: mapped.promptTokens + mapped.outputTokens });
+        } else {
+          const pingCost = firstNumericCost(anthropicPingCost);
+          if (pingCost !== null) cost = pingCost;
         }
         lastFinishReason = anthropicStopReason === 'tool_use' ? 'tool_calls' : anthropicStopReason;
       }
@@ -2630,28 +2065,18 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         // (input + output). An upstream cost (response `cost` or final `ping`
         // cost) wins when numeric — never overwritten by the static
         // computation.
-        const responsesEventCost = (raw: string | number | undefined): number | null => {
-          if (raw === undefined) return null;
-          const n = typeof raw === 'string' ? Number(raw) : raw;
-          return (typeof n === 'number' && Number.isFinite(n)) ? n : null;
-        };
         if (responsesUsage) {
-          const { mappedResponsesUsage, promptTotal, outputTokens, cachedTokens: hitTokens, reasoningTokens: usageReasoning, upstreamCost } =
-            mapOpencodeGoResponsesUsage(responsesUsage);
-          promptTokens = promptTotal;
-          completionTokens = outputTokens;
-          totalTokens = promptTotal + outputTokens;
-          cachedTokens = hitTokens;
-          reasoningTokens = usageReasoning;
-          if (upstreamCost !== null) {
-            cost = upstreamCost;
-          } else {
-            const eventCost = responsesEventCost(responsesInlineCost) ?? responsesEventCost(responsesPingCost);
-            if (eventCost !== null) cost = eventCost;
-            else cost = computeOpencodeGoCost(mappedResponsesUsage, upstreamModel, { contextTokens: promptTotal + outputTokens });
-          }
+          const mapped = mapResponsesUsage(responsesUsage);
+          promptTokens = mapped.promptTokens;
+          completionTokens = mapped.outputTokens;
+          totalTokens = mapped.promptTokens + mapped.outputTokens;
+          cachedTokens = mapped.cachedTokens;
+          reasoningTokens = mapped.reasoningTokens;
+          cost = mapped.upstreamCost
+            ?? firstNumericCost(responsesInlineCost, responsesPingCost)
+            ?? computeCost(catalogModel.pricing, mapped.priced, { contextTokens: mapped.promptTokens + mapped.outputTokens });
         } else {
-          const eventCost = responsesEventCost(responsesInlineCost) ?? responsesEventCost(responsesPingCost);
+          const eventCost = firstNumericCost(responsesInlineCost, responsesPingCost);
           if (eventCost !== null) cost = eventCost;
         }
         if (Object.keys(responsesToolCalls).length > 0 && resolvedTools.length > 0) {
@@ -2746,7 +2171,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
           role: 'assistant',
           content: fullContent || null,
           tool_calls: toolCallsArray,
-          ...(fullReasoning.trim() ? { [provider.id === 'opencode-go' ? opencodeGoHistoryReasoningField(upstreamModel) : assistantReasoningField(provider.id)]: fullReasoning } : {}),
+          ...(fullReasoning.trim() ? { [catalogModel.historyReasoningField]: fullReasoning } : {}),
         });
 
         // Milestone persist via the segment draft (plan S2): the row already

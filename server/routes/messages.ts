@@ -4,7 +4,8 @@ import { AuthRequest } from '../middleware/auth.js';
 import { parseProviderRoutingConfig } from '../providerRouting.js';
 import { buildThreadIds } from '../messageTree.js';
 import { estimateTokens } from '../compaction/serialize.js';
-import { resolveWindow, SUGGEST_PCT } from '../compaction/policy.js';
+import { SUGGEST_PCT } from '../compaction/policy.js';
+import { modelCatalog } from '../catalog/index.js';
 import { retentionBudgetFor, selectRetainedUserMessages } from '../compaction/retain.js';
 import { getSettingValue } from './settings.js';
 import {
@@ -112,7 +113,8 @@ export interface ContextEstimateInput {
   tailRows: ContextEstimateTailRow[];
   /** `JSON.stringify` of the resolved tool definitions for this conversation. */
   toolsJson: string;
-  effectiveModel: string;
+  /** The model's context window from the catalog; null when unknown. */
+  contextLength: number | null;
 }
 
 export interface ContextEstimate {
@@ -127,8 +129,8 @@ export interface ContextEstimate {
  * prompt chars + summary content chars (0 without a checkpoint) + tail-row
  * chars (content + tool/reasoning/annotation/attachment raw fields, i.e. what
  * travels verbatim to the provider) + resolved tool-def JSON chars — each
- * component via `estimateTokens` (G5 `ceil(chars/4)`), summed. `limit` is
- * `resolveWindow(effectiveModel)`; unknown windows yield
+ * component via `estimateTokens` (G5 `ceil(chars/4)`), summed. `limit` is the
+ * catalog context window; unknown windows yield
  * `limit:null, pct:null` with the advisory off. Suggests at 60% (`SUGGEST_PCT`).
  */
 export function buildContextEstimate(input: ContextEstimateInput): ContextEstimate {
@@ -155,7 +157,7 @@ export function buildContextEstimate(input: ContextEstimateInput): ContextEstima
     if (row.attachments) tokens += estimateTokens(row.attachments);
   }
   tokens += estimateTokens(input.toolsJson ?? '');
-  const limit = typeof input.effectiveModel === 'string' ? resolveWindow(input.effectiveModel) : null;
+  const limit = typeof input.contextLength === 'number' && input.contextLength > 0 ? input.contextLength : null;
   if (limit == null) return { tokens, limit: null, pct: null, suggest_compact: false };
   const pct = tokens / limit;
   return { tokens, limit, pct, suggest_compact: pct >= SUGGEST_PCT };
@@ -328,7 +330,7 @@ router.get('/:id/messages', async (req: AuthRequest, res: Response) => {
         retainedMessages,
         tailRows,
         toolsJson,
-        effectiveModel: effectiveModel ?? '',
+        contextLength: effectiveModel ? (await modelCatalog().resolveModel(userId, effectiveModel)).contextLength : null,
       });
     } catch {
       // View fields stay at their null/advisory-off defaults; the durable

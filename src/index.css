@@ -4284,3 +4284,250 @@ button:focus-visible .conv-delete-btn {
   color: var(--text-on-accent);
   border: 1px solid var(--accent);
 }
+
+/* ---------- Thinking control (capability-driven) ----------
+   One control for composer popover, mobile sheet, agent editor and settings.
+   The depth ladder is the single expressive element: each rung carries a bar
+   whose height encodes its canonical depth, so a model offering only
+   High and Max still reads as "deep". Everything else stays quiet. */
+.reasoning-control {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.reasoning-control__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 28px;
+}
+.reasoning-control__title {
+  font-family: var(--font-body);
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.reasoning-control--full .reasoning-control__title {
+  font-size: 0.9375rem;
+}
+.reasoning-control__badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 9px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--reasoning);
+  background: var(--reasoning-soft);
+  border: 1px solid var(--reasoning-border);
+  border-radius: var(--radius-pill);
+  white-space: nowrap;
+}
+.reasoning-control__description,
+.reasoning-control__note {
+  margin: 0;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+.reasoning-control__note {
+  color: var(--text-muted);
+}
+
+.reasoning-switch {
+  position: relative;
+  width: 40px;
+  height: 24px;
+  flex-shrink: 0;
+  padding: 0;
+  border-radius: var(--radius-pill);
+  background: var(--surface-inset);
+  border: 1px solid var(--border-default);
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+.reasoning-switch.is-on {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.reasoning-switch__knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: transform var(--transition-fast), background var(--transition-fast);
+}
+.reasoning-switch.is-on .reasoning-switch__knob {
+  transform: translateX(16px);
+  background: var(--text-on-accent);
+}
+.reasoning-switch:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+}
+
+.reasoning-ladder {
+  display: grid;
+  gap: 4px;
+  padding: 4px;
+  background: var(--surface-inset);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+.reasoning-rung {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+  min-height: 58px;
+  padding: 8px 4px 7px;
+  font-family: var(--font-body);
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+.reasoning-control--full .reasoning-rung {
+  min-height: 66px;
+  font-size: 0.8125rem;
+}
+.reasoning-rung:hover:not(.is-selected) {
+  color: var(--text-primary);
+  background: var(--surface-hover);
+}
+.reasoning-rung.is-selected {
+  color: var(--reasoning);
+}
+.reasoning-rung:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+}
+.reasoning-rung__indicator {
+  position: absolute;
+  inset: 0;
+  background: var(--accent-soft);
+  border: 1px solid var(--border-accent);
+  border-radius: var(--radius-sm);
+}
+.reasoning-rung__bar {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  width: 10px;
+  height: 28px;
+  border-radius: 5px;
+  /* The empty part of the track is the point: it shows how deep the rung
+     sits on the canonical scale, so a two-rung model still reads as deep. */
+  background: rgb(var(--copper-rgb) / 0.12);
+  overflow: hidden;
+}
+.reasoning-rung__bar > span {
+  display: block;
+  width: 100%;
+  min-height: 4px;
+  background: var(--reasoning);
+  opacity: 0.5;
+  border-radius: 5px;
+  transition: opacity var(--transition-fast), height var(--transition-base);
+}
+.reasoning-rung:hover:not(.is-selected) .reasoning-rung__bar > span {
+  opacity: 0.7;
+}
+.reasoning-rung.is-selected .reasoning-rung__bar > span {
+  opacity: 1;
+}
+.reasoning-rung__label {
+  position: relative;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Six rungs in a composer popover leave ~40px each: shrink rather than clip. */
+.reasoning-control--compact .reasoning-ladder[data-rungs="6"] .reasoning-rung__label {
+  font-size: 0.6875rem;
+  letter-spacing: -0.01em;
+}
+.reasoning-control--compact .reasoning-ladder[data-rungs="6"] .reasoning-rung {
+  padding-left: 2px;
+  padding-right: 2px;
+}
+.reasoning-rung__default {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+
+.reasoning-budget {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 4px 10px;
+}
+.reasoning-budget__label {
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+}
+.reasoning-budget__input {
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 10px;
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  color: var(--text-primary);
+  background: var(--surface-inset);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+}
+.reasoning-budget__input:focus-visible {
+  outline: none;
+  border-color: var(--border-focus);
+  box-shadow: var(--shadow-focus);
+}
+.reasoning-budget__hint {
+  grid-column: 2;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.reasoning-control__note--warn {
+  color: var(--state-warning);
+}
+
+.reasoning-skeleton {
+  display: block;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(90deg, var(--surface-2) 25%, var(--surface-hover) 50%, var(--surface-2) 75%);
+  background-size: 200% 100%;
+  animation: reasoning-skeleton-shimmer 1.4s ease-in-out infinite;
+}
+.reasoning-skeleton--switch { width: 40px; height: 24px; border-radius: var(--radius-pill); }
+.reasoning-skeleton--ladder { height: 66px; border-radius: var(--radius-md); }
+@keyframes reasoning-skeleton-shimmer {
+  to { background-position: -200% 0; }
+}
+
+@media (max-width: 767px) {
+  .reasoning-rung { min-height: 62px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .reasoning-skeleton { animation: none; }
+  .reasoning-switch__knob,
+  .reasoning-rung,
+  .reasoning-rung__bar > span { transition: none; }
+}

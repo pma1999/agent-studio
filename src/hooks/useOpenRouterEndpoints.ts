@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { modelsApi } from '../api/client';
 import type { OpenRouterEndpoint } from '../types';
-import { isDeepSeekDirectModel } from '../utils/providers';
+import { supportsProviderRouting } from '../utils/providers';
 
 export function useOpenRouterEndpoints(modelId: string | null | undefined, enabled = true) {
   const [endpoints, setEndpoints] = useState<OpenRouterEndpoint[]>([]);
@@ -9,7 +9,7 @@ export function useOpenRouterEndpoints(modelId: string | null | undefined, enabl
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!enabled || !modelId || modelId === 'openrouter/auto' || isDeepSeekDirectModel(modelId)) {
+    if (!enabled || !modelId || modelId === 'openrouter/auto' || !supportsProviderRouting(modelId)) {
       setEndpoints([]);
       setLoading(false);
       setError(null);

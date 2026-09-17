@@ -93,25 +93,3 @@ export function clampReasoningEffort(
   return levels[Math.floor((levels.length - 1) / 2)];
 }
 
-/**
- * Find a model's supported-efforts list in a catalog snapshot.
- *
- * - `'openrouter/auto'` → `null` (union of every provider: no single list).
- * - Any id containing `':'` (`deepseek:`/`codex:`/`llamacpp:`/`lmstudio:` and
- *   any other namespaced id) → `null` (never filtered per-model).
- * - Entry missing, `reasoning` absent, or `supported_efforts` not an array →
- *   `null` (unknown → fail-open).
- * - Present → verbatim shallow copy (never the cached reference).
- */
-export function lookupSupportedEfforts(
-  entries: ReadonlyArray<{ id: string; reasoning?: { supported_efforts?: readonly string[] | null } | null }>,
-  modelId: string,
-): string[] | null {
-  if (modelId === 'openrouter/auto') return null;
-  if (modelId.includes(':')) return null;
-  const entry = entries.find((e) => e.id === modelId);
-  if (!entry) return null;
-  const list = entry.reasoning?.supported_efforts;
-  if (!Array.isArray(list)) return null;
-  return [...list];
-}

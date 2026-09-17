@@ -4,17 +4,16 @@ import { CheckCircle, AlertCircle, ExternalLink, Zap, Coins, BarChart3, Loader2,
 import { useStore } from '../stores/store';
 import { settingsApi, toolsApi, mcpServersApi, skillsApi, deepseekApi, abliterationApi, arnictApi, opencodeGoApi } from '../api/client';
 import type { ProviderRoutingConfig, ReasoningEffort, Tool, McpServer, Skill } from '../types';
-import { DEEPSEEK_ACCENT, CODEX_ACCENT, LLAMACPP_ACCENT, ABLITERATION_ACCENT, ARNICT_ACCENT, OPENCODE_GO_ACCENT } from '../utils/providers';
+import { PROVIDER_UI, notifyModelCatalogChanged, providerOfModelId } from '../utils/providers';
 import { chatgptApi, type ChatgptStatus } from '../api/client';
-import { CHATGPT_STATUS_CHANGED_EVENT } from '../hooks/useCodexModels';
-import { OPENCODE_GO_STATUS_CHANGED_EVENT } from '../hooks/useOpencodeGoModels';
+
 import { LlamaCppSection } from './LlamaCppSection';
 import { Modal } from './ui/Modal';
 import { Input } from './ui/Input';
 import { Button } from './ui/Button';
 import { ModelSelectorCore } from './ModelSelectorCore';
-import { useOpenRouterModels } from '../hooks/useOpenRouterModels';
-import { clampReasoningEffort, filterSupportedEfforts, lookupSupportedEfforts } from '../../shared/reasoningEfforts';
+import { useCatalogModel } from '../hooks/useModelCatalog';
+import { ReasoningControl } from './reasoning/ReasoningControl';
 import { formatModelId } from '../utils/modelUtils';
 import { ProviderRoutingSelector } from './ProviderRoutingSelector';
 import { PremiumToggle } from './ui/PremiumToggle';
@@ -96,6 +95,9 @@ function ProviderKeySection({
       const data = await settingsApi.set(settingKey, localKey);
       setSavedKey((data as { value?: string }).value ?? localKey);
       setSaving(false);
+      // A new key changes which models this user can list: reload the catalog
+      // now instead of waiting for its TTL.
+      notifyModelCatalogChanged();
     } catch (err) {
       console.error(`Failed to save ${providerName} API key:`, err);
       setSaving(false);
@@ -303,7 +305,7 @@ function DeepSeekSection() {
     <ProviderKeySection
       providerName="DeepSeek (Direct)"
       providerIcon={<Brain size={15} />}
-      accentColor={DEEPSEEK_ACCENT}
+      accentColor={PROVIDER_UI.deepseek.accent}
       settingKey="deepseek_api_key"
       localKey={localKey}
       setLocalKey={setLocalKey}
@@ -346,7 +348,7 @@ function AbliterationSection() {
     <ProviderKeySection
       providerName="Abliteration"
       providerIcon={<Sparkles size={15} />}
-      accentColor={ABLITERATION_ACCENT}
+      accentColor={PROVIDER_UI.abliteration.accent}
       settingKey="abliteration_api_key"
       localKey={localKey}
       setLocalKey={setLocalKey}
@@ -385,7 +387,7 @@ function ArnictSection() {
     <ProviderKeySection
       providerName="Arnict"
       providerIcon={<Sparkles size={15} />}
-      accentColor={ARNICT_ACCENT}
+      accentColor={PROVIDER_UI.arnict.accent}
       settingKey="arnict_api_key"
       localKey={localKey}
       setLocalKey={setLocalKey}
@@ -411,7 +413,7 @@ function OpenCodeGoSection() {
     try {
       const result = await opencodeGoApi.validate();
       if (result.ok) {
-        window.dispatchEvent(new Event(OPENCODE_GO_STATUS_CHANGED_EVENT));
+        notifyModelCatalogChanged();
         return { ok: true, message: `OpenCode Go key is valid (probe model: ${result.model ?? 'mimo-v2.5'}).` };
       }
       return { ok: false, message: result.error || 'Invalid OpenCode Go API key' };
@@ -425,14 +427,14 @@ function OpenCodeGoSection() {
     <ProviderKeySection
       providerName="OpenCode Go"
       providerIcon={<Sparkles size={15} />}
-      accentColor={OPENCODE_GO_ACCENT}
+      accentColor={PROVIDER_UI['opencode-go'].accent}
       settingKey="opencode_go_api_key"
       localKey={localKey}
       setLocalKey={setLocalKey}
       savedKey={opencodeGoApiKey}
       setSavedKey={(v: string) => {
         setOpencodeGoApiKey(v);
-        window.dispatchEvent(new Event(OPENCODE_GO_STATUS_CHANGED_EVENT));
+        notifyModelCatalogChanged();
       }}
       placeholder={hasSavedKey ? `Saved: ${opencodeGoApiKey} — enter a new key to replace` : 'Paste your OpenCode Go API key'}
       helpText="Requires an OpenCode Go subscription — a Zen key without Go will not work. Test Connection spends a ~1-token probe. Phase 1 supports chat-transport models only. See"
@@ -469,7 +471,7 @@ function ChatGPTSection() {
       setError(null);
       // Connection state changed → refresh the model catalog without a page reload.
       if (s.connected && !wasConnected) {
-        window.dispatchEvent(new Event(CHATGPT_STATUS_CHANGED_EVENT));
+        notifyModelCatalogChanged();
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load ChatGPT status');
@@ -519,7 +521,7 @@ function ChatGPTSection() {
       setStatus((s) =>
         s ? { ...s, connected: false, email: null, planType: null, rateLimits: null } : s
       );
-      window.dispatchEvent(new Event(CHATGPT_STATUS_CHANGED_EVENT));
+      notifyModelCatalogChanged();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to disconnect ChatGPT');
     } finally {
@@ -548,12 +550,12 @@ function ChatGPTSection() {
           width: '28px',
           height: '28px',
           borderRadius: 'var(--radius-sm)',
-          background: `${CODEX_ACCENT}18`,
-          border: `1px solid ${CODEX_ACCENT}30`,
+          background: `${PROVIDER_UI.codex.accent}18`,
+          border: `1px solid ${PROVIDER_UI.codex.accent}30`,
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          color: CODEX_ACCENT,
+          color: PROVIDER_UI.codex.accent,
         }}>
           <Sparkles size={15} />
         </div>
@@ -601,7 +603,7 @@ function ChatGPTSection() {
       {!loading && status?.allowed && pending && (
         <div style={{ padding: '16px', background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', display: 'flex', flexDirection: 'column', gap: '12px' }}>
           <div style={{ fontSize: '0.875rem', fontWeight: 600, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <Loader2 size={14} style={{ animation: 'spin 1s linear infinite', color: CODEX_ACCENT }} />
+            <Loader2 size={14} style={{ animation: 'spin 1s linear infinite', color: PROVIDER_UI.codex.accent }} />
             Waiting for sign-in
           </div>
           <div style={{ fontSize: '0.8125rem', color: 'var(--text-muted)', lineHeight: 1.6 }}>
@@ -612,7 +614,7 @@ function ChatGPTSection() {
               href={pending.verificationUrl}
               target="_blank"
               rel="noopener noreferrer"
-              style={{ color: CODEX_ACCENT, fontSize: '0.8125rem', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+              style={{ color: PROVIDER_UI.codex.accent, fontSize: '0.8125rem', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
             >
               {pending.verificationUrl} <ExternalLink size={11} />
             </a>
@@ -664,8 +666,8 @@ function ChatGPTSection() {
               )}
               {status.planType && (
                 <span style={{
-                  fontSize: '0.625rem', padding: '2px 6px', background: `${CODEX_ACCENT}18`,
-                  color: CODEX_ACCENT, borderRadius: '4px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em',
+                  fontSize: '0.625rem', padding: '2px 6px', background: `${PROVIDER_UI.codex.accent}18`,
+                  color: PROVIDER_UI.codex.accent, borderRadius: '4px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em',
                 }}>
                   {status.planType}
                 </span>
@@ -681,7 +683,7 @@ function ChatGPTSection() {
                   <div style={{
                     height: '100%', borderRadius: 3,
                     width: `${Math.min(primaryRateLimit.usedPercent, 100)}%`,
-                    background: primaryRateLimit.usedPercent > 85 ? 'var(--error)' : primaryRateLimit.usedPercent > 60 ? 'var(--state-warning)' : CODEX_ACCENT,
+                    background: primaryRateLimit.usedPercent > 85 ? 'var(--error)' : primaryRateLimit.usedPercent > 60 ? 'var(--state-warning)' : PROVIDER_UI.codex.accent,
                     transition: 'width 0.3s ease',
                   }} />
                 </div>
@@ -721,6 +723,7 @@ function GeneralChatSettingsSection() {
   const [localSystemPrompt, setLocalSystemPrompt] = useState('');
   const [localReasoningEnabled, setLocalReasoningEnabled] = useState(false);
   const [localReasoningEffort, setLocalReasoningEffort] = useState<ReasoningEffort>('medium');
+  const [localReasoningMaxTokens, setLocalReasoningMaxTokens] = useState<number | null>(null);
   const [localEmoji, setLocalEmoji] = useState('💬');
   const [localToolIds, setLocalToolIds] = useState<string[]>([]);
   const [localMcpServerIds, setLocalMcpServerIds] = useState<string[]>([]);
@@ -753,6 +756,7 @@ function GeneralChatSettingsSection() {
       setLocalSystemPrompt(generalChatSettings.system_prompt);
       setLocalReasoningEnabled(generalChatSettings.reasoning_enabled || false);
       setLocalReasoningEffort(generalChatSettings.reasoning_effort || 'medium');
+      setLocalReasoningMaxTokens(generalChatSettings.reasoning_max_tokens ?? null);
       setLocalEmoji(generalChatSettings.emoji || '💬');
       setLocalToolIds(generalChatSettings.tool_ids ?? []);
       setLocalMcpServerIds(generalChatSettings.mcp_server_ids ?? []);
@@ -771,6 +775,8 @@ function GeneralChatSettingsSection() {
         system_prompt: localSystemPrompt,
         reasoning_enabled: localReasoningEnabled,
         reasoning_effort: localReasoningEffort,
+        // Was dropped here before, so a saved budget was wiped on every save.
+        reasoning_max_tokens: localReasoningMaxTokens ?? undefined,
         emoji: localEmoji,
         tool_ids: localToolIds,
         mcp_server_ids: localMcpServerIds,
@@ -797,42 +803,29 @@ function GeneralChatSettingsSection() {
     localSystemPrompt !== generalChatSettings.system_prompt ||
     localReasoningEnabled !== (generalChatSettings.reasoning_enabled || false) ||
     localReasoningEffort !== (generalChatSettings.reasoning_effort || 'medium') ||
+    (localReasoningMaxTokens ?? null) !== (generalChatSettings.reasoning_max_tokens ?? null) ||
     localEmoji !== (generalChatSettings.emoji || '💬') ||
     !!hasToolMcpChanges
   );
 
-  const reasoningEffortOptions = [
-    { value: 'minimal', label: 'Minimal', description: 'Fastest responses' },
-    { value: 'low', label: 'Low', description: 'Quick reasoning' },
-    { value: 'medium', label: 'Medium', description: 'Balanced' },
-    { value: 'high', label: 'High', description: 'Deep analysis' },
-    { value: 'xhigh', label: 'Maximum', description: 'Best quality' },
-    { value: 'max', label: 'Ultra', description: 'Max effort (ChatGPT)' },
-  ];
-
-  // Per-model effort filter (T3, UI-only): cached catalog, no new requests, no payload change.
-  // Saving stays unblocked by design; the hint below only explains the server fallback.
+  // The control renders from what the chosen model offers; saving is never
+  // blocked by it (the server clamps at send time).
   const generalModelShort = formatModelId(localModel);
-  const { models: openRouterModels, loading: openRouterModelsLoading, error: openRouterModelsError } = useOpenRouterModels();
-  const supportedGeneralEfforts = React.useMemo(() => {
-    if (openRouterModelsLoading || openRouterModelsError) return null;
-    return filterSupportedEfforts(lookupSupportedEfforts(openRouterModels, localModel));
-  }, [openRouterModels, openRouterModelsLoading, openRouterModelsError, localModel]);
-  const generalEffortHint = React.useMemo(() => {
-    if (localReasoningEffort === 'none') return null;
-    if (supportedGeneralEfforts === null) return null;
-    if (supportedGeneralEfforts.includes(localReasoningEffort)) return null;
-    const fallback = clampReasoningEffort(localReasoningEffort, supportedGeneralEfforts);
-    const currentLabel = reasoningEffortOptions.find((o) => o.value === localReasoningEffort)?.label
-      ?? localReasoningEffort;
-    const fallbackLabel = fallback == null
-      ? null
-      : reasoningEffortOptions.find((o) => o.value === fallback)?.label ?? null;
-    if (fallback === null || fallbackLabel === null) {
-      return `"${currentLabel}" isn't supported by ${generalModelShort} — sending without effort.`;
-    }
-    return `"${currentLabel}" isn't supported by ${generalModelShort} — sending ${fallbackLabel}.`;
-  }, [supportedGeneralEfforts, localReasoningEffort, generalModelShort]);
+  const { model: generalCatalogModel, reasoning: generalCapability } = useCatalogModel(localModel);
+  const generalModelName = generalCatalogModel?.name ?? generalModelShort;
+  const generalProviderLabel = PROVIDER_UI[providerOfModelId(localModel)].label;
+  const generalReasoningValue = React.useMemo(
+    () => ({ enabled: localReasoningEnabled, level: localReasoningEffort, budget: localReasoningMaxTokens }),
+    [localReasoningEnabled, localReasoningEffort, localReasoningMaxTokens],
+  );
+  const setGeneralReasoning = React.useCallback(
+    (next: { enabled: boolean; level: string | null; budget: number | null }) => {
+      setLocalReasoningEnabled(next.enabled);
+      if (next.level) setLocalReasoningEffort(next.level as ReasoningEffort);
+      setLocalReasoningMaxTokens(next.budget);
+    },
+    [],
+  );
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
@@ -965,114 +958,21 @@ function GeneralChatSettingsSection() {
         </div>
       </div>
 
-      {/* Reasoning Section */}
+      {/* Thinking: only what this model offers. */}
       <div style={{
         padding: '16px',
         background: 'var(--bg-surface)',
         borderRadius: 'var(--radius-lg)',
         border: '1px solid var(--border)',
       }}>
-        <div style={{ display: 'flex', alignItems: 'flex-start', gap: '16px' }}>
-          <PremiumToggle
-            checked={localReasoningEnabled}
-            onChange={setLocalReasoningEnabled}
-            label="Enable Extended Thinking"
-            description="Show the model's reasoning process before the final response"
-            size="md"
-            color="var(--accent)"
-          />
-        </div>
-
-        <AnimatePresence>
-          {localReasoningEnabled && (
-            <motion.div
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: 'auto', opacity: 1 }}
-              exit={{ height: 0, opacity: 0 }}
-              transition={{ duration: 0.2 }}
-              style={{ overflow: 'hidden' }}
-            >
-              <div style={{
-                marginTop: '16px',
-                paddingTop: '16px',
-                borderTop: '1px solid var(--border)',
-              }}>
-                <label style={{
-                  fontSize: '0.6875rem',
-                  fontWeight: 600,
-                  color: 'var(--text-secondary)',
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.08em',
-                  marginBottom: '8px',
-                  display: 'block',
-                }}>
-                  Thinking Depth
-                </label>
-                <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-                  {reasoningEffortOptions.map((option) => {
-                    const isActive = localReasoningEffort === option.value;
-                    const isSupported = supportedGeneralEfforts === null
-                      || (supportedGeneralEfforts as readonly string[]).includes(option.value);
-                    return (
-                      <motion.button
-                        key={option.value}
-                        onClick={() => setLocalReasoningEffort(option.value as any)}
-                        disabled={!isSupported}
-                        title={isSupported ? undefined : `${option.label} no soportado por ${generalModelShort}`}
-                        aria-label={isSupported ? undefined : `${option.label}. No soportado por ${generalModelShort}`}
-                        whileHover={isSupported ? { scale: 1.02 } : undefined}
-                        whileTap={isSupported ? { scale: 0.98 } : undefined}
-                        style={{
-                          padding: '8px 14px',
-                          borderRadius: 'var(--radius-md)',
-                          border: `1.5px solid ${isActive ? 'var(--accent)' : 'var(--border)'}`,
-                          background: isActive
-                            ? 'var(--accent-soft)'
-                            : 'var(--bg-elevated)',
-                          cursor: isSupported ? 'pointer' : 'not-allowed',
-                          transition: 'all 0.15s ease',
-                        }}
-                      >
-                        <div style={{
-                          fontSize: '0.8125rem',
-                          fontWeight: isActive ? 600 : 500,
-                          color: isActive ? 'var(--accent)' : 'var(--text-primary)',
-                          textTransform: 'capitalize',
-                        }}>
-                          {option.label}
-                        </div>
-                        <div style={{
-                          fontSize: '0.6875rem',
-                          color: 'var(--text-muted)',
-                          marginTop: '2px',
-                        }}>
-                          {option.description}
-                        </div>
-                      </motion.button>
-                    );
-                  })}
-                </div>
-                {localReasoningEnabled && generalEffortHint && (
-                  <div
-                    aria-live="polite"
-                    style={{
-                      marginTop: '12px',
-                      padding: '8px 10px',
-                      background: 'var(--bg-elevated)',
-                      border: '1px solid var(--border)',
-                      borderRadius: 'var(--radius-sm)',
-                      fontSize: '0.75rem',
-                      color: 'var(--text-muted)',
-                      lineHeight: 1.4,
-                    }}
-                  >
-                    {generalEffortHint}
-                  </div>
-                )}
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
+        <ReasoningControl
+          capability={generalCapability}
+          value={generalReasoningValue}
+          onChange={setGeneralReasoning}
+          modelName={generalModelName}
+          providerLabel={generalProviderLabel}
+          variant="full"
+        />
       </div>
 
       {/* Tools (assign which tools General Chat can use) */}
@@ -1305,6 +1205,7 @@ function GeneralChatSettingsSection() {
                 setLocalSystemPrompt(generalChatSettings.system_prompt);
                 setLocalReasoningEnabled(generalChatSettings.reasoning_enabled || false);
                 setLocalReasoningEffort(generalChatSettings.reasoning_effort || 'medium');
+      setLocalReasoningMaxTokens(generalChatSettings.reasoning_max_tokens ?? null);
                 setLocalEmoji(generalChatSettings.emoji || '💬');
                 setLocalToolIds(generalChatSettings.tool_ids ?? []);
                 setLocalMcpServerIds(generalChatSettings.mcp_server_ids ?? []);
@@ -1418,6 +1319,7 @@ function OpenRouterSection() {
     try {
       await settingsApi.set('openrouter_api_key', localORKey);
       setOpenRouterApiKey(localORKey);
+      notifyModelCatalogChanged();
     } finally {
       setSaving(false);
     }

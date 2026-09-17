@@ -12,8 +12,6 @@ import {
   SUGGEST_PCT,
   AUTO_FIRE_PCT,
   AUTO_COMPACT_ENABLED,
-  MODEL_WINDOWS,
-  resolveWindow,
   estimateContextUsage,
   shouldSuggest,
   thrashStatus,
@@ -195,26 +193,6 @@ test('policy budget constants', () => {
   assert.equal(SUGGEST_PCT, 0.6);
   assert.equal(AUTO_FIRE_PCT, 0.9);
   assert.equal(AUTO_COMPACT_ENABLED, false);
-});
-
-test('MODEL_WINDOWS known values mirror provider catalogs', () => {
-  assert.equal(MODEL_WINDOWS['deepseek:deepseek-v4-flash'], 1_000_000);
-  assert.equal(MODEL_WINDOWS['deepseek:deepseek-v4-pro'], 1_000_000);
-  assert.equal(MODEL_WINDOWS['abliteration:abliterated-model'], 262144);
-  assert.equal(MODEL_WINDOWS['abliteration:abliterated-model-large'], 1_000_000);
-  assert.equal(MODEL_WINDOWS['abliteration:abliterated-model-large-v2'], 1_000_000);
-  assert.equal(MODEL_WINDOWS['arnict:zai/glm-5.3-flash-uncensored'], 1048576);
-  assert.equal(MODEL_WINDOWS['arnict:qwen/qwen3.8-27b'], 262144);
-});
-
-test('resolveWindow known + unknown null', () => {
-  assert.equal(resolveWindow('deepseek:deepseek-v4-flash'), 1_000_000);
-  assert.equal(resolveWindow('abliteration:abliterated-model'), 262144);
-  assert.equal(resolveWindow('arnict:qwen/qwen3.8-27b'), 262144);
-  assert.equal(resolveWindow('openrouter/auto'), null);
-  assert.equal(resolveWindow('codex:gpt-5.1-codex'), null);
-  assert.equal(resolveWindow('llamacpp:Qwen3.6-35B-A3B-UD-Q4_K_M'), null);
-  assert.equal(resolveWindow('some-unknown-model'), null);
 });
 
 test('estimateContextUsage ceil(chars/4) math', () => {

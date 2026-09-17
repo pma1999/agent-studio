@@ -1,34 +1,40 @@
 /**
- * Offline acceptance harness for the abliteration.ai provider (5th provider).
+ * Offline acceptance harness for the abliteration.ai provider.
  *
- * Pure registry/cost/effort/guard dynamic smoke: imports ONLY the pure
- * `server/providers/index.ts` module (zero db/network imports) and asserts the
- * GC-frozen literals (§§1-6):
- *
- *   routing/strip/persist, flags, catalog ids/contexts/prices, cost spots
- *   (§6), effort matrix (§4), guard message exact, `ultracode` absent.
+ * Routing, flags, endpoint and headers come from the pure provider registry;
+ * the catalog (names, contexts, prices, modalities, reasoning levels) comes
+ * from the live `GET /v1/models` payload captured 2026-09-16 plus models.dev,
+ * through the same normalizer the catalog adapter uses; costs through the
+ * shared engine; request fields through the shared reasoning wire.
  *
  * Usage:
  *   npx tsx scripts/test-abliteration-provider.ts
  *
- * Reads no source text, performs no network or DB I/O — offline-safe.
+ * Offline: no network, no DB.
  */
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import {
-  ABLITERATION_CATALOG,
-  ABLITERATION_LARGE_TEXT_ONLY_MESSAGE,
   ABLITERATION_PREFIX,
-  abliterationCachedTokens,
-  assistantReasoningField,
-  buildAbliterationReasoning,
-  computeAbliterationCost,
   getProviderConfig,
-  isAbliterationLargeModel,
   isAbliterationModel,
   persistedModelId,
   resolveProviderId,
+  textOnlyModelMessage,
   toUpstreamModelId,
 } from '../server/providers/index.js';
+import { abliterationCatalogModel, type AbliterationModelEntry } from '../server/catalog/normalize/abliteration.js';
+import type { ModelsDevProvider } from '../server/catalog/normalize/modelsDev.js';
+import { chatReasoningFields } from '../server/providers/wire/reasoning.js';
+import { cachedTokensFromChat, computeCost, pricedUsageFromChat } from '../shared/models/pricing.js';
+import { planReasoning } from '../shared/models/reasoning.js';
+
+const FIXTURES = resolve(import.meta.dirname, 'fixtures/models');
+const live = (JSON.parse(readFileSync(resolve(FIXTURES, 'abliteration-models.json'), 'utf8')) as { data: AbliterationModelEntry[] }).data;
+const modelsDev = (JSON.parse(readFileSync(resolve(FIXTURES, 'modelsdev-api.json'), 'utf8')) as Record<string, ModelsDevProvider>)['abliteration-ai'];
+const catalog = live.map((entry) => abliterationCatalogModel(entry, modelsDev.models[entry.id!])!);
+const byId = (upstreamId: string) => catalog.find((m) => m.upstreamId === upstreamId)!;
 
 let checks = 0;
 function ok(name: string, fn: () => void): void {
@@ -38,7 +44,7 @@ function ok(name: string, fn: () => void): void {
 }
 
 // ---------------------------------------------------------------------------
-// Routing / strip / persist (GC §1 + §6 persistedModelId)
+// Routing / strip / persist
 // ---------------------------------------------------------------------------
 
 ok('resolveProviderId routes all three namespaced ids to abliteration', () => {
@@ -65,20 +71,12 @@ ok('isAbliterationModel classifies both ways', () => {
 
 ok('toUpstreamModelId strips the abliteration prefix', () => {
   assert.equal(toUpstreamModelId('abliteration:abliterated-model'), 'abliterated-model');
-  assert.equal(toUpstreamModelId('abliteration:abliterated-model-large'), 'abliterated-model-large');
   assert.equal(toUpstreamModelId('abliteration:abliterated-model-large-v2'), 'abliterated-model-large-v2');
 });
 
 ok('persistedModelId keeps the namespaced id for abliteration', () => {
-  assert.equal(
-    persistedModelId('abliteration', 'abliteration:abliterated-model', 'abliterated-model'),
-    'abliteration:abliterated-model',
-  );
-  assert.equal(
-    persistedModelId('abliteration', 'abliteration:abliterated-model-large-v2', null),
-    'abliteration:abliterated-model-large-v2',
-  );
-  // Contrast: openrouter records the echoed upstream variant.
+  assert.equal(persistedModelId('abliteration', 'abliteration:abliterated-model', 'abliterated-model'), 'abliteration:abliterated-model');
+  assert.equal(persistedModelId('abliteration', 'abliteration:abliterated-model-large-v2', null), 'abliteration:abliterated-model-large-v2');
   assert.equal(persistedModelId('openrouter', 'org/model', 'variant'), 'variant');
 });
 
@@ -87,14 +85,13 @@ ok('ABLITERATION_PREFIX is the frozen namespaced prefix', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Provider flags + endpoint + headers (GC §1 + §2)
+// Provider flags + endpoint + headers
 // ---------------------------------------------------------------------------
 
-ok('abliteration capability flags are F,F,F,T', () => {
+ok('abliteration capability flags: no routing, no plugins, JSON schema supported', () => {
   const cfg = getProviderConfig('abliteration');
   assert.equal(cfg.supportsProviderRouting, false);
   assert.equal(cfg.supportsPlugins, false);
-  assert.equal(cfg.supportsReasoningParam, false);
   assert.equal(cfg.supportsJsonSchema, true);
 });
 
@@ -114,160 +111,130 @@ ok('abliteration headers are Bearer-only (no x-api-key/Referer/Title)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Catalog (GC §3 frozen static table)
+// Catalog from the live API
 // ---------------------------------------------------------------------------
 
-ok('catalog carries exactly the three frozen ids in order', () => {
-  assert.deepEqual(
-    ABLITERATION_CATALOG.map((m) => m.id),
-    [
-      'abliteration:abliterated-model',
-      'abliteration:abliterated-model-large',
-      'abliteration:abliterated-model-large-v2',
-    ],
-  );
+ok('catalog lists the live ids with their API names', () => {
+  assert.deepEqual(catalog.map((m) => m.id), [
+    'abliteration:abliterated-model',
+    'abliteration:abliterated-model-large',
+    'abliteration:abliterated-model-large-v2',
+  ]);
+  assert.deepEqual(catalog.map((m) => m.name), ['Abliterated Model', 'Abliterated Large', 'Abliterated Large v2']);
 });
 
-ok('catalog names are frozen', () => {
-  assert.deepEqual(
-    ABLITERATION_CATALOG.map((m) => m.name),
-    ['Abliterated Model', 'Abliterated Model Large', 'Abliterated Model Large V2'],
-  );
+ok('contexts and output limits come from the API', () => {
+  assert.deepEqual(catalog.map((m) => m.contextLength), [262144, 1000000, 1000000]);
+  assert.deepEqual(catalog.map((m) => m.maxOutputTokens), [262134, 999990, 999990]);
 });
 
-ok('catalog contexts are frozen (262144 / 1M / 1M)', () => {
-  assert.deepEqual(
-    ABLITERATION_CATALOG.map((m) => m.context_length),
-    [262144, 1000000, 1000000],
-  );
+ok('prices come from the API ($1/$3 base, $3/$5 larges, cached reads at 10%)', () => {
+  assert.deepEqual(catalog.map((m) => m.pricing?.rates), [
+    { input: 1, output: 3, cacheRead: 0.1 },
+    { input: 3, output: 5, cacheRead: 0.3 },
+    { input: 3, output: 5, cacheRead: 0.3 },
+  ]);
 });
 
-ok('catalog pricing is frozen ($1/$3 base, $3/$5 larges)', () => {
-  assert.deepEqual(
-    ABLITERATION_CATALOG.map((m) => m.pricing),
-    [
-      { prompt: '0.000001', completion: '0.000003' },
-      { prompt: '0.000003', completion: '0.000005' },
-      { prompt: '0.000003', completion: '0.000005' },
-    ],
-  );
+ok('modalities: base accepts images, both larges are text-only', () => {
+  assert.deepEqual(byId('abliterated-model').inputModalities, ['text', 'image']);
+  assert.deepEqual(byId('abliterated-model-large').inputModalities, ['text']);
+  assert.deepEqual(byId('abliterated-model-large-v2').inputModalities, ['text']);
 });
 
-ok('catalog descriptions state the text-only restriction for the two larges', () => {
-  const [base, large, largeV2] = ABLITERATION_CATALOG;
-  assert.match(large.description, /text-only/i);
-  assert.match(largeV2.description, /text-only/i);
-  assert.match(base.description, /image/i);
+ok('models the account cannot use are not listed', () => {
+  const locked = { ...live[0], id: 'abliterated-model-locked', access: { available: false, locked: true } };
+  assert.equal(abliterationCatalogModel(locked, undefined), null);
 });
 
 // ---------------------------------------------------------------------------
-// Cost (GC §6 frozen table + hit rule)
+// Cost through the shared engine
 // ---------------------------------------------------------------------------
+
+const costOf = (upstreamId: string, usage: Parameters<typeof pricedUsageFromChat>[0]) =>
+  computeCost(byId(upstreamId).pricing, pricedUsageFromChat(usage));
 
 ok('cost spot: base 1M prompt + 1M completion = $4.00', () => {
-  const cost = computeAbliterationCost(
-    { prompt_tokens: 1_000_000, completion_tokens: 1_000_000 } as never,
-    'abliterated-model',
-  );
-  assert.equal(cost, 4);
+  assert.equal(costOf('abliterated-model', { prompt_tokens: 1_000_000, completion_tokens: 1_000_000 }), 4);
 });
 
 ok('cost spot: large 1M prompt + 1M completion = $8.00 (both larges)', () => {
   for (const id of ['abliterated-model-large', 'abliterated-model-large-v2']) {
-    const cost = computeAbliterationCost(
-      { prompt_tokens: 1_000_000, completion_tokens: 1_000_000 } as never,
-      id,
-    );
-    assert.equal(cost, 8, id);
+    assert.equal(costOf(id, { prompt_tokens: 1_000_000, completion_tokens: 1_000_000 }), 8, id);
   }
 });
 
 ok('cost spot: 1M cached prompt on base = $0.10', () => {
-  const cost = computeAbliterationCost(
-    {
-      prompt_tokens: 1_000_000,
-      prompt_tokens_details: { cached_tokens: 1_000_000 },
-      completion_tokens: 0,
-    } as never,
-    'abliterated-model',
-  );
-  assert.equal(cost, 0.1);
+  assert.equal(costOf('abliterated-model', { prompt_tokens: 1_000_000, prompt_tokens_details: { cached_tokens: 1_000_000 }, completion_tokens: 0 }), 0.1);
 });
 
-ok('cost hit rule prefers details.cached_tokens, falls back to prompt_cache_hit_tokens', () => {
-  assert.equal(
-    abliterationCachedTokens({ prompt_tokens_details: { cached_tokens: 7 }, prompt_cache_hit_tokens: 3 } as never),
-    7,
-  );
-  assert.equal(abliterationCachedTokens({ prompt_cache_hit_tokens: 3 } as never), 3);
-  assert.equal(abliterationCachedTokens(null), 0);
-  // Miss clamps at zero when hit exceeds prompt_tokens.
-  const clamped = computeAbliterationCost(
-    { prompt_tokens: 10, prompt_tokens_details: { cached_tokens: 50 }, completion_tokens: 0 } as never,
-    'abliterated-model',
-  );
+ok('cached tokens prefer prompt_cache_hit_tokens, fall back to details; miss never negative', () => {
+  assert.equal(cachedTokensFromChat({ prompt_tokens_details: { cached_tokens: 7 } }), 7);
+  assert.equal(cachedTokensFromChat({ prompt_cache_hit_tokens: 3 }), 3);
+  assert.equal(cachedTokensFromChat(null), 0);
+  const clamped = costOf('abliterated-model', { prompt_tokens: 10, prompt_tokens_details: { cached_tokens: 50 }, completion_tokens: 0 });
   assert.equal(clamped, (50 * 0.1) / 1_000_000);
 });
 
-ok('cost is 0 for unknown models and missing usage', () => {
-  assert.equal(
-    computeAbliterationCost({ prompt_tokens: 100, completion_tokens: 100 } as never, 'nope'),
-    0,
-  );
-  assert.equal(computeAbliterationCost(null, 'abliterated-model'), 0);
-  assert.equal(computeAbliterationCost(undefined, 'abliterated-model'), 0);
+ok('no pricing or no usage costs nothing', () => {
+  assert.equal(computeCost(null, pricedUsageFromChat({ prompt_tokens: 100, completion_tokens: 100 })), 0);
+  assert.equal(computeCost(byId('abliterated-model').pricing, null), 0);
 });
 
 // ---------------------------------------------------------------------------
-// Reasoning arm (GC §4 frozen matrix)
+// Reasoning (docs.abliteration.ai/capabilities/thinking)
 // ---------------------------------------------------------------------------
 
-ok('assistantReasoningField(abliteration) is the default reasoning field', () => {
-  assert.equal(assistantReasoningField('abliteration'), 'reasoning');
+const send = (upstreamId: string, request: Parameters<typeof planReasoning>[1]) => {
+  const model = byId(upstreamId);
+  return chatReasoningFields(model, planReasoning(model.reasoning, request));
+};
+
+ok('history replays the trace as `reasoning`', () => {
+  for (const model of catalog) assert.equal(model.historyReasoningField, 'reasoning');
 });
 
-ok('effort matrix: toggle on sends every allowed effort verbatim', () => {
+ok('base model: every level is sent verbatim', () => {
   for (const effort of ['minimal', 'low', 'medium', 'high', 'xhigh', 'max']) {
-    assert.deepEqual(buildAbliterationReasoning(true, effort), { reasoning_effort: effort }, effort);
+    assert.deepEqual(send('abliterated-model', { enabled: true, level: effort }), { reasoning_effort: effort }, effort);
   }
 });
 
-ok('effort matrix: off/none/unknown/garbage/ultracode omit the field (fail-safe)', () => {
-  assert.deepEqual(buildAbliterationReasoning(false, 'high'), {});
-  for (const effort of ['none', null, undefined, 'ULTRA', 'ultra', 'ultracode', '', 'banana', 'max ']) {
-    assert.deepEqual(buildAbliterationReasoning(true, effort as never), {}, String(effort));
+ok('large models: levels clamp to the modes the docs list', () => {
+  assert.deepEqual(send('abliterated-model-large', { enabled: true, level: 'medium' }), { reasoning_effort: 'high' });
+  assert.deepEqual(send('abliterated-model-large', { enabled: true, level: 'xhigh' }), { reasoning_effort: 'high' });
+  assert.deepEqual(send('abliterated-model-large-v2', { enabled: true, level: 'medium' }), { reasoning_effort: 'low' });
+  assert.deepEqual(send('abliterated-model-large-v2', { enabled: true, level: 'max' }), { reasoning_effort: 'max' });
+});
+
+ok('off: none where the model allows it; large-v2 always reasons (lowest mode)', () => {
+  assert.deepEqual(send('abliterated-model', { enabled: false }), { reasoning_effort: 'none' });
+  assert.deepEqual(send('abliterated-model-large', { enabled: false }), { reasoning_effort: 'none' });
+  assert.deepEqual(send('abliterated-model-large-v2', { enabled: false }), { reasoning_effort: 'low' });
+});
+
+ok('on without a level omits the field (host default depth)', () => {
+  assert.deepEqual(send('abliterated-model', { enabled: true }), {});
+});
+
+ok('garbage and ultracode never reach the wire; only reasoning_effort is ever emitted', () => {
+  for (const effort of ['ULTRA', 'ultra', 'ultracode', '', 'banana', 'max ']) {
+    const fields = send('abliterated-model', { enabled: true, level: effort });
+    assert.doesNotMatch(JSON.stringify(fields), /ultra|banana/, effort);
+    assert.ok(Object.keys(fields).every((k) => k === 'reasoning_effort'), effort);
   }
-});
-
-ok('effort arm never emits reasoning-object/thinking/include_reasoning/max_tokens', () => {
-  const body = buildAbliterationReasoning(true, 'high');
-  assert.deepEqual(Object.keys(body), ['reasoning_effort']);
+  assert.doesNotMatch(JSON.stringify(catalog), /ultracode/);
 });
 
 // ---------------------------------------------------------------------------
-// Guard + ultracode absence (GC §5 + §11)
+// Text-only guard
 // ---------------------------------------------------------------------------
 
-ok('large-model guard message is the exact frozen string', () => {
+ok('text-only guard message names the model', () => {
   assert.equal(
-    ABLITERATION_LARGE_TEXT_ONLY_MESSAGE,
-    'Abliteration large models are text-only; use abliteration:abliterated-model for image content.',
+    textOnlyModelMessage(byId('abliterated-model-large').name),
+    'Abliterated Large is text-only; choose a model that accepts images for image content.',
   );
-});
-
-ok('isAbliterationLargeModel is true only for the two large upstream ids', () => {
-  assert.equal(isAbliterationLargeModel('abliterated-model-large'), true);
-  assert.equal(isAbliterationLargeModel('abliterated-model-large-v2'), true);
-  assert.equal(isAbliterationLargeModel('abliterated-model'), false);
-  assert.equal(isAbliterationLargeModel(null), false);
-});
-
-ok('ultracode is absent from the catalog and never emitted by the effort arm', () => {
-  assert.doesNotMatch(JSON.stringify(ABLITERATION_CATALOG), /ultracode/);
-  for (const m of ABLITERATION_CATALOG) {
-    assert.doesNotMatch(m.id, /ultracode/);
-  }
-  assert.deepEqual(buildAbliterationReasoning(true, 'ultracode'), {});
 });
 
 console.log(`abliteration provider tests passed (${checks} checks)`);

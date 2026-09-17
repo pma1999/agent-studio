@@ -17,34 +17,36 @@ import {
 import { motion, AnimatePresence } from 'framer-motion';
 import { createPortal } from 'react-dom';
 import {
-  getModelAuthor,
+  modelGroupKey,
   formatModelId,
   formatAuthor,
   getAuthorColor,
   getProviderMeta,
   formatContext,
-  formatPrice,
+  formatModelPrice,
+  formatMonthlyLimit,
+  lifecycleNote,
+  modelAccessibleName,
+  modelMatchesQuery,
+  modelTransportBadge,
+  compareByPriceAsc,
   PROVIDER_PRIORITY,
-  getOpencodeGoBadgeKind,
-  isOpencodeGoPendingVerification,
-  formatOpencodeGoMonthlyLimit,
-  compareOpencodeGoByPriceAsc,
-  opencodeGoMatchesTransportQuery,
-  getOpencodeGoAccessibleName,
-  OPENCODE_GO_PENDING_SUFFIX,
 } from '../utils/modelUtils';
-import type { OpenRouterModel as OpenRouterModelType } from '../types';
-import { useOpenRouterModels } from '../hooks/useOpenRouterModels';
-import { useDeepSeekModels } from '../hooks/useDeepSeekModels';
-import { useCodexModels } from '../hooks/useCodexModels';
-import { useAbliterationModels } from '../hooks/useAbliterationModels';
-import { useArnictModels } from '../hooks/useArnictModels';
-import { useOpencodeGoModels } from '../hooks/useOpencodeGoModels';
-import { useLlamaCppModels } from '../hooks/useLlamaCppModels';
+import type { CatalogModel, ProviderCatalog } from '../../shared/models/catalog';
+import { capabilitySummary } from './reasoning/reasoningCopy';
+import { unknownReasoning } from '../../shared/models/reasoning';
+import { useModelCatalog } from '../hooks/useModelCatalog';
 import { useFavoriteModels } from '../hooks/useFavoriteModels';
 import { useRecentModels } from '../hooks/useRecentModels';
 import { useIsMobile } from '../utils/breakpoints';
-import { DEEPSEEK_DIRECT_GROUP, CODEX_DIRECT_GROUP, ABLITERATION_GROUP, ARNICT_GROUP, OPENCODE_GO_GROUP, LLAMACPP_GROUP, isLlamaCppModel, isOpencodeGoModel, isRemovedLocalProviderId, OPENCODE_GO_BADGE_META } from '../utils/providers';
+import {
+  DIRECT_PROVIDERS,
+  PROVIDER_UI,
+  isRemovedLocalProviderId,
+  providerOfGroupKey,
+  providerOfModelId,
+  type ProviderId,
+} from '../utils/providers';
 
 const ICON_MAP = { sparkles: Sparkles, zap: Zap, eye: Eye, brain: Brain };
 
@@ -53,17 +55,17 @@ function ProviderIcon({ name, size = 14 }: { name: 'sparkles' | 'zap' | 'eye' | 
   return Icon ? <Icon size={size} /> : <Sparkles size={size} />;
 }
 
-/** Rows reserved for the Go skeleton (fixed height each → CLS = 0 in the group). */
-const OPENCODE_GO_SKELETON_ROWS = 5;
+/** Rows reserved for a loading provider section (fixed height each -> no layout shift). */
+const PROVIDER_SKELETON_ROWS = 5;
 
 /**
- * Phase-2 transport badge (`Anthropic` amber / `Responses` blue, T7). Hidden
- * from AT: the transport also ships in the row's accessible name.
+ * Wire badge for rows served over a non-chat API shape (`Anthropic`,
+ * `Responses`). Hidden from AT: the wire also ships in the row's accessible
+ * name.
  */
-function OpencodeGoBadge({ model }: { model: OpenRouterModelType }) {
-  const kind = getOpencodeGoBadgeKind(model);
-  if (!kind) return null;
-  const meta = OPENCODE_GO_BADGE_META[kind];
+function TransportBadge({ model }: { model: CatalogModel }) {
+  const badge = modelTransportBadge(model);
+  if (!badge) return null;
   return (
     <span
       aria-hidden="true"
@@ -73,29 +75,26 @@ function OpencodeGoBadge({ model }: { model: OpenRouterModelType }) {
         lineHeight: 1.4,
         padding: '2px 6px',
         borderRadius: 'var(--radius-sm)',
-        background: meta.background,
-        color: meta.color,
+        background: badge.background,
+        color: badge.color,
         whiteSpace: 'nowrap',
         flexShrink: 0,
       }}
     >
-      {meta.label}
+      {badge.label}
     </span>
   );
 }
 
-/** `· pendiente de verificación` suffix, governed only by served `sendable`. */
-function OpencodeGoPendingSuffix({ model }: { model: OpenRouterModelType }) {
-  if (!isOpencodeGoPendingVerification(model)) return null;
-  return (
-    <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>
-      {' '}{OPENCODE_GO_PENDING_SUFFIX}
-    </span>
-  );
+/** Note for a model the host no longer lists but conversations still hold. */
+function LifecycleSuffix({ model }: { model: CatalogModel }) {
+  const note = lifecycleNote(model);
+  if (!note) return null;
+  return <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}> {'\u00b7'} {note}</span>;
 }
 
-/** Visual Go subgroup header inside the settings Premium tier. */
-function OpencodeGoSettingsSubheader({ count }: { count: number }) {
+/** Visual provider subheader inside a settings tier group. */
+function ProviderSubheader({ group, count, note }: { group: string; count: number; note?: string }) {
   return (
     <div
       style={{
@@ -117,78 +116,83 @@ function OpencodeGoSettingsSubheader({ count }: { count: number }) {
           width: 6,
           height: 6,
           borderRadius: '50%',
-          background: getAuthorColor(OPENCODE_GO_GROUP),
+          background: getAuthorColor(group),
           flexShrink: 0,
         }}
       />
-      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>OpenCode Go · Direct</span>
-      {count > 0 && <span style={{ fontWeight: 400 }}>· {count} · ordenado por precio</span>}
+      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{formatAuthor(group)}</span>
+      {count > 0 && (
+        <span style={{ fontWeight: 400 }}>
+          {'\u00b7'} {count}{note ? ` \u00b7 ${note}` : ''}
+        </span>
+      )}
     </div>
   );
 }
 
-/** Loading skeleton for the Go section (reserved heights, no layout shift). */
-function OpencodeGoSkeleton({ rowHeight, rowPadding }: { rowHeight: number; rowPadding: string }) {
+/** Loading skeleton for a provider section (reserved heights, no layout shift). */
+function ProviderSkeleton({ label, rowHeight, rowPadding }: { label: string; rowHeight: number; rowPadding: string }) {
   return (
-    <div role="status" aria-label="Cargando modelos de OpenCode Go" style={{ padding: '4px 0' }}>
-      {Array.from({ length: OPENCODE_GO_SKELETON_ROWS }).map((_, i) => (
+    <div role="status" aria-label={`Loading ${label} models`} style={{ padding: '4px 0' }}>
+      {Array.from({ length: PROVIDER_SKELETON_ROWS }).map((_, i) => (
         <div key={i} style={{ padding: rowPadding, height: rowHeight, boxSizing: 'border-box' }}>
-          <div className="opencode-go-skeleton-bar" style={{ height: '100%', borderRadius: 'var(--radius-sm)' }} />
+          <div className="model-skeleton-bar" style={{ height: '100%', borderRadius: 'var(--radius-sm)' }} />
         </div>
       ))}
     </div>
   );
 }
 
-/** Inline fetch-error hint for the Go section with retry (T6 `error` + `refresh`). */
-function OpencodeGoErrorHint({ error, onRetry }: { error: string; onRetry: () => void }) {
+/**
+ * Why a provider section has no rows, in the server's own words: a missing
+ * key, a disconnected account, an upstream that failed. Retry reloads the
+ * whole catalog.
+ */
+function ProviderStateHint({ label, state, message, onRetry }: {
+  label: string;
+  state: ProviderCatalog['state'];
+  message: string | null;
+  onRetry: () => void;
+}) {
+  const title = state === 'needs-connection' ? `${label} needs a connection` : `Couldn't load ${label}`;
   return (
     <div style={{ padding: '8px 16px 12px 32px' }}>
-      <div style={{ fontSize: '0.875rem', fontWeight: 500, color: 'var(--text-primary)' }}>
-        No se pudo cargar OpenCode Go
+      <div style={{ fontSize: '0.875rem', fontWeight: 500, color: 'var(--text-primary)' }}>{title}</div>
+      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: 2 }}>
+        {message ?? 'No models to show right now.'}
       </div>
-      <div
-        style={{
-          fontSize: '0.75rem',
-          color: 'var(--text-muted)',
-          marginTop: 2,
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap',
-        }}
-      >
-        {error}
-      </div>
-      <button
-        type="button"
-        onClick={onRetry}
-        aria-label="Reintentar la carga de OpenCode Go"
-        style={{
-          marginTop: 8,
-          minHeight: 44,
-          padding: '10px 16px',
-          fontSize: '0.875rem',
-          fontFamily: 'var(--font-body)',
-          fontWeight: 500,
-          color: 'var(--text-primary)',
-          background: 'var(--bg-surface)',
-          border: '1px solid var(--border)',
-          borderRadius: 'var(--radius-md)',
-          cursor: 'pointer',
-        }}
-      >
-        Reintentar
-      </button>
+      {state !== 'needs-connection' && (
+        <button
+          type="button"
+          onClick={onRetry}
+          aria-label={`Retry loading ${label} models`}
+          style={{
+            marginTop: 8,
+            minHeight: 44,
+            padding: '10px 16px',
+            fontSize: '0.875rem',
+            fontFamily: 'var(--font-body)',
+            fontWeight: 500,
+            color: 'var(--text-primary)',
+            background: 'var(--bg-surface)',
+            border: '1px solid var(--border)',
+            borderRadius: 'var(--radius-md)',
+            cursor: 'pointer',
+          }}
+        >
+          Try again
+        </button>
+      )}
     </div>
   );
 }
 
-/** Empty-search block rendered where the Go section lives. */
-function OpencodeGoEmptyResults({ onClear }: { onClear: () => void }) {
+/** Empty-search block rendered where a provider section lives. */
+function EmptySearchResults({ label, onClear }: { label: string; onClear: () => void }) {
   return (
     <div style={{ padding: '8px 16px 12px 32px' }}>
       <div style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', marginBottom: 8 }}>
-        Sin resultados en OpenCode Go
+        No {label} models match your search
       </div>
       <button
         type="button"
@@ -206,7 +210,7 @@ function OpencodeGoEmptyResults({ onClear }: { onClear: () => void }) {
           cursor: 'pointer',
         }}
       >
-        Limpiar búsqueda
+        Clear search
       </button>
     </div>
   );
@@ -229,12 +233,22 @@ export interface ModelSelectorCoreProps {
   ariaLabel?: string;
 }
 
-const AUTO_OPTION: OpenRouterModelType = {
+const AUTO_OPTION: CatalogModel = {
   id: 'openrouter/auto',
+  provider: 'openrouter',
+  upstreamId: 'openrouter/auto',
   name: 'Auto (Best for prompt)',
-  description: 'OpenRouter automatically selects the best model',
-  context_length: 128000,
-  pricing: { prompt: '0', completion: '0' },
+  description: 'OpenRouter picks the best model for each prompt',
+  contextLength: null,
+  maxOutputTokens: null,
+  inputModalities: null,
+  pricing: null,
+  transport: 'chat',
+  historyReasoningField: 'reasoning',
+  // The router decides per request: nothing is known until it does.
+  reasoning: unknownReasoning(),
+  lifecycle: 'active',
+  monthlyLimitUsd: null,
 };
 
 export function ModelSelectorCore({
@@ -251,43 +265,34 @@ export function ModelSelectorCore({
 }: ModelSelectorCoreProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [search, setSearch] = useState('');
-  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set([DEEPSEEK_DIRECT_GROUP, CODEX_DIRECT_GROUP, ABLITERATION_GROUP, ARNICT_GROUP, OPENCODE_GO_GROUP, LLAMACPP_GROUP, 'openai', 'anthropic']));
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(
+    () => new Set([...DIRECT_PROVIDERS.map((p) => PROVIDER_UI[p].group), 'openai', 'anthropic']),
+  );
   const dropdownRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const isMobile = useIsMobile();
 
-  const { models: openRouterModels, loading } = useOpenRouterModels();
-  const { models: deepSeekModels } = useDeepSeekModels();
-  const { models: codexModels } = useCodexModels();
-  const { models: abliterationModels } = useAbliterationModels();
-  const { models: arnictModels } = useArnictModels();
-  // T6 (parallel wave) adds `refresh`/`retry` to this hook; consume them
-  // defensively so the picker compiles and works before and after it lands.
-  // No extra status-event subscription here: hook state drives re-render.
-  const opencodeGoHook = useOpencodeGoModels() as ReturnType<typeof useOpencodeGoModels> & {
-    refresh?: () => void;
-    retry?: () => void;
-  };
-  const {
-    models: opencodeGoModels,
-    loading: opencodeGoLoading,
-    error: opencodeGoError,
-  } = opencodeGoHook;
-  const opencodeGoRefresh = opencodeGoHook.refresh ?? opencodeGoHook.retry;
-  const { models: llamaCppModels } = useLlamaCppModels();
+  // One request for every provider: each carries its own state and message,
+  // so a provider that needs a key or is down never hides the others.
+  const { providers, loading, refresh } = useModelCatalog();
   const { favorites, toggleFavorite } = useFavoriteModels();
   const { recent, addRecent } = useRecentModels();
 
-  // DeepSeek-direct, ChatGPT (Codex), Abliteration-direct, Arnict-direct, OpenCode Go-direct,
-  // and llama.cpp (local) models lead the
-  // list so their groups sort to the top. Legacy removed-provider ids
-  // (plan.md D8) never become pickable options — an open conversation holding
-  // one still renders its history and surfaces the server error on send.
-  const rawModels = useMemo<OpenRouterModelType[]>(
-    () => [...deepSeekModels, ...codexModels, ...abliterationModels, ...arnictModels, ...opencodeGoModels, ...llamaCppModels, ...openRouterModels]
-      .filter((m) => !isRemovedLocalProviderId(m.id)),
-    [deepSeekModels, codexModels, abliterationModels, arnictModels, opencodeGoModels, llamaCppModels, openRouterModels]
+  const providerState = useMemo(
+    () => new Map(providers.map((entry) => [entry.provider, entry])),
+    [providers],
   );
+
+  // Direct providers lead so their groups sort to the top. Legacy
+  // removed-provider ids (plan.md D8) never become pickable options - an open
+  // conversation holding one still renders its history and surfaces the
+  // server error on send.
+  const rawModels = useMemo<CatalogModel[]>(() => {
+    const order: ProviderId[] = [...DIRECT_PROVIDERS, 'openrouter'];
+    return order
+      .flatMap((provider) => providerState.get(provider)?.models ?? [])
+      .filter((model) => !isRemovedLocalProviderId(model.id));
+  }, [providerState]);
 
   const models = useMemo(() => {
     if (variant === 'settings' || variant === 'agent') {
@@ -296,6 +301,8 @@ export function ModelSelectorCore({
     return rawModels;
   }, [rawModels, variant]);
 
+  const modelById = useMemo(() => new Map(models.map((m) => [m.id, m])), [models]);
+
   const effectiveModel = value ?? conversationModel ?? agentModel;
   const effectiveModelName = useMemo(() => {
     if (value === null && variant === 'conversation') {
@@ -303,27 +310,23 @@ export function ModelSelectorCore({
         ? formatModelId(conversationModel)
         : formatModelId(agentModel);
     }
-    const m = models.find((x) => x.id === effectiveModel);
-    return m?.name ?? formatModelId(effectiveModel);
-  }, [value, effectiveModel, conversationModel, agentModel, models, variant]);
+    return modelById.get(effectiveModel)?.name ?? formatModelId(effectiveModel);
+  }, [value, effectiveModel, conversationModel, agentModel, modelById, variant]);
 
   const isUsingDefault =
     variant === 'conversation' && value === null;
-  const currentAuthor = getModelAuthor(effectiveModel);
+  // A model the host stopped listing still resolves (agents and conversations
+  // keep working), so say so rather than showing a bare id.
+  const selectedModel = modelById.get(effectiveModel) ?? null;
+  const selectedNote = selectedModel ? lifecycleNote(selectedModel) : null;
+  const currentAuthor = modelGroupKey(effectiveModel);
   const authorColor = getAuthorColor(currentAuthor);
   const providerMeta = getProviderMeta(currentAuthor);
 
+  // Matches id, name, description and the wire (`anthropic`, `responses`).
   const filteredModels = useMemo(() => {
     if (!search.trim()) return models;
-    const q = search.toLowerCase();
-    return models.filter(
-      (m) =>
-        m.id.toLowerCase().includes(q) ||
-        m.name.toLowerCase().includes(q) ||
-        (m.description && m.description.toLowerCase().includes(q)) ||
-        // T7: transport search — `anthropic`/`responses` filter Go rows by badge.
-        opencodeGoMatchesTransportQuery(m, q)
-    );
+    return models.filter((model) => modelMatchesQuery(model, search));
   }, [models, search]);
 
   type GroupKey =
@@ -345,7 +348,7 @@ export function ModelSelectorCore({
       recent.length > 0;
     const showTiers = variant === 'settings';
 
-    const groups: Record<GroupKey, OpenRouterModelType[]> = {};
+    const groups: Record<GroupKey, CatalogModel[]> = {};
     if (showTiers) {
       groups['Recommended'] = [];
       groups['Favorites'] = [];
@@ -370,15 +373,15 @@ export function ModelSelectorCore({
         continue;
       }
       if (showTiers) {
-        const meta = getProviderMeta(getModelAuthor(model.id));
+        const meta = getProviderMeta(modelGroupKey(model.id));
         if (meta.tier === 'premium') groups['Premium'].push(model);
         else if (meta.tier === 'standard') groups['Standard'].push(model);
         else groups['Economy'].push(model);
         continue;
       }
-      const author = getModelAuthor(model.id);
-      if (!groups[author]) groups[author] = [];
-      groups[author].push(model);
+      const group = modelGroupKey(model.id);
+      if (!groups[group]) groups[group] = [];
+      groups[group].push(model);
     }
 
     if (showTiers) {
@@ -388,7 +391,7 @@ export function ModelSelectorCore({
     }
 
     const priorityOrder: GroupKey[] = ['AgentDefault', 'Recent', 'Favorites', ...PROVIDER_PRIORITY];
-    const sorted: [string, OpenRouterModelType[]][] = [];
+    const sorted: [string, CatalogModel[]][] = [];
     const seen = new Set<string>();
     for (const key of priorityOrder) {
       if (key === 'AgentDefault' && groups['AgentDefault']) {
@@ -397,8 +400,8 @@ export function ModelSelectorCore({
       }
       if (key === 'Recent' && groups['Recent']) {
         const recentModels = recent
-          .map((r) => models.find((m) => m.id === r.id))
-          .filter(Boolean) as OpenRouterModelType[];
+          .map((r) => modelById.get(r.id))
+          .filter(Boolean) as CatalogModel[];
         if (recentModels.length) sorted.push(['Recent', recentModels]);
         continue;
       }
@@ -416,44 +419,74 @@ export function ModelSelectorCore({
       ([k]) => !['AgentDefault', 'Recent', 'Favorites', ...PROVIDER_PRIORITY].includes(k)
     );
     return Object.fromEntries([...sorted, ...rest]);
-  }, [filteredModels, favorites, recent, models, variant, search]);
+  }, [filteredModels, favorites, recent, modelById, variant, search]);
 
-  // ----- OpenCode Go section state (T7) -----
+  // ----- Provider section state -----
+  // Every direct provider gets the same treatment: a skeleton while its list
+  // loads, its own message when it needs a key or failed, an empty-search
+  // block when the query hides all of its rows. The section is pinned at the
+  // provider's priority slot so nothing jumps around.
   const isSettingsVariant = variant === 'settings';
-  const goSearchActive = search.trim() !== '';
-  const goVisibleCount = filteredModels.filter((m) => isOpencodeGoModel(m.id)).length;
-  const showGoError = !!opencodeGoError && !opencodeGoLoading;
-  // Author-grouped variants (composer/agent/council): when the Go group has no
-  // rows (loading / error / empty search), pin an empty group shell at Go's
-  // priority slot so skeleton / hint / empty render where the group lives.
-  const showGoSkeletonAuthor = !isSettingsVariant && opencodeGoLoading && !opencodeGoError && goVisibleCount === 0;
-  const showGoErrorAuthor = !isSettingsVariant && showGoError;
-  const showGoEmptyAuthor = !isSettingsVariant && goSearchActive && !opencodeGoLoading && !opencodeGoError && goVisibleCount === 0;
-  const groupEntries: [string, OpenRouterModelType[]][] = Object.entries(grouped);
-  if ((showGoSkeletonAuthor || showGoErrorAuthor || showGoEmptyAuthor) && !grouped[OPENCODE_GO_GROUP]) {
-    const goPriority = (PROVIDER_PRIORITY as readonly string[]).indexOf(OPENCODE_GO_GROUP);
-    const idx = groupEntries.findIndex(([k]) => {
-      const p = (PROVIDER_PRIORITY as readonly string[]).indexOf(k);
-      return p !== -1 && p > goPriority;
-    });
-    const sentinel: [string, OpenRouterModelType[]] = [OPENCODE_GO_GROUP, []];
-    if (idx === -1) groupEntries.push(sentinel);
-    else groupEntries.splice(idx, 0, sentinel);
+  const searchActive = search.trim() !== '';
+
+  interface SectionState {
+    provider: ProviderId;
+    group: string;
+    label: string;
+    kind: 'skeleton' | 'hint' | 'empty';
+    state: ProviderCatalog['state'];
+    message: string | null;
   }
-  // Settings variant: the Go visual subgroup lives inside Premium.
-  const showGoSkeletonSettings = isSettingsVariant && !!grouped['Premium'] && opencodeGoLoading && !opencodeGoError &&
-    grouped['Premium'].filter((m) => isOpencodeGoModel(m.id)).length === 0;
-  const showGoErrorSettings = isSettingsVariant && !!grouped['Premium'] && showGoError;
-  const showGoEmptySettings = isSettingsVariant && !!grouped['Premium'] && goSearchActive && !opencodeGoLoading && !opencodeGoError && goVisibleCount === 0;
-  const showGoStandaloneSettings = isSettingsVariant && !grouped['Premium'] &&
-    (opencodeGoLoading || showGoError || (goSearchActive && goVisibleCount === 0));
+
+  const sections = useMemo<SectionState[]>(() => {
+    const out: SectionState[] = [];
+    for (const provider of DIRECT_PROVIDERS) {
+      const entry = providerState.get(provider);
+      const visible = filteredModels.filter((m) => providerOfModelId(m.id) === provider).length;
+      if (visible > 0) continue;
+      const ui = PROVIDER_UI[provider];
+      const base = { provider, group: ui.group, label: ui.label, state: entry?.state ?? 'ok' as const, message: entry?.message ?? null };
+      if (!entry) {
+        if (loading) out.push({ ...base, kind: 'skeleton' });
+        continue;
+      }
+      if (entry.state !== 'ok' && entry.state !== 'stale') out.push({ ...base, kind: 'hint' });
+      else if (searchActive && entry.models.length > 0) out.push({ ...base, kind: 'empty' });
+    }
+    return out;
+  }, [providerState, filteredModels, loading, searchActive]);
+
+  const sectionByGroup = useMemo(
+    () => new Map(sections.map((section) => [section.group, section])),
+    [sections],
+  );
+
+  // Author-grouped variants (composer/agent/council): pin an empty group shell
+  // at each provider's priority slot so its skeleton / hint / empty block
+  // renders where the group belongs.
+  const groupEntries: [string, CatalogModel[]][] = Object.entries(grouped);
+  if (!isSettingsVariant) {
+    for (const section of sections) {
+      if (grouped[section.group]) continue;
+      const priority = PROVIDER_PRIORITY.indexOf(section.group);
+      const idx = groupEntries.findIndex(([key]) => {
+        const p = PROVIDER_PRIORITY.indexOf(key);
+        return p !== -1 && p > priority;
+      });
+      const sentinel: [string, CatalogModel[]] = [section.group, []];
+      if (idx === -1) groupEntries.push(sentinel);
+      else groupEntries.splice(idx, 0, sentinel);
+    }
+  }
+
+  // Settings variant groups by tier, so provider sections with no rows are
+  // listed once under the model list instead.
+  const settingsSections = isSettingsVariant ? sections : [];
+
   const clearSearch = useCallback(() => {
     setSearch('');
     searchInputRef.current?.focus();
   }, []);
-  const retryOpencodeGo = useCallback(() => {
-    opencodeGoRefresh?.();
-  }, [opencodeGoRefresh]);
 
   const toggleGroup = useCallback((key: string) => {
     setExpandedGroups((prev) => {
@@ -612,7 +645,13 @@ export function ModelSelectorCore({
                   {providerMeta.name}
                 </span>
                 <span>·</span>
-                <span>{formatContext(models.find((m) => m.id === effectiveModel)?.context_length ?? 0)} ctx</span>
+                <span>{formatContext(selectedModel?.contextLength)} ctx</span>
+                {selectedNote && (
+                  <>
+                    <span>·</span>
+                    <span style={{ color: 'var(--text-faint)' }}>{selectedNote}</span>
+                  </>
+                )}
               </div>
             )}
           </div>
@@ -912,7 +951,7 @@ export function ModelSelectorCore({
                           </div>
                           {groupModels.map((model) => {
                             const isSelected = effectiveModel === model.id;
-                            const author = getModelAuthor(model.id);
+                            const author = modelGroupKey(model.id);
                             return (
                               <button
                                 key={model.id}
@@ -920,7 +959,7 @@ export function ModelSelectorCore({
                                 onClick={() => handleSelect(model.id, model.name)}
                                 role="option"
                                 aria-selected={isSelected}
-                                aria-label={isOpencodeGoModel(model.id) ? getOpencodeGoAccessibleName(model) : undefined}
+                                aria-label={modelAccessibleName(model)}
                                 style={{
                                   display: 'flex',
                                   alignItems: 'center',
@@ -977,21 +1016,20 @@ export function ModelSelectorCore({
                     const isTierGroup = ['Recommended', 'Premium', 'Standard', 'Economy'].includes(
                       groupKey
                     );
-                    const isGoGroup = groupKey === OPENCODE_GO_GROUP;
-                    const isPremiumTier = groupKey === 'Premium';
-                    // Settings: non-Go Premium rows keep their order; the Go
-                    // visual subgroup closes Premium sorted by base price asc.
-                    const renderModels = isPremiumTier
-                      ? [
-                          ...groupModels.filter((m) => !isOpencodeGoModel(m.id)),
-                          ...groupModels
-                            .filter((m) => isOpencodeGoModel(m.id))
-                            .sort(compareOpencodeGoByPriceAsc),
-                        ]
+                    const section = sectionByGroup.get(groupKey);
+                    // Settings tiers mix providers: keep each provider's rows
+                    // together, cheapest first, with a subheader per provider.
+                    const renderModels = isTierGroup
+                      ? [...groupModels].sort((a, b) => {
+                          // Unlisted authors sort last, never ahead of the
+                          // direct providers (indexOf returns -1 for them).
+                          const order = (m: CatalogModel) => {
+                            const at = PROVIDER_PRIORITY.indexOf(modelGroupKey(m.id));
+                            return at === -1 ? Number.MAX_SAFE_INTEGER : at;
+                          };
+                          return (order(a) - order(b)) || compareByPriceAsc(a, b);
+                        })
                       : groupModels;
-                    const premiumGoCount = isPremiumTier
-                      ? renderModels.filter((m) => isOpencodeGoModel(m.id)).length
-                      : 0;
 
                     return (
                       <div key={groupKey}>
@@ -1071,34 +1109,33 @@ export function ModelSelectorCore({
 
                         {(isTierGroup || isFavoritesGroup || expandedGroups.has(groupKey)) && (
                           <div style={{ padding: '4px 0' }}>
-                            {isGoGroup && showGoSkeletonAuthor && (
-                              <OpencodeGoSkeleton rowHeight={44} rowPadding="8px 16px 8px 32px" />
+                            {section?.kind === 'skeleton' && (
+                              <ProviderSkeleton label={section.label} rowHeight={44} rowPadding="8px 16px 8px 32px" />
                             )}
-                            {isGoGroup && showGoErrorAuthor && opencodeGoError && (
-                              <OpencodeGoErrorHint error={opencodeGoError} onRetry={retryOpencodeGo} />
+                            {section?.kind === 'hint' && (
+                              <ProviderStateHint
+                                label={section.label}
+                                state={section.state}
+                                message={section.message}
+                                onRetry={refresh}
+                              />
                             )}
-                            {isGoGroup && showGoEmptyAuthor && (
-                              <OpencodeGoEmptyResults onClear={clearSearch} />
-                            )}
-                            {isPremiumTier && showGoSkeletonSettings && (
-                              <OpencodeGoSkeleton rowHeight={65} rowPadding="12px 16px" />
-                            )}
-                            {isPremiumTier && showGoErrorSettings && opencodeGoError && (
-                              <OpencodeGoErrorHint error={opencodeGoError} onRetry={retryOpencodeGo} />
-                            )}
-                            {isPremiumTier && showGoEmptySettings && (
-                              <>
-                                <OpencodeGoSettingsSubheader count={0} />
-                                <OpencodeGoEmptyResults onClear={clearSearch} />
-                              </>
+                            {section?.kind === 'empty' && (
+                              <EmptySearchResults label={section.label} onClear={clearSearch} />
                             )}
                             {renderModels.map((model, idx) => {
                               const isSelected = effectiveModel === model.id;
                               const isFavorite = favorites.includes(model.id);
-                              const meta = getProviderMeta(getModelAuthor(model.id));
-                              const isGoRow = isOpencodeGoModel(model.id);
-                              const showGoSubheader = isPremiumTier && isGoRow &&
-                                (idx === 0 || !isOpencodeGoModel(renderModels[idx - 1].id));
+                              const rowGroup = modelGroupKey(model.id);
+                              const meta = getProviderMeta(rowGroup);
+                              // Tier groups mix providers: head each run with
+                              // the provider it belongs to.
+                              const showSubheader = isTierGroup && !!providerOfGroupKey(rowGroup) &&
+                                (idx === 0 || modelGroupKey(renderModels[idx - 1].id) !== rowGroup);
+                              const subheaderCount = showSubheader
+                                ? renderModels.filter((m) => modelGroupKey(m.id) === rowGroup).length
+                                : 0;
+                              const thinking = capabilitySummary(model.reasoning);
                               const row = (
                                 <button
                                   key={model.id}
@@ -1106,7 +1143,7 @@ export function ModelSelectorCore({
                                   onClick={() => handleSelect(model.id, model.name)}
                                   role="option"
                                   aria-selected={isSelected}
-                                  aria-label={isGoRow ? getOpencodeGoAccessibleName(model) : undefined}
+                                  aria-label={modelAccessibleName(model)}
                                   style={{
                                     display: 'flex',
                                     alignItems: 'center',
@@ -1171,9 +1208,9 @@ export function ModelSelectorCore({
                                         }}
                                       >
                                         {model.name}
-                                        {isGoRow && <OpencodeGoPendingSuffix model={model} />}
+                                        <LifecycleSuffix model={model} />
                                       </span>
-                                      {isGoRow && <OpencodeGoBadge model={model} />}
+                                      <TransportBadge model={model} />
                                       {model.id === 'openrouter/auto' && (
                                         <Sparkles size={12} style={{ color: 'var(--accent)' }} />
                                       )}
@@ -1190,17 +1227,23 @@ export function ModelSelectorCore({
                                       >
                                         <span style={{ color: meta.color }}>{meta.name}</span>
                                         <span>·</span>
-                                        <span>{formatContext(model.context_length)}</span>
+                                        <span>{formatContext(model.contextLength)}</span>
                                         <span>·</span>
-                                        {/* llama.cpp is free/local — never render a $0.00 price as if metered. */}
-                                        <span>{isLlamaCppModel(model.id) ? 'local' : formatPrice(model.pricing.prompt)}</span>
-                                        {isGoRow && (
+                                        {/* A local model is free — never render $0.00 as if metered. */}
+                                        <span>{model.provider === 'llamacpp' ? 'local' : formatModelPrice(model.pricing)}</span>
+                                        {formatMonthlyLimit(model) && (
                                           <>
                                             <span>·</span>
-                                            <span>{formatOpencodeGoMonthlyLimit(model)}</span>
+                                            <span>{formatMonthlyLimit(model)}</span>
                                           </>
                                         )}
-                                        {(model as { loaded?: boolean }).loaded === true && (
+                                        {thinking && (
+                                          <>
+                                            <span>·</span>
+                                            <span title="Thinking levels this model offers">{thinking}</span>
+                                          </>
+                                        )}
+                                        {model.llamacpp?.loaded === true && (
                                           <>
                                             <span>·</span>
                                             <span style={{ color: 'var(--success)', fontWeight: 600 }}>Loaded</span>
@@ -1255,10 +1298,10 @@ export function ModelSelectorCore({
                                   </div>
                                 </button>
                               );
-                              if (!showGoSubheader) return row;
+                              if (!showSubheader) return row;
                               return (
                                 <React.Fragment key={model.id}>
-                                  <OpencodeGoSettingsSubheader key="go-subheader" count={premiumGoCount} />
+                                  <ProviderSubheader key={`${rowGroup}-subheader`} group={rowGroup} count={subheaderCount} />
                                   {row}
                                 </React.Fragment>
                               );
@@ -1268,18 +1311,23 @@ export function ModelSelectorCore({
                       </div>
                     );
                   })}
-                  {showGoStandaloneSettings && (
-                    <div style={{ padding: '12px 0', borderTop: '1px solid var(--border)' }}>
-                      <OpencodeGoSettingsSubheader count={goVisibleCount} />
-                      {opencodeGoLoading && !opencodeGoError ? (
-                        <OpencodeGoSkeleton rowHeight={65} rowPadding="12px 16px" />
-                      ) : showGoError && opencodeGoError ? (
-                        <OpencodeGoErrorHint error={opencodeGoError} onRetry={retryOpencodeGo} />
+                  {settingsSections.map((section) => (
+                    <div key={section.group} style={{ padding: '12px 0', borderTop: '1px solid var(--border)' }}>
+                      <ProviderSubheader group={section.group} count={0} />
+                      {section.kind === 'skeleton' ? (
+                        <ProviderSkeleton label={section.label} rowHeight={65} rowPadding="12px 16px" />
+                      ) : section.kind === 'hint' ? (
+                        <ProviderStateHint
+                          label={section.label}
+                          state={section.state}
+                          message={section.message}
+                          onRetry={refresh}
+                        />
                       ) : (
-                        <OpencodeGoEmptyResults onClear={clearSearch} />
+                        <EmptySearchResults label={section.label} onClear={clearSearch} />
                       )}
                     </div>
-                  )}
+                  ))}
                 </>
               )}
             </div>
@@ -1303,16 +1351,16 @@ export function ModelSelectorCore({
           outline: 2px solid var(--accent);
           outline-offset: 2px;
         }
-        .opencode-go-skeleton-bar {
+        .model-skeleton-bar {
           background: linear-gradient(90deg, var(--bg-surface) 25%, var(--bg-hover) 50%, var(--bg-surface) 75%);
           background-size: 200% 100%;
-          animation: opencode-go-skeleton-shimmer 1.4s ease-in-out infinite;
+          animation: model-skeleton-shimmer 1.4s ease-in-out infinite;
         }
-        @keyframes opencode-go-skeleton-shimmer {
+        @keyframes model-skeleton-shimmer {
           to { background-position: -200% 0; }
         }
         @media (prefers-reduced-motion: reduce) {
-          .opencode-go-skeleton-bar {
+          .model-skeleton-bar {
             animation: none;
           }
         }
