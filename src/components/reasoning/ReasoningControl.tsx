@@ -6,7 +6,6 @@
  * mobile sheet), the agent editor and the general chat settings.
  */
 import { useId, useMemo, useRef, type KeyboardEvent } from 'react';
-import { motion, useReducedMotion } from 'framer-motion';
 import {
   planReasoning,
   type ReasoningCapability,
@@ -118,7 +117,6 @@ export function ReasoningControl({
           selected={selected}
           defaultLevel={capability.defaultLevel}
           onSelect={setLevel}
-          variant={variant}
           labelledBy={titleId}
         />
       )}
@@ -151,7 +149,6 @@ interface DepthLadderProps {
   selected: ReasoningLevel | null;
   defaultLevel: ReasoningLevel | null;
   onSelect: (level: ReasoningLevel) => void;
-  variant: 'compact' | 'full';
   labelledBy: string;
 }
 
@@ -160,9 +157,7 @@ interface DepthLadderProps {
  * height encodes its canonical depth, so "High" reads as high even when the
  * model only offers two rungs. The selection indicator slides between rungs.
  */
-function DepthLadder({ levels, selected, defaultLevel, onSelect, variant, labelledBy }: DepthLadderProps) {
-  const reduceMotion = useReducedMotion();
-  const indicatorId = useId();
+function DepthLadder({ levels, selected, defaultLevel, onSelect, labelledBy }: DepthLadderProps) {
   const refs = useRef<Array<HTMLButtonElement | null>>([]);
   const focusIndex = selected ? Math.max(levels.indexOf(selected), 0) : 0;
 
@@ -180,6 +175,8 @@ function DepthLadder({ levels, selected, defaultLevel, onSelect, variant, labell
     onSelect(levels[next]);
   };
 
+  const selectedIndex = selected ? levels.indexOf(selected) : -1;
+
   return (
     <div
       className="reasoning-ladder"
@@ -187,8 +184,17 @@ function DepthLadder({ levels, selected, defaultLevel, onSelect, variant, labell
       data-rungs={levels.length}
       aria-labelledby={labelledBy}
       onKeyDown={onKeyDown}
-      style={{ gridTemplateColumns: `repeat(${levels.length}, minmax(0, 1fr))` }}
+      style={{
+        gridTemplateColumns: `repeat(${levels.length}, minmax(0, 1fr))`,
+        // Drive the indicator from CSS custom properties: one element, a plain
+        // transform, no shared-layout projection. A `layoutId` here used to
+        // keep a parent `AnimatePresence` (the mobile sheet) from ever
+        // completing its exit, which left its scrim swallowing every tap.
+        ['--rungs' as string]: String(levels.length),
+        ['--rung-index' as string]: String(Math.max(selectedIndex, 0)),
+      }}
     >
+      {selectedIndex >= 0 && <span className="reasoning-ladder__indicator" aria-hidden="true" />}
       {levels.map((level, index) => {
         const isSelected = level === selected;
         const copy = REASONING_LEVEL_COPY[level];
@@ -204,13 +210,6 @@ function DepthLadder({ levels, selected, defaultLevel, onSelect, variant, labell
             onClick={() => onSelect(level)}
             title={level === defaultLevel ? `${copy.label} (model default)` : copy.label}
           >
-            {isSelected && (
-              <motion.span
-                layoutId={indicatorId}
-                className="reasoning-rung__indicator"
-                transition={reduceMotion ? { duration: 0 } : { type: 'spring', stiffness: 520, damping: 38 }}
-              />
-            )}
             <span className="reasoning-rung__bar" aria-hidden="true">
               <span style={{ height: `${(RANK[level] / REASONING_EFFORT_ORDER.length) * 100}%` }} />
             </span>

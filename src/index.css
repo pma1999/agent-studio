@@ -4371,12 +4371,32 @@ button:focus-visible .conv-delete-btn {
 }
 
 .reasoning-ladder {
+  position: relative;
   display: grid;
   gap: 4px;
   padding: 4px;
   background: var(--surface-inset);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
+}
+/*
+ * One indicator for the whole ladder, slid with a plain transform from
+ * `--rung-index`. Deliberately not a framer-motion shared-layout element: a
+ * `layoutId` inside the mobile sheet stopped its `AnimatePresence` exit from
+ * completing, leaving the scrim mounted and swallowing every tap.
+ */
+.reasoning-ladder__indicator {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: 4px;
+  width: calc((100% - 8px - (var(--rungs) - 1) * 4px) / var(--rungs));
+  transform: translateX(calc(var(--rung-index) * (100% + 4px)));
+  background: var(--accent-soft);
+  border: 1px solid var(--border-accent);
+  border-radius: var(--radius-sm);
+  pointer-events: none;
+  transition: transform var(--transition-base);
 }
 .reasoning-rung {
   position: relative;
@@ -4412,13 +4432,6 @@ button:focus-visible .conv-delete-btn {
 .reasoning-rung:focus-visible {
   outline: none;
   box-shadow: var(--shadow-focus);
-}
-.reasoning-rung__indicator {
-  position: absolute;
-  inset: 0;
-  background: var(--accent-soft);
-  border: 1px solid var(--border-accent);
-  border-radius: var(--radius-sm);
 }
 .reasoning-rung__bar {
   position: relative;
@@ -4527,6 +4540,7 @@ button:focus-visible .conv-delete-btn {
 }
 @media (prefers-reduced-motion: reduce) {
   .reasoning-skeleton { animation: none; }
+  .reasoning-ladder__indicator { transition: none; }
   .reasoning-switch__knob,
   .reasoning-rung,
   .reasoning-rung__bar > span { transition: none; }

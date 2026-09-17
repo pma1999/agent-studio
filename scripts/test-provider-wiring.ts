@@ -296,6 +296,17 @@ ok('every surface renders the same thinking control from the capability', () => 
   }
 });
 
+ok('the thinking control animates without shared-layout projection', () => {
+  // Regression: the depth ladder used a framer-motion `layoutId`. Inside the
+  // mobile options sheet that stopped the sheet's `AnimatePresence` from ever
+  // completing its exit, so its scrim stayed mounted over the whole app and
+  // swallowed every tap after closing. The indicator slides from CSS instead.
+  const control = read('src/components/reasoning/ReasoningControl.tsx');
+  assert.doesNotMatch(control, /layoutId=/);
+  assert.doesNotMatch(control, /from 'framer-motion'/);
+  assert.match(control, /reasoning-ladder__indicator/);
+});
+
 ok('provider UI facts live in one table', () => {
   assert.match(providersUiSource, /export const PROVIDER_UI/);
   for (const provider of ['deepseek', 'codex', 'abliteration', 'arnict', "'opencode-go'", 'llamacpp']) {
